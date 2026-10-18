@@ -1,5 +1,7 @@
 import { PoolConnection } from 'mysql2/promise'
 import pool from '@shared/db/connection'
+import { lockInstitutionCounters } from '@shared/db/counters'
+import { assertNoActiveSyncKey } from '@shared/sync-key'
 import { HttpError } from '@shared/errors/http-error'
 import { CategoryRow } from './categories.interface'
 import { parentIdFromPath } from '@shared/tree-path'
@@ -93,6 +95,10 @@ export async function insertCategory(
   const conn  = await pool.getConnection()
   try {
     await conn.beginTransaction()
+    // PADROES §9 regra 7 (quem cunha por MAX+1 trava a institution ANTES) + reconferência da chave do sincronizador depois da trava — o
+    // ato de religar segura a mesma trava (gate socrático da Rodada 6 de produtos; tb_category é ID LOCAL do legado)
+    await lockInstitutionCounters(conn, institutionId)
+    await assertNoActiveSyncKey(conn, institutionId)
 
     const parentPath = input.parentId != null
       ? await lockParent(conn, table, institutionId, input.parentId, input.kind)

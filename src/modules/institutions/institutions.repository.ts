@@ -4,6 +4,9 @@ import { ListQuery, PagedRows, SearchCriterion, escapeLike } from '@shared/list'
 import { entityRoleSearchCriteria, roleStatusSearchCriteria, saveEntityFiscalChain, getEntityFiscalFull } from '@shared/entity'
 import { SETES_INSTITUTION_ID, SETES_SCHEMA } from '@shared/auth/roles'
 import { assertSchema } from '@shared/db/schema'
+import { lockInstitutionCounters } from '@shared/db/counters'
+import { WebBornRows, webBornSince } from '@shared/sync-key'
+import { ensureDefaultCategory } from '@shared/category-kind'
 import {
   InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
 } from './institutions.interface'
@@ -85,6 +88,15 @@ export async function schemaNameExists(schemaName: string): Promise<boolean> {
     [schemaName]
   )
   return rows.length > 0
+}
+
+/** schema do estabelecimento vivo (null = inexistente) — o ato de ligar/desligar o sincronizador escreve no schema dele. */
+export async function getInstitutionSchema(id: number): Promise<string | null> {
+  const [rows] = await pool.query<any[]>(
+    "SELECT schema_name AS schemaName FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'",
+    [id]
+  )
+  return rows[0]?.schemaName ?? null
 }
 
 export async function institutionExists(id: number): Promise<boolean> {
@@ -222,6 +234,8 @@ export async function insertDefaultFlags(institutionId: number): Promise<void> {
   // 'services'/'price-lists' desde 2026-09-01 (prompt_modulo_services.md):
   // gate técnico — a liberação comercial é por interface (D3: só cliente
   // sem legado); seed 42 cobre as institutions retroativas.
+  // 'merchandise' desde 2026-10-18 (prompt_modulo_products.md §16 — cadastro de produtos/mercadoria, onda 1): mesma regra da liberação
+  // comercial (D-PR14); seed 66 cobre as institutions retroativas.
   const defaultModules = [
     'core', 'users', 'customers', 'collaborators', 'salesmen', 'carriers',
     'providers', 'categories', 'financial-plans', 'tax-rules',
@@ -230,7 +244,7 @@ export async function insertDefaultFlags(institutionId: number): Promise<void> {
     'service-orders', 'settlements', 'modules', 'cashier', 'orders',
     'order-returns', 'establishment', 'services', 'price-lists',
     'service-tax-rules', 'settlement-rules', 'bank-slips',
-    'bank-charge-agreements', 'checks',
+    'bank-charge-agreements', 'checks', 'merchandise',
   ]
   const conn = await pool.getConnection()
   try {
@@ -309,6 +323,72 @@ export async function getSyncApiKey(institutionId: number): Promise<SyncApiKeyRo
     [institutionId]
   )
   return rows[0] ?? null
+}
+
+/** Desfecho do ato de ligar/desligar o sincronizador (D-PR43 + Rodada 6 de produtos). */
+export type SyncKeySwitchOutcome =
+  | { kind: 'missing' }
+  | { kind: 'unchanged' }
+  | { kind: 'switched'; defaultServiceCategoryId: number | null }
+  | { kind: 'web-rows'; since: Date; rows: WebBornRows[] }
+
+/**
+ * Liga/desliga a chave VIVA do estabelecimento NUMA transação (D-PR43; Q-PR47 (a) e Q-PR49 (a) da Rodada 6) — nunca apaga (PADROES §3.1):
+ *  - 1º statement: a trava da institution (PADROES §9 regra 7) — serializa com quem cunha id de produto e com outro ato de ligar/desligar;
+ *    depois as chaves vivas `FOR UPDATE` (locking read: o snapshot do REPEATABLE READ ainda não nasceu).
+ *  - estado já é o pedido → nada muda (o `updated_at` da chave desligada é o INSTANTE do desligamento que o religar confere — repetir o
+ *    'N' não pode empurrá-lo para a frente e esconder o que a web criou no período).
+ *  - DESLIGAR: o instante do desligamento é UM `NOW()` lido uma vez (T); cria "Serviços" (kind S) se não houver categoria S viva (peça
+ *    `@shared/category-kind`) com `created_at` = T − 1 s, e grava a chave com `updated_at` = T — a categoria do próprio ato nunca conta
+ *    como "nascida na web" no religar (que confere `>=` T).
+ *  - RELIGAR: confere o que NASCEU nas tabelas do legado (`webBornSince`, leitura consistente depois das travas) desde o desligamento —
+ *    havendo, desfaz e devolve as linhas (o serviço responde 409).
+ * Sem `updated_at` (chave desligada por SQL manual), o instante é o `created_at` da chave; sem os dois, a época — o religar só passa se a
+ * web nunca criou nada ali (falha fechado).
+ */
+export async function switchSyncApiKeyTx(
+  institutionId: number, schemaName: string, active: 'S' | 'N'
+): Promise<SyncKeySwitchOutcome> {
+  const s = assertSchema(schemaName)
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    await lockInstitutionCounters(conn, institutionId)
+    const [keys] = await conn.query<any[]>(
+      `SELECT id, active, created_at AS createdAt, updated_at AS updatedAt
+         FROM setes_central.tb_sync_api_key
+        WHERE tb_institution_id = ? AND deleted = 'N' FOR UPDATE`,
+      [institutionId])
+    if ((keys as any[]).length === 0) { await conn.rollback(); return { kind: 'missing' } }
+    const toFlip = (keys as any[]).filter(k => k.active !== active)
+    if (toFlip.length === 0) { await conn.rollback(); return { kind: 'unchanged' } }
+
+    let defaultServiceCategoryId: number | null = null
+    let at: Date | null = null
+    if (active === 'N') {
+      const [[{ now }]] = await conn.query<any[]>('SELECT NOW() AS now') as any
+      at = new Date(now)
+      defaultServiceCategoryId = await ensureDefaultCategory(conn, s, institutionId, 'S', new Date(at.getTime() - 1000))
+    } else {
+      const since = new Date(Math.min(...toFlip.map(k => {
+        const at = k.updatedAt ?? k.createdAt
+        return at ? new Date(at).getTime() : 0
+      })))
+      const rows = await webBornSince(conn, s, institutionId, since)
+      if (rows.length > 0) { await conn.rollback(); return { kind: 'web-rows', since, rows } }
+    }
+    await conn.query(
+      `UPDATE setes_central.tb_sync_api_key SET active = ?, updated_at = COALESCE(?, NOW())
+        WHERE tb_institution_id = ? AND deleted = 'N' AND active <> ?`,
+      [active, at, institutionId, active])
+    await conn.commit()
+    return { kind: 'switched', defaultServiceCategoryId }
+  } catch (err) {
+    await conn.rollback()
+    throw err
+  } finally {
+    conn.release()
+  }
 }
 
 /** Uma chave por estabelecimento; id sem auto_increment → MAX+1 na transação. */

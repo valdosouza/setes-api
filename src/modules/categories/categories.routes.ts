@@ -4,7 +4,8 @@ import * as controller from './categories.controller'
 /**
  * Rotas do módulo categories — montadas em /api/categories pelo gateway.
  * Cadastro de CLIENTE (sem superGuard — escopo por institution do JWT);
- * gate técnico = flag 'categories'.
+ * gate técnico = flag 'categories'. Com sincronizador ativo a escrita é recusada
+ * no gateway (`syncWriteGuard` — D-PR41 revista, Rodada 6 de produtos).
  * Espelho no app: apps/web/lib/app/modules/categories/categories_module.dart
  */
 const router = Router()
@@ -57,6 +58,7 @@ const router = Router()
  *       201: { description: 'Envelope { ok, data: { id } }' }
  *       400: { description: 'Validação (pai inexistente / de outro kind)' }
  *       401: { description: Não autenticado }
+ *       409: { description: 'SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: as categorias vêm do legado e na web são só consulta (D-PR41 revista)' }
  *       500: { description: Erro interno }
  */
 router.get('/', controller.list)
@@ -110,6 +112,7 @@ router.post('/', controller.create)
  *       400: { description: 'Validação (ciclo / pai inexistente / outro kind)' }
  *       401: { description: Não autenticado }
  *       404: { description: Categoria não encontrada }
+ *       409: { description: 'SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: as categorias vêm do legado e na web são só consulta (D-PR41 revista)' }
  *       500: { description: Erro interno }
  *   delete:
  *     summary: Exclui logicamente uma categoria (bloqueado se houver subníveis)
@@ -125,7 +128,7 @@ router.post('/', controller.create)
  *       200: { description: 'Envelope { ok }' }
  *       401: { description: Não autenticado }
  *       404: { description: Categoria não encontrada }
- *       409: { description: 'Categoria possui subníveis — excluir os filhos primeiro' }
+ *       409: { description: 'HAS_CHILDREN — categoria possui subníveis (excluir os filhos primeiro); SYNC_MANAGED_CATALOG — sincronizador ativo (só consulta)' }
  *       500: { description: Erro interno }
  */
 router.get('/:id', controller.getById)

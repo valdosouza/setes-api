@@ -1,4 +1,5 @@
 import { HttpError } from '@shared/errors/http-error'
+import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { todayFor } from '@shared/time-zone'
 import {
   CodeLookupRow, listNbsLookup, listClassificationsLookup, listPlaceIndicatorsLookup,
@@ -50,16 +51,22 @@ export async function fetchService(
   return service
 }
 
+/** D-PR2: quem cunha id / troca código reexecuta a transação em deadlock (o faturamento trava `tb_service_ibscbs` e depois a
+ *  institution; o create trava a institution e depois grava `tb_service_ibscbs` — o ciclo cai num dos dois e a vítima repete). */
+const RETRIES = 3
+
 export async function createService(
   input: ServiceInput, scope: ServiceScope
 ): Promise<number> {
-  return insertService(input, scope.schemaName, scope.institutionId, scope.userId ?? null)
+  return withDeadlockRetry('services POST', { institutionId: scope.institutionId }, RETRIES,
+    () => insertService(input, scope.schemaName, scope.institutionId, scope.userId ?? null))
 }
 
 export async function editService(
   id: number, input: ServiceInput, scope: ServiceScope
 ): Promise<void> {
-  const found = await updateService(id, input, scope.schemaName, scope.institutionId, scope.userId ?? null)
+  const found = await withDeadlockRetry('services PUT', { institutionId: scope.institutionId, id }, RETRIES,
+    () => updateService(id, input, scope.schemaName, scope.institutionId, scope.userId ?? null))
   if (!found) throw new HttpError(404, `Serviço ${id} não encontrado`)
 }
 
@@ -73,6 +80,9 @@ export async function removeService(
 export async function fetchCategoriesLookup(
   filter: string, scope: ServiceScope
 ): Promise<ServiceLookupRow[]> {
+  // Q-PR49 (a) (Rodada 6 de produtos): pelo FATO — só kind 'S' quando o estabelecimento tem categoria S viva; senão as P (o legado não
+  // marca categoria de serviço). Substitui a regra pelo MODO (ter chave do sincronizador) da D-PR41 original: com a guarda da D-PR41
+  // revista o sincronizado nem cria serviço na web, e desligar a chave já não esvazia a lista (o ato cria "Serviços").
   return listCategoriesLookup(filter, scope.schemaName, scope.institutionId)
 }
 

@@ -227,3 +227,13 @@ export interface TaxRuleMatchCriteria {
   cfopId?: string | null        // natureza escolhida (ajuste) → força purpose '0'
   directRuleId?: number | null  // escolha POR ITEM (modo RegraDireta — Q16/Q19)
 }
+
+/**
+ * Domínios do FATO DO BEM que o seletor da regra casa (cadastro de produtos, onda 1 — `prompt_modulo_products.md` §3/§16.3):
+ * origem da mercadoria (tabela A do CST, 0–8) e finalidade (0–7; 0 = Outras/ajuste). Uma fonte só para o seletor da regra
+ * (tax-rules) e para a ficha da mercadoria (merchandise) — o motor casa `r.origin`/`r.purpose` com os valores do produto.
+ */
+export const TAX_RULE_ORIGINS  = ['0', '1', '2', '3', '4', '5', '6', '7', '8'] as const
+export const TAX_RULE_PURPOSES = ['0', '1', '2', '3', '4', '5', '6', '7'] as const
+export type TaxRuleOrigin  = typeof TAX_RULE_ORIGINS[number]
+export type TaxRulePurpose = typeof TAX_RULE_PURPOSES[number]

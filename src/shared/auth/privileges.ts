@@ -22,3 +22,7 @@ export const PRIVILEGE_DESCONTO   = 8
  *  `POST /api/billing/transmit` pelo ramo do pedido). Separado de FATURAR, como o
  *  legado separava AUTORIZAR. */
 export const PRIVILEGE_TRANSMITIR = 9
+/** Criar item no catálogo CENTRAL compartilhado entre clientes — marca, unidade, embalagem (D-PR33 do cadastro de produtos, Valdo
+ *  2026-10-18; seed sql/66: privilégio 10 na interface `merchandise`). O 1º criador fixa a descrição para todos (imutável) — por isso
+ *  ato próprio, não o INSERIR da tela. */
+export const PRIVILEGE_CATALOGAR = 10

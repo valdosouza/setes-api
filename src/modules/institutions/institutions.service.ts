@@ -1,7 +1,10 @@
 import crypto from 'crypto'
+import { ErrorCodes } from '@shared/errors/error-codes'
 import { HttpError } from '@shared/errors/http-error'
 import { ListQuery, PagedRows, PublicSearchCriterion, publicCriteria } from '@shared/list'
 import logger from '@shared/logger/logger'
+import { WebBornRows } from '@shared/sync-key'
+import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { runMigrationsForSchema } from '../../migrations/runner'
 import {
   InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
@@ -16,7 +19,7 @@ import {
   insertInstitutionCascade, updateInstitutionCascade,
   setInstitutionActive, deleteInstitution, insertDefaultFlags,
   grantStructuralInterfaces,
-  getSyncApiKey, insertSyncApiKey,
+  getSyncApiKey, insertSyncApiKey, switchSyncApiKeyTx, getInstitutionSchema,
   INSTITUTION_SEARCH_CRITERIA,
 } from './institutions.repository'
 
@@ -171,4 +174,58 @@ export async function generateSyncApiKey(id: number): Promise<SyncApiKeyRow> {
   await insertSyncApiKey(id, apiKey, establishmentCode)
   logger.info('Chave de sincronização gerada', { institutionId: id, establishmentCode })
   return { apiKey, establishmentCode, active: 'S' }
+}
+
+/** Frase do aviso ao desligar (Q-PR46 (a), Rodada 6 de produtos — procedimento: parar o sincronizador ANTES). */
+export const SYNC_OFF_NOTICE =
+  'Pare o sincronizador do cliente ANTES de desligar a chave: o setes-sync aceita a chave por até 5 min (cache) e o que ele gravar '
+  + 'nesse intervalo pode contar como nascido na web — e impedir religar.'
+
+const WEB_BORN_LABEL: Record<WebBornRows['table'], string> = {
+  tb_product: 'produto(s)/serviço(s)', tb_price_list: 'tabela(s) de preço', tb_category: 'categoria(s)',
+}
+
+/**
+ * D-PR43 (Valdo 2026-10-18): a opção de DESATIVAR o sincronizador do estabelecimento — o caminho de saída do legado. Com a chave
+ * desligada o setes-sync recusa o envio (401 — em até 5 min, pelo cache dele) e a guarda da D-PR32 libera NA HORA a escrita dos
+ * cadastros na web. Rodada 6 de produtos:
+ *  - desligar devolve o AVISO do procedimento (Q-PR46 (a)) e cria "Serviços" se o estabelecimento não tem categoria S viva (Q-PR49 (a));
+ *  - religar devolve a MESMA chave, mas é RECUSADO (409 SYNC_KEY_WEB_ROWS) quando nasceu produto/serviço, tabela de preço ou categoria
+ *    na web desde o desligamento — o legado as sobrescreveria sem aviso (Q-PR47 (a)); o que o legado tentou enviar no período ficou
+ *    ESTACIONADO no sincronizador (D-SY13 do grupo do sync).
+ * Repetir o estado atual não muda nada. Nunca apaga (PADROES §3.1); o ato fica no log com o autor (Q-PR48 (a)).
+ */
+export async function switchSyncApiKey(
+  id: number, active: 'S' | 'N', actorUserId: number | null
+): Promise<SyncApiKeyRow & { notice?: string; defaultServiceCategoryId?: number | null }> {
+  const schemaName = await getInstitutionSchema(id)
+  if (!schemaName) throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
+  // cunha id de categoria por MAX+1 (o "Serviços" do desligar) — reexecuta em deadlock como os outros cunhadores (D-PR2); o ato é idempotente
+  const outcome = await withDeadlockRetry('institutions sync-api-key/active PUT', { institutionId: id }, 3,
+    () => switchSyncApiKeyTx(id, schemaName, active))
+  if (outcome.kind === 'missing') {
+    throw new HttpError(404, 'Este estabelecimento não tem chave de sincronização', [{ field: 'active', message: 'sem chave gerada' }],
+      ErrorCodes.SYNC_KEY_MISSING)
+  }
+  if (outcome.kind === 'web-rows') {
+    const summary = outcome.rows
+      .map(r => `${r.count} ${WEB_BORN_LABEL[r.table]} (id ${r.ids.join(', ')}${r.count > r.ids.length ? ', …' : ''})`)
+      .join('; ')
+    logger.warn('Religar o sincronizador RECUSADO — nasceram linhas na web desde o desligamento', {
+      institutionId: id, actorUserId, since: outcome.since.toISOString(),
+      rows: outcome.rows.map(r => ({ table: r.table, count: r.count })),
+    })
+    throw new HttpError(409,
+      `Não dá para religar o sincronizador: desde o desligamento nasceram na web ${summary} — o legado os sobrescreveria sem aviso`,
+      [{ field: 'active', message: summary }], ErrorCodes.SYNC_KEY_WEB_ROWS)
+  }
+  if (outcome.kind === 'switched') {
+    logger.info(active === 'N' ? 'Sincronizador DESATIVADO' : 'Sincronizador reativado', { institutionId: id, actorUserId })
+  }
+  const row = (await getSyncApiKey(id))!
+  if (active === 'S') return row
+  return {
+    ...row, notice: SYNC_OFF_NOTICE,
+    defaultServiceCategoryId: outcome.kind === 'switched' ? outcome.defaultServiceCategoryId : null,
+  }
 }

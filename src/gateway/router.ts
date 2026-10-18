@@ -41,9 +41,11 @@ import modulesRoutes from '@modules/modules/modules.routes'
 import establishmentRoutes from '@modules/establishment/establishment.routes'
 import servicesRoutes from '@modules/services/services.routes'
 import priceListsRoutes from '@modules/price-lists/price-lists.routes'
+import merchandiseRoutes from '@modules/merchandise/merchandise.routes'
 import serviceTaxRulesRoutes from '@modules/service-tax-rules/service-tax-rules.routes'
 import { superGuard, superWriteGuard } from './super.guard'
 import { adminGuard } from './admin.guard'
+import { syncWriteGuard } from './sync-write.guard'
 
 const router = Router()
 
@@ -146,7 +148,9 @@ router.use('/billing', billingRoutes)
 
 // Categorias de produtos/serviços (2026-07-18): cadastro de CLIENTE — sem
 // superGuard; escopo por institution no service; flag 'categories'.
-router.use('/categories', categoriesRoutes)
+// syncWriteGuard (D-PR41 revista, Rodada 6 de produtos): o legado alimenta tb_category (grupos/subgrupos) e o id MAX+1 da web
+// cairia no espaço do gerador dele — com sincronizador ativo, só consulta.
+router.use('/categories', syncWriteGuard, categoriesRoutes)
 
 // Plano de contas (2026-07-18): 2º cadastro em ÁRVORE — mesmo desenho do
 // categories; escopo por institution no service; flag 'financial-plans'.
@@ -194,8 +198,15 @@ router.use('/checks', checksRoutes)
 // kind='S' fixo + grade de preços tb_price; tela irmã do futuro cadastro
 // de produtos (D5/D6); flag 'services'. Tabelas de Preço = módulo próprio
 // (D7); flag 'price-lists'.
-router.use('/services', servicesRoutes)
-router.use('/price-lists', priceListsRoutes)
+// syncWriteGuard (D-PR41 revista, Valdo 2026-10-18: "aplicar mesma regra do mercadoria para o serviço... já que compartilham a mesma
+// base de dados"): o serviço cunha id no MESMO espaço de tb_product que o legado (id = PRO_CODIGO) e a tabela de preço no espaço de
+// tb_price_list — com sincronizador ativo os dois cadastros são só consulta na web.
+router.use('/services', syncWriteGuard, servicesRoutes)
+router.use('/price-lists', syncWriteGuard, priceListsRoutes)
+// Produtos (MERCADORIA) — prompt_modulo_products.md §16, onda 1 (2026-10-18): tb_product kind P/M + tb_merchandise + unidades de
+// venda (071); tela irmã de Serviços (D6); nome = a tabela (D-PR3); flag 'merchandise'; liberação só sem legado (D-PR14) — com o gate
+// TÉCNICO da D-PR32: institution com sincronizador ativo só CONSULTA (escrita = 409 SYNC_MANAGED_CATALOG).
+router.use('/merchandise', syncWriteGuard, merchandiseRoutes)
 // Regra de Tributacao de SERVICO (ISS) — prompt_regra_tributacao_servico.md
 // D1-D14: cidade de incidencia x item LC 116 -> aliquota + codigo municipal;
 // caminho individual do servico (nada de @shared/tax-rule); flag 'service-tax-rules'.

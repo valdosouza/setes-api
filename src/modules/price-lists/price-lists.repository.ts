@@ -1,4 +1,6 @@
 import pool from '@shared/db/connection'
+import { lockInstitutionCounters } from '@shared/db/counters'
+import { assertNoActiveSyncKey } from '@shared/sync-key'
 import { assertSchemaName } from '@shared/field-config'
 import { ListQuery, PagedRows, SearchCriterion, escapeLike } from '@shared/list'
 import { PriceListRow, PriceListInput } from './price-lists.interface'
@@ -75,6 +77,10 @@ export async function insertPriceList(
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
+    // PADROES §9 regra 7 + reconferência da chave do sincronizador depois da trava (gate socrático da Rodada 6 de produtos; tb_price_list
+    // é ID LOCAL do legado — o ato de religar segura a mesma trava)
+    await lockInstitutionCounters(conn, institutionId)
+    await assertNoActiveSyncKey(conn, institutionId)
     const [mx] = await conn.query<any[]>(
       `SELECT COALESCE(MAX(id), 0) + 1 AS nextId
          FROM \`${schemaName}\`.tb_price_list

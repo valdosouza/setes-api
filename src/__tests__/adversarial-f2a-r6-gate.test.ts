@@ -91,11 +91,14 @@ describe('1 — D-F162: o runner do MAIN (árvore viva) e o da F2a diante da lá
   })
 
   it('[RESISTIU] o código da F2a (mesmo renumerado depois do main andar) RECUSA subir sobre a lápide sentinela e não executa nada', async () => {
-    for (const f2aFile of ['069_f2a_fiscal_passivo.sql', '071_f2a_fiscal_passivo.sql']) {
+    // o número da renumeração é o próximo LIVRE do diretório real (era '071' fixo — a 071 da onda 1 de produtos, 2026-10-18, ocupou o
+    // número e o teste passou a medir "duas migrations com o mesmo número", não a lápide)
+    const renumbered = String(Math.max(...filesOf(F2A_SQL).map(f => Number(f.version))) + 1).padStart(3, '0')
+    for (const f2aFile of ['069_f2a_fiscal_passivo.sql', `${renumbered}_f2a_fiscal_passivo.sql`]) {
       const mainNext = { [`${nextNumber}_ibscbs_ib2.sql`]: 'SELECT 1;' }
       const extra = f2aFile.startsWith('069') ? {} : mainNext
       const appl = f2aFile.startsWith('069') ? applied : [...applied, { version: nextNumber, name: 'ibscbs_ib2' }]
-      // renumerada = o arquivo 069 da F2a sai do diretório (rebase sobre o main) e entra o 071
+      // renumerada = o arquivo 069 da F2a sai do diretório (rebase sobre o main) e entra o próximo número livre
       const r = await runWith(f2aRunner, F2A_SQL, f2aFile.startsWith('069') ? extra : { ...extra, [f2aFile]: PASSIVO_SQL }, appl,
         f2aFile.startsWith('069') ? [] : ['069_f2a_fiscal_passivo.sql'])
       expect([f2aFile, r.ok, /ABORTADA[\s\S]*F2A-ABORT[\s\S]*D-F153/.test(r.error)]).toEqual([f2aFile, false, true])

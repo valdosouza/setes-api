@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { productPriceInputDto } from '@shared/price'
 
 /**
  * DTO (Zod) do módulo services. Tamanhos espelham o DDL da tb_product
@@ -12,11 +13,6 @@ const sn = z.enum(['S', 'N'])
 const ibscbsDto = z.object({
   classificationCode: z.string().regex(/^\d{6}$/, 'cClassTrib tem 6 dígitos'),
   placeIndicatorCode: z.string().regex(/^\d{6}$/, 'cIndOp tem 6 dígitos'),
-})
-
-const priceDto = z.object({
-  priceListId: z.number().int().positive(),
-  priceTag:    z.number().min(0).nullable(),
 })
 
 export const serviceDto = z.object({
@@ -33,7 +29,7 @@ export const serviceDto = z.object({
   // ausente = não mexe · null = remove (o app antigo que não manda o campo não apaga nada)
   nbs:              z.string().regex(/^\d{9}$/, 'NBS tem 9 dígitos (sem pontos)').nullable().optional(),
   ibscbs:           ibscbsDto.nullable().optional(),
-  prices:           z.array(priceDto).optional().default([])
+  prices:           z.array(productPriceInputDto).optional().default([])
                      .refine(arr => {
                        const ids = arr.map(p => p.priceListId)
                        return new Set(ids).size === ids.length

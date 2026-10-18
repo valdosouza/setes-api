@@ -24,7 +24,8 @@ function conn(stored: { nbs: string | null; c?: string; p?: string }) {
   const c: any = {
     beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
     query: jest.fn(async (sql: string) => {
-      if (/SELECT identifier FROM/.test(sql)) return [[{ identifier: '7' }]]
+      // categoria gravada = a do corpo (1): inalterada não reconfere a natureza (A-PR1 — Q-PR49 (a), Rodada 6 de produtos)
+      if (/SELECT identifier, tb_category_id AS categoryId FROM/.test(sql)) return [[{ identifier: '7', categoryId: 1 }]]
       if (/SELECT 1 FROM/.test(sql)) return [[{ 1: 1 }]]
       if (/SELECT nbs FROM/.test(sql)) return [[{ nbs: stored.nbs }]]
       if (/SELECT classification_code AS c/.test(sql)) return [stored.c ? [{ c: stored.c, p: stored.p }] : []]
@@ -80,6 +81,7 @@ describe('D-IB30 — o salvar reconfere só o que mudou', () => {
     const c: any = {
       beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
       query: jest.fn(async (sql: string) => {
+        if (/tb_sync_api_key/.test(sql)) return [[]]                  // reconferência da chave do sincronizador (Rodada 6): nenhuma ativa
         if (/SELECT 1 FROM/.test(sql)) return [[{ 1: 1 }]]
         if (/MAX\(id\)/.test(sql)) return [[{ nextId: 50 }]]
         return [{ affectedRows: 1 }]

@@ -97,6 +97,7 @@ router.get('/:id', controller.getOne)
  *     responses:
  *       201: { description: "{ ok, data: { id } }" }
  *       400: { description: Validação falhou }
+ *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: a tabela de preço é só consulta (D-PR41 revista)" }
  */
 router.post('/', controller.create)
 
@@ -115,6 +116,7 @@ router.post('/', controller.create)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrada }
+ *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: a tabela de preço é só consulta (D-PR41 revista)" }
  *   delete:
  *     summary: Exclui (soft delete) — preços gravados ficam como histórico
  *     tags: [price-lists]
@@ -127,6 +129,7 @@ router.post('/', controller.create)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrada }
+ *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: a tabela de preço é só consulta (D-PR41 revista)" }
  */
 router.put('/:id', controller.update)
 router.delete('/:id', controller.remove)

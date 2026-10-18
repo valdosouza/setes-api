@@ -6,7 +6,7 @@ export * from './types'
 export { findTaxRule, resolveMatchStateId, resolveEffectiveSt, pickRule } from './match'
 export {
   loadPieces, savePieces, findInvalidCatalogCodes, findInvalidSelectorRefs,
-  crtGroup, icmsMissingCodeForCrt, clearIcmsCodesForRegime,
+  crtGroup, icmsMissingCodeForCrt, clearIcmsCodesForRegime, countTaxRulesForProduct,
 } from './pieces'
 export {
   calcMerchandiseValue, prorateWithResidue,

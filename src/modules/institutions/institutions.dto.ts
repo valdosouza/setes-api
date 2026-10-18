@@ -40,3 +40,9 @@ export const institutionUpdateDto = withFiscalRefinements(institutionBase)
 
 export type InstitutionCreateDto = z.infer<typeof institutionCreateDto>
 export type InstitutionUpdateDto = z.infer<typeof institutionUpdateDto>
+
+/** Interruptor da chave do sincronizador (D-PR43 — Valdo 2026-10-18: "só criar uma opção para desativar"): 'N' = o estabelecimento sai
+ *  do legado (a web volta a escrever os cadastros — D-PR32/D-PR41 revista); 'S' = religa a MESMA chave, recusado se a web criou linha
+ *  nas tabelas do legado no período (Q-PR47 (a)). Limites (grupo do sync, §9.2 do `setes-sync/verificacao-comissao-margem-mercadoria.md`):
+ *  o setes-sync guarda a chave válida em cache por até 5 min (o desligamento avisa: pare o sincronizador ANTES — Q-PR46 (a)). */
+export const syncApiKeyActiveDto = z.object({ active: z.enum(['S', 'N']) })

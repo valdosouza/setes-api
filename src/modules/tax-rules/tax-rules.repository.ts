@@ -307,7 +307,8 @@ export async function listCfopOptions(
   return rows as Array<{ id: string; description: string | null }>
 }
 
-/** Produtos da institution para o critério "produto" (lookup do PRÓPRIO módulo, { id, name }). */
+/** Mercadorias (kind P/M — onda 1 do cadastro de produtos, §4.6: serviço não tem regra de mercadoria) da institution para o critério
+ *  "produto" (lookup do PRÓPRIO módulo, { id, name }). */
 export async function listProductsLookup(
   filter: string, schemaName: string, institutionId: number
 ): Promise<LookupRow[]> {
@@ -316,7 +317,7 @@ export async function listProductsLookup(
   const [rows] = await pool.query<any[]>(
     `SELECT id, description AS name
        FROM \`${s}\`.tb_product
-      WHERE tb_institution_id = ? AND deleted = 'N'
+      WHERE tb_institution_id = ? AND deleted = 'N' AND kind IN ('P', 'M')
         AND (? IS NULL OR description LIKE ? OR identifier LIKE ?)
       ORDER BY description, id
       LIMIT 50`,

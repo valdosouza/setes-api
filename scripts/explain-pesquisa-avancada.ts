@@ -38,6 +38,7 @@ import {
 import { PAYMENT_TYPE_SEARCH_CRITERIA, listLinked } from '../src/modules/payment-types/payment-types.repository'
 import { PRICE_LIST_SEARCH_CRITERIA, listPriceLists } from '../src/modules/price-lists/price-lists.repository'
 import { SERVICE_SEARCH_CRITERIA, listServices } from '../src/modules/services/services.repository'
+import { MERCHANDISE_SEARCH_CRITERIA, listMerchandise } from '../src/modules/merchandise/merchandise.repository'
 import { USER_SEARCH_CRITERIA, listUsers } from '../src/modules/users/users.repository'
 import { CONTRACT_SEARCH_CRITERIA, listContracts } from '../src/modules/contracts/contracts.repository'
 import { TAX_RULE_SEARCH_CRITERIA, listTaxRules } from '../src/modules/tax-rules/tax-rules.repository'
@@ -101,6 +102,9 @@ const TARGETS: Target[] = [
     run: q => listPriceLists(q, SCHEMA, INST), base: [`${SCHEMA}.tb_price_list`] },
   { module: 'services', defs: SERVICE_SEARCH_CRITERIA,
     run: q => listServices(q, SCHEMA, INST), base: [`${SCHEMA}.tb_product`] },
+  // --- cadastro de produtos, onda 1 (prompt_modulo_products.md §16 — D-PR2); a lista lê a 071 (tb_merchandise_trade_unit)
+  { module: 'merchandise', defs: MERCHANDISE_SEARCH_CRITERIA,
+    run: q => listMerchandise(q, SCHEMA, INST), base: [`${SCHEMA}.tb_product`, `${SCHEMA}.tb_merchandise`] },
   { module: 'users', defs: USER_SEARCH_CRITERIA,
     run: q => listUsers(q, INST), base: ['setes_central.tb_user', 'setes_central.tb_institution_has_user'] },
   { module: 'contracts', defs: CONTRACT_SEARCH_CRITERIA,

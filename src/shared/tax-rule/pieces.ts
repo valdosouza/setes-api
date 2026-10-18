@@ -163,12 +163,14 @@ export async function findInvalidSelectorRefs(
   const invalid: { field: string; message: string }[] = []
   if (selector.productId) {
     const [rows] = await pool.query<any[]>(
+      // kind P/M (onda 1 do cadastro de produtos, §4.6): a regra de mercadoria só especializa MERCADORIA — o serviço tem a regra de
+      // ISS dele (tb_service_tax_rule); um id de serviço aqui criaria regra morta.
       `SELECT id FROM \`${s}\`.tb_product
-        WHERE id = ? AND tb_institution_id = ? AND deleted = 'N'`,
+        WHERE id = ? AND tb_institution_id = ? AND deleted = 'N' AND kind IN ('P', 'M')`,
       [selector.productId, institutionId])
     if (!rows[0]) {
       invalid.push({ field: 'selector.productId',
-        message: `Produto ${selector.productId} não existe no estabelecimento` })
+        message: `Mercadoria ${selector.productId} não existe no estabelecimento` })
     }
   }
   if (selector.entityId) {
@@ -285,4 +287,20 @@ export async function clearIcmsCodesForRegime(
         AND i.deleted = 'N' AND i.${column} IS NOT NULL`,
     [institutionId])
   return result.affectedRows ?? 0
+}
+
+/**
+ * Quantas regras de tributação VIVAS especializam o produto (seletor `tb_product_id`) — contagem do cartão "Regras de tributação"
+ * do painel de vínculos da ficha da mercadoria (cadastro de produtos, onda 1 — D-PR25 / §10.5 item 4: o dono do fato conta; o
+ * módulo merchandise só pergunta, nunca lê a tabela da regra direto).
+ */
+export async function countTaxRulesForProduct(
+  schemaName: string, institutionId: number, productId: number
+): Promise<number> {
+  const s = assertSchema(schemaName)
+  const [rows] = await pool.query<any[]>(
+    `SELECT COUNT(*) AS n FROM \`${s}\`.tb_tax_rule
+      WHERE tb_institution_id = ? AND tb_product_id = ? AND deleted = 'N'`,
+    [institutionId, productId])
+  return Number(rows[0]?.n ?? 0)
 }

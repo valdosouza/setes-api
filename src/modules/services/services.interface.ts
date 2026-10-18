@@ -25,6 +25,8 @@ export interface ServicePriceRow {
   priceListId:          number
   priceListDescription: string | null
   priceTag:             number | null
+  /** % de comissão por produto nesta tabela (D-PR9 — @shared/commission); null = a do vendedor. */
+  aliqKickback:         number | null
 }
 
 export interface ServiceFull extends ServiceListRow {
@@ -67,9 +69,11 @@ export interface ServiceIbscbsRow {
 }
 
 export interface ServicePriceInput {
-  priceListId: number
+  priceListId:   number
   /** null = remover o preço desta tabela. */
-  priceTag:    number | null
+  priceTag:      number | null
+  /** D-PR9: ausente = não mexe (app antigo); null = sem comissão própria. */
+  aliqKickback?: number | null
 }
 
 export interface ServiceInput {

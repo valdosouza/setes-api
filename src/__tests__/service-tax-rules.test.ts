@@ -124,9 +124,13 @@ describe('services × regra de serviço (D1 FK literal, D3 tb_service)', () => {
   it('insert do serviço valida a regra e grava tb_service na MESMA transação', async () => {
     const conn = fakeConn()
     conn.query
+      .mockResolvedValueOnce([[{ id: 1 }]])      // lockInstitutionCounters — 1º statement (D-PR2, regra 7 do PADROES §9)
+      .mockResolvedValueOnce([[]])               // reconferência da chave do sincronizador (Rodada 6)
+      .mockResolvedValueOnce([[{ nextId: 9 }]])  // MAX+1 (sem FOR UPDATE)
       .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria
+      .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria serve ao serviço (Q-PR49 (a))
       .mockResolvedValueOnce([[{ 1: 1 }]])       // regra existe (assertRefs)
-      .mockResolvedValueOnce([[{ nextId: 9 }]])  // MAX+1
+      .mockResolvedValueOnce([[]])               // código livre (D-PR7)
       .mockResolvedValueOnce([{}])               // INSERT tb_product
       .mockResolvedValueOnce([{}])               // syncPrices soft-delete
       .mockResolvedValueOnce([{}])               // upsert tb_service
@@ -144,7 +148,11 @@ describe('services × regra de serviço (D1 FK literal, D3 tb_service)', () => {
   it('serviceTaxRuleId inexistente -> 400 fields[serviceTaxRuleId] + rollback', async () => {
     const conn = fakeConn()
     conn.query
+      .mockResolvedValueOnce([[{ id: 1 }]])      // lockInstitutionCounters
+      .mockResolvedValueOnce([[]])               // reconferência da chave do sincronizador (Rodada 6)
+      .mockResolvedValueOnce([[{ nextId: 10 }]]) // MAX+1
       .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria
+      .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria serve ao serviço (Q-PR49 (a))
       .mockResolvedValueOnce([[]])               // regra não achada
     await expect(svcRepo.insertService(
       { description: 'X', categoryId: 1, serviceTaxRuleId: 99 }, 'setes_setes', 1))

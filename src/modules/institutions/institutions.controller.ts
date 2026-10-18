@@ -4,11 +4,11 @@ import { handleError, parseBody, parseId } from '@shared/http/controller-utils'
 import { parseListQuery, pagedEnvelope } from '@shared/list'
 import { findEntityIdByCpf, findEntityIdByCnpj } from '@shared/fiscal/fiscal.repository'
 import { isValidCpf, isValidCnpj, normalizeCpf, normalizeCnpj } from '@shared/validation'
-import { institutionCreateDto, institutionUpdateDto } from './institutions.dto'
+import { institutionCreateDto, institutionUpdateDto, syncApiKeyActiveDto } from './institutions.dto'
 import {
   fetchInstitutions, fetchInstitution, createInstitution,
   editInstitution, removeInstitution,
-  fetchSyncApiKey, generateSyncApiKey,
+  fetchSyncApiKey, generateSyncApiKey, switchSyncApiKey,
   INSTITUTION_SEARCH_CRITERIA, fetchInstitutionSearchCriteria,
 } from './institutions.service'
 
@@ -130,5 +130,17 @@ export async function createSyncKey(req: Request, res: Response): Promise<void> 
     res.status(201).json({ ok: true, data: await generateSyncApiKey(id) })
   } catch (err) {
     handleError(res, err, 'institutions/:id/sync-api-key POST')
+  }
+}
+
+export async function setSyncKeyActive(req: Request, res: Response): Promise<void> {
+  const id = parseId(req, res)
+  if (id === null) return
+  const body = parseBody(syncApiKeyActiveDto, req, res)
+  if (body === null) return
+  try {
+    res.json({ ok: true, data: await switchSyncApiKey(id, body.active, req.institution?.userId ?? null) })
+  } catch (err) {
+    handleError(res, err, 'institutions/:id/sync-api-key/active PUT')
   }
 }

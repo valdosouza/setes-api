@@ -1,8 +1,10 @@
 import { z } from 'zod'
 
-/** Domínios do seletor da regra (origem da mercadoria e finalidade) — reusados pelo critério `options`. */
-export const TAX_RULE_ORIGINS  = ['0', '1', '2', '3', '4', '5', '6', '7', '8'] as const
-export const TAX_RULE_PURPOSES = ['0', '1', '2', '3', '4', '5', '6', '7'] as const
+import { TAX_RULE_ORIGINS, TAX_RULE_PURPOSES } from '@shared/tax-rule'
+
+/** Domínios do seletor da regra (origem da mercadoria e finalidade) — moram na peça `@shared/tax-rule` desde a onda 1 do cadastro de
+ *  produtos (o módulo merchandise usa os MESMOS domínios; módulo nunca importa módulo). Reexportados aqui para os consumidores antigos. */
+export { TAX_RULE_ORIGINS, TAX_RULE_PURPOSES }
 
 /**
  * DTOs do cadastro da Regra de Tributação. PRESENÇA = incidência: peça

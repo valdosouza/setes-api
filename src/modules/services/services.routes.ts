@@ -63,7 +63,8 @@ router.get('/search-criteria', controller.searchCriteria)
  * @swagger
  * /api/services/categories:
  *   get:
- *     summary: Lookup de categorias vivas da institution (form)
+ *     summary: Lookup das categorias que servem ao serviço (form)
+ *     description: "Pelo FATO (Q-PR49 (a)): só as kind S quando o estabelecimento tem alguma categoria S viva; senão as kind P (as do legado). O save aplica o MESMO predicado à categoria que nasce ou muda."
  *     tags: [services]
  *     security: [{ BearerAuth: [] }]
  *     parameters:
@@ -236,7 +237,8 @@ router.get('/:id', controller.getOne)
  *                     priceTag:    { type: number, nullable: true }
  *     responses:
  *       201: { description: "{ ok, data: { id } }" }
- *       400: { description: Validação/FK inexistente }
+ *       400: { description: "Validação/FK inexistente; categoria que não serve ao serviço (fields[categoryId])" }
+ *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: o cadastro de serviços é só consulta (D-PR41 revista)" }
  *       422: { description: "Classificação IBS/CBS inválida (IBSCBS_* em code; campo em fields[])" }
  */
 router.post('/', controller.create)
@@ -256,7 +258,9 @@ router.post('/', controller.create)
  *         schema: { type: integer }
  *     responses:
  *       200: { description: "{ ok }" }
+ *       400: { description: "Validação/FK inexistente; categoria TROCADA que não serve ao serviço (fields[categoryId])" }
  *       404: { description: Não encontrado }
+ *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: o cadastro de serviços é só consulta (D-PR41 revista)" }
  *       422: { description: "Classificação IBS/CBS inválida (IBSCBS_* em code; campo em fields[])" }
  *   delete:
  *     summary: Exclui (soft delete) — usos históricos permanecem
@@ -270,6 +274,7 @@ router.post('/', controller.create)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrado }
+ *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: o cadastro de serviços é só consulta (D-PR41 revista)" }
  */
 router.put('/:id', controller.update)
 router.delete('/:id', controller.remove)

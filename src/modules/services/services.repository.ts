@@ -1,9 +1,13 @@
 import { PoolConnection } from 'mysql2/promise'
 import pool from '@shared/db/connection'
 import { HttpError } from '@shared/errors/http-error'
+import { ErrorCodes } from '@shared/errors/error-codes'
 import { assertSchemaName } from '@shared/field-config'
 import { ListQuery, PagedRows, SearchCriterion, escapeLike } from '@shared/list'
 import { todayFor } from '@shared/time-zone'
+import { allocateProductId, assertIdentifierFree, identifierOrId, lockForIdentifierChange } from '@shared/product-id'
+import { assertPriceListsAlive, listProductPrices, syncProductPrices } from '@shared/price'
+import { serviceCategorySql } from '@shared/category-kind'
 import {
   assertServiceClassification, classificationAcceptance, classificationForDisplay, deriveCst,
   nbsAcceptedSql,
@@ -65,25 +69,11 @@ export async function listServices(
   return { rows, total: Number(count[0].total) }
 }
 
-/** Grade de preços: TODAS as tabelas vivas + o preço atual do serviço. */
+/** Grade de preços: TODAS as tabelas vivas + o preço e a comissão atuais do serviço — peça `@shared/price` (D4/D-PR2/D-PR9). */
 async function listServicePrices(
   serviceId: number, schemaName: string, institutionId: number
 ): Promise<ServicePriceRow[]> {
-  const [rows] = await pool.query<any[]>(
-    `SELECT l.id          AS priceListId,
-            l.description AS priceListDescription,
-            pr.price_tag  AS priceTag
-       FROM \`${schemaName}\`.tb_price_list l
-       LEFT JOIN \`${schemaName}\`.tb_price pr
-         ON pr.tb_price_list_id = l.id
-        AND pr.tb_institution_id = l.tb_institution_id
-        AND pr.tb_product_id = ?
-        AND pr.deleted = 'N'
-      WHERE l.tb_institution_id = ? AND l.deleted = 'N'
-      ORDER BY l.description, l.id`,
-    [serviceId, institutionId]
-  )
-  return rows
+  return listProductPrices(schemaName, institutionId, serviceId)
 }
 
 /** `today` (data do estabelecimento): nome e vigência do cClassTrib vêm da linha que o CADASTRO
@@ -172,7 +162,7 @@ export async function getService(
 /** FKs do form validadas DENTRO da transação — 400 com fields[]. */
 async function assertRefs(
   conn: PoolConnection, input: ServiceInput,
-  schemaName: string, institutionId: number, serviceId: number | null = null
+  schemaName: string, institutionId: number, serviceId: number | null = null, storedCategoryId: number | null = null
 ): Promise<void> {
   const check = async (
     table: string, id: number, field: string, label: string
@@ -188,14 +178,23 @@ async function assertRefs(
     }
   }
   await check('tb_category', input.categoryId, 'categoryId', 'Categoria')
+  // Q-PR38' (a) + Q-PR49 (a): a categoria que NASCE ou MUDA tem de servir ao serviço — o MESMO predicado do lookup (A-PR1: a gravada,
+  // inalterada, não bloqueia editar o resto)
+  if (serviceId === null || input.categoryId !== storedCategoryId) {
+    const [ok] = await conn.query<any[]>(
+      `SELECT 1 FROM \`${schemaName}\`.tb_category c
+        WHERE c.id = ? AND c.tb_institution_id = ? AND c.deleted = 'N' AND ${serviceCategorySql(schemaName, 'c')}`,
+      [input.categoryId, institutionId])
+    if ((ok as any[]).length === 0) {
+      throw new HttpError(400, 'Categoria não é de serviço',
+        [{ field: 'categoryId', message: 'Escolha uma categoria de serviço' }], ErrorCodes.CATEGORY_NOT_FOR_SERVICE)
+    }
+  }
   if (input.financialPlansId != null) {
     await check('tb_financial_plans', input.financialPlansId,
       'financialPlansId', 'Plano financeiro')
   }
-  for (const price of input.prices ?? []) {
-    await check('tb_price_list', price.priceListId,
-      'prices', 'Tabela de preço')
-  }
+  await assertPriceListsAlive(conn, schemaName, institutionId, input.prices ?? [])
   if (input.serviceTaxRuleId != null) {
     await check('tb_service_tax_rule', input.serviceTaxRuleId,
       'serviceTaxRuleId', 'Regra de tributação de serviço')
@@ -305,35 +304,12 @@ async function upsertServiceRule(
   )
 }
 
-/** Grade tb_price na MESMA transação: presença = sincroniza (upsert das
- *  presentes com valor; priceTag null OU ausência da tabela = soft delete). */
+/** Grade tb_price na MESMA transação — peça `@shared/price` (D4 do serviço executada na onda 1 de produtos — D-PR2). */
 async function syncPrices(
   conn: PoolConnection, serviceId: number, input: ServiceInput,
   schemaName: string, institutionId: number
 ): Promise<void> {
-  const withValue = (input.prices ?? []).filter(p => p.priceTag !== null)
-  const keptIds = withValue.map(p => p.priceListId)
-
-  await conn.query(
-    `UPDATE \`${schemaName}\`.tb_price
-        SET deleted = 'S', updated_at = NOW()
-      WHERE tb_institution_id = ? AND tb_product_id = ?
-        ${keptIds.length ? 'AND tb_price_list_id NOT IN (?)' : ''}`,
-    keptIds.length
-      ? [institutionId, serviceId, keptIds]
-      : [institutionId, serviceId]
-  )
-  for (const price of withValue) {
-    await conn.query(
-      `INSERT INTO \`${schemaName}\`.tb_price
-         (tb_institution_id, tb_price_list_id, tb_product_id, price_tag,
-          created_at, updated_at, deleted)
-       VALUES (?, ?, ?, ?, NOW(), NOW(), 'N')
-       ON DUPLICATE KEY UPDATE
-         price_tag = VALUES(price_tag), deleted = 'N', updated_at = NOW()`,
-      [institutionId, price.priceListId, serviceId, price.priceTag]
-    )
-  }
+  await syncProductPrices(conn, schemaName, institutionId, serviceId, input.prices ?? [])
 }
 
 const PRODUCT_FIELDS = (input: ServiceInput) => [
@@ -350,17 +326,14 @@ export async function insertService(
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
+    // D-PR2 (onda 1 de produtos): o id sai da peça `@shared/product-id` — 1º statement da transação (trava da institution pela regra 7
+    // do PADROES §9 e MAX sem next-key lock nas linhas de produto: sem ciclo com o faturamento).
+    const id = await allocateProductId(conn, schemaName, institutionId)
     await assertRefs(conn, input, schemaName, institutionId)
-
-    const [mx] = await conn.query<any[]>(
-      `SELECT COALESCE(MAX(id), 0) + 1 AS nextId
-         FROM \`${schemaName}\`.tb_product
-        WHERE tb_institution_id = ? FOR UPDATE`,
-      [institutionId]
-    )
-    const id = Number(mx[0].nextId)
-    // D1: identifier em branco recebe o próprio id.
-    const identifier = (input.identifier ?? '').trim() || String(id)
+    // D1: identifier em branco recebe o próprio id; D-PR7: único entre P/M/S vivos.
+    const identifier = identifierOrId(input.identifier, id)
+    await assertIdentifierFree(conn, schemaName, institutionId, identifier, null,
+      { automatic: identifier !== (input.identifier ?? '').trim() })
 
     await conn.query(
       `INSERT INTO \`${schemaName}\`.tb_product
@@ -397,7 +370,7 @@ export async function updateService(
 
     // kind='S' no WHERE: este módulo NUNCA edita mercadoria (D5).
     const [rows] = await conn.query<any[]>(
-      `SELECT identifier FROM \`${schemaName}\`.tb_product
+      `SELECT identifier, tb_category_id AS categoryId FROM \`${schemaName}\`.tb_product
         WHERE id = ? AND tb_institution_id = ? AND deleted = 'N'
           AND kind = 'S' FOR UPDATE`,
       [id, institutionId]
@@ -406,8 +379,15 @@ export async function updateService(
       await conn.rollback()
       return false
     }
-    await assertRefs(conn, input, schemaName, institutionId, id)
-    const identifier = (input.identifier ?? '').trim() || String(id)
+    const identifier = identifierOrId(input.identifier, id)
+    if (identifier !== rows[0].identifier) {
+      // D-PR7 + A-PR1: só o código que MUDA é conferido — com o lock da institution antes da 1ª leitura consistente.
+      await lockForIdentifierChange(conn, institutionId)
+      await assertIdentifierFree(conn, schemaName, institutionId, identifier, id,
+        { automatic: identifier !== (input.identifier ?? '').trim() })
+    }
+    await assertRefs(conn, input, schemaName, institutionId, id,
+      rows[0].categoryId == null ? null : Number(rows[0].categoryId))
 
     await conn.query(
       `UPDATE \`${schemaName}\`.tb_product
@@ -467,9 +447,25 @@ async function lookup(
   return rows
 }
 
-export const listCategoriesLookup = (
+/** Categorias que servem ao SERVIÇO — pelo FATO (Q-PR49 (a), Rodada 6 de produtos): só as kind 'S' quando o estabelecimento tem
+ *  alguma S viva (não excluída e ativa); senão TODAS (as do legado nascem 'P'). Predicado ÚNICO da peça `@shared/category-kind` — o
+ *  mesmo do save. */
+export async function listCategoriesLookup(
   filter: string, schemaName: string, institutionId: number
-) => lookup('tb_category', filter, schemaName, institutionId)
+): Promise<ServiceLookupRow[]> {
+  assertSchemaName(schemaName)
+  const like = filter ? `%${escapeLike(filter)}%` : null
+  const [rows] = await pool.query<any[]>(
+    `SELECT c.id, c.description, c.description AS name
+       FROM \`${schemaName}\`.tb_category c
+      WHERE c.tb_institution_id = ? AND c.deleted = 'N' AND ${serviceCategorySql(schemaName, 'c')}
+        AND (? IS NULL OR c.description LIKE ?)
+      ORDER BY c.description
+      LIMIT 100`,
+    [institutionId, like, like]
+  )
+  return rows
+}
 
 export const listFinancialPlansLookup = (
   filter: string, schemaName: string, institutionId: number

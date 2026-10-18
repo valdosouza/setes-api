@@ -193,4 +193,42 @@ router.get('/:id/sync-api-key', controller.getSyncKey)
  */
 router.post('/:id/sync-api-key', controller.createSyncKey)
 
+/**
+ * @swagger
+ * /api/institutions/{id}/sync-api-key/active:
+ *   put:
+ *     summary: "Liga/desliga o sincronizador do estabelecimento (D-PR43): N = sai do legado (a web volta a escrever os cadastros), S = religa a MESMA chave"
+ *     description: >
+ *       Repetir o estado atual não muda nada (o instante do desligamento é o que o religar confere).
+ *       DESLIGAR (Q-PR46 (a), Q-PR49 (a)): a resposta traz `notice` — pare o sincronizador do cliente ANTES; o setes-sync aceita a chave
+ *       por até 5 min (cache) — e cria a categoria "Serviços" (kind S) se o estabelecimento não tem nenhuma viva (`defaultServiceCategoryId`).
+ *       RELIGAR (Q-PR47 (a)): recusado com 409 SYNC_KEY_WEB_ROWS quando nasceu na web produto/serviço, tabela de preço ou categoria
+ *       (inclusive excluídos) desde o desligamento — o legado os sobrescreveria sem aviso.
+ *     tags: [Institutions]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [active]
+ *             properties:
+ *               active: { type: string, enum: [S, N] }
+ *     responses:
+ *       200:
+ *         description: "{ ok: true, data: { apiKey, establishmentCode, active, notice?, defaultServiceCategoryId? } } — notice e defaultServiceCategoryId só ao desligar (id null = já havia categoria S viva)"
+ *       400:
+ *         description: active fora de S/N
+ *       404:
+ *         description: "Estabelecimento não encontrado ou sem chave gerada (SYNC_KEY_MISSING)"
+ *       409:
+ *         description: "SYNC_KEY_WEB_ROWS — religar recusado: linhas nascidas na web desde o desligamento (contagem e ids em error e fields[active])"
+ */
+router.put('/:id/sync-api-key/active', controller.setSyncKeyActive)
+
 export default router

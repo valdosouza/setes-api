@@ -168,7 +168,7 @@ export async function getOrder(
   return { ...rows[0], items }
 }
 
-/** Lookup de itens ativos e publicados — mercadoria (P/M) ou serviço (S). */
+/** Lookup de itens ATIVOS — mercadoria (P/M) ou serviço (S). `published` é a flag de e-commerce (publicar na internet — D-PR29 do cadastro de produtos) e NUNCA filtra aqui. */
 export async function listProductsLookup(
   branch: 'merchandise' | 'service', filter: string,
   schemaName: string, institutionId: number
