@@ -16,6 +16,16 @@ export {
 } from 'fiscal-api/federal-id'
 export type { FederalId, FederalIdKind, FederalIdFact } from 'fiscal-api/federal-id'
 
+/**
+ * NCM PLENO: exatamente 8 dígitos (D36 da fase Faturamento — o motor casa por IGUALDADE EXATA; rejeição 777 da NF-e exige o
+ * código completo). D-PR13 da frente do cadastro de produtos (2026-10-17): o seletor da regra de tributação aceitava 2–8 dígitos e o
+ * NCM parcial nunca casava. Só a FORMA: a existência no catálogo é da carga própria (D-PR6). Sem tirar separador aqui — quem recebe
+ * máscara canoniza antes (nunca `replace(/\D/g…)` — cerca D-CJ12).
+ */
+export function isNcm(value: string): boolean {
+  return /^\d{8}$/.test(value)
+}
+
 /** true se o valor contém apenas dígitos (vazio conta como true). */
 export function isOnlyDigits(value: string): boolean {
   return /^\d*$/.test(value)

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { isNcm } from '@shared/validation'
 
 /** Domínios do seletor da regra (origem da mercadoria e finalidade) — reusados pelo critério `options`. */
 export const TAX_RULE_ORIGINS  = ['0', '1', '2', '3', '4', '5', '6', '7', '8'] as const
@@ -15,7 +16,8 @@ const flagSN = z.enum(['S', 'N'])
 const selectorDto = z.object({
   productId: z.number().int().positive().nullish(),   // null = coringa
   entityId:  z.number().int().positive().nullish(),   // null = coringa
-  ncm:       z.string().regex(/^\d{2,8}$/).nullish(), // prefixos são regra do FCP; aqui NCM pleno ou parcial
+  // D-PR13 (2026-10-17): NCM PLENO — o motor casa por igualdade exata (D36); prefixo é regra do FCP (tb_state_fcp_ncm), nunca daqui.
+  ncm:       z.string().refine(isNcm, { message: 'O NCM deve ter 8 dígitos' }).nullish(),
   origin:    z.enum(TAX_RULE_ORIGINS),
   finalConsumer: flagSN,
   simples:   flagSN,

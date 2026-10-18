@@ -184,7 +184,7 @@ router.get('/:id', controller.getById)
  *             type: object
  *             required: [selector]
  *             properties:
- *               selector: { type: object, description: "direction (E/S) obrigatório — decisão 35" }
+ *               selector: { type: object, description: "direction (E/S) obrigatório — decisão 35; ncm null (coringa) ou EXATAMENTE 8 dígitos — D-PR13" }
  *               icms: { type: object }
  *               icmsSt: { type: object }
  *               ipi: { type: object }

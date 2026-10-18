@@ -11,6 +11,8 @@ import {
   TaxRuleMatchCriteria, TaxRuleSelector,
 } from '../shared/tax-rule'
 import { taxRuleBodyDto } from '../modules/tax-rules/tax-rules.dto'
+import { zodToFields } from '../shared/http/controller-utils'
+import { isNcm } from '../shared/validation'
 import * as repo from '../modules/tax-rules/tax-rules.repository'
 
 jest.mock('../shared/db/connection', () => ({
@@ -168,6 +170,16 @@ describe('pickRule (desempate)', () => {
 // DTO — presença = incidência
 // ---------------------------------------------------------------------
 
+describe('isNcm (peça @shared/validation — espelho em setes_validators)', () => {
+  it('só 8 dígitos; nada de canonizar aqui (cerca D-CJ12)', () => {
+    expect(isNcm('84713012')).toBe(true)
+    expect(isNcm('00000000')).toBe(true)
+    for (const v of ['', '8471301', '847130120', '8471.30.12', ' 84713012', '84713012 ', '8471301A', '８４７１３０１２']) {
+      expect(isNcm(v)).toBe(false)
+    }
+  })
+})
+
 describe('taxRuleBodyDto', () => {
   const selector = {
     origin: '0', finalConsumer: 'N', simples: 'N', st: 'N', purpose: '1',
@@ -198,6 +210,23 @@ describe('taxRuleBodyDto', () => {
     const r = taxRuleBodyDto.safeParse({ selector, pisCofins: [
       { kind: 'P', cst: '01' }, { kind: 'P', cst: '02' }] })
     expect(r.success).toBe(false)
+  })
+
+  it('D-PR13: NCM só PLENO (8 dígitos) — parcial nunca casaria no motor (D36, igualdade exata)', () => {
+    const body = (ncm: unknown) => ({ selector: { ...selector, ncm }, icms: { cstNr: '00' } })
+    for (const ncm of ['84713012', null, undefined]) {
+      expect(taxRuleBodyDto.safeParse(body(ncm)).success).toBe(true)
+    }
+    // 2–7 dígitos (o prefixo aceito antes), 9 dígitos, máscara e letra: todos recusados
+    for (const ncm of ['84', '847130', '8471301', '847130120', '8471.30.12', '8471301A', '']) {
+      const r = taxRuleBodyDto.safeParse(body(ncm))
+      expect(r.success).toBe(false)
+      if (!r.success) {
+        // o 400 do parseBody ancora no campo do payload (decisão 20 / R3 do app)
+        expect(zodToFields(r.error)).toEqual(
+          [{ field: 'selector.ncm', message: 'O NCM deve ter 8 dígitos' }])
+      }
+    }
   })
 
   it('regra válida: ICMS por CST + PIS/COFINS gêmeos', () => {
