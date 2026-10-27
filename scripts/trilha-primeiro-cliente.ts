@@ -243,7 +243,7 @@ async function apoio(): Promise<Apoio> {
   const um = async (sql: string, p: unknown[] = []) =>
     (await uma<any>(sql, p))?.id as number | undefined
   return {
-    // Q-PR49 (a): a categoria do serviço é kind S quando o estabelecimento tem S viva (a 072 cria "Serviços"); senão as P do legado
+    // Q-PR49 (a): a categoria do serviço é kind S quando o estabelecimento tem S viva (a 073 cria "Serviços"); senão as P do legado
     categoryId: await um(
       `SELECT id FROM \`${SCHEMA}\`.tb_category WHERE tb_institution_id = ? AND deleted = 'N' AND kind IN ('S', 'P')
         ORDER BY (kind = 'S') DESC, id LIMIT 1`, [INST]),
@@ -274,33 +274,43 @@ async function apoio(): Promise<Apoio> {
 // ───────────────────────── P1..P7 — os processos ─────────────────────────
 
 async function p1_servico(a: Apoio): Promise<number | null> {
-  // D-PR41 revista (Rodada 6 de produtos, Valdo 2026-10-18): com o sincronizador ATIVO o cadastro de serviços é só consulta na web
-  // (o id do legado é o PRO_CODIGO — o que a web criasse seria sobrescrito). A régua não cria: usa um serviço VIVO e ativo, com regra
-  // de ISS ativa já cadastrado (prefere o da regra que a régua usa no faturamento; depois o menor id — os do legado; a guarda impede novos
-  // da web). Sem nenhum = PENDENTE. ⚠️ O vínculo serviço → regra de ISS (tb_service) o legado NÃO escreve — só a web, que com a chave ativa
-  // é só consulta: enquadrar serviço novo do legado espera a Q-PR52 (gate socrático da Rodada 6).
-  const sincronizado = await uma<any>(
-    `SELECT 1 AS s FROM setes_central.tb_sync_api_key WHERE tb_institution_id = ? AND active = 'S' AND deleted = 'N' LIMIT 1`, [INST])
-  if (sincronizado) {
+  // D-PR47 (Rodada 7 de produtos, Valdo 2026-10-20): quem decide se a web cria o serviço é a ORIGEM DOS CADASTROS do estabelecimento
+  // (`tb_institution.source_kind`), nunca a chave do sincronizador. Em L (transição do desktop) o cadastro é do legado (o id é o
+  // PRO_CODIGO — o que a web criasse seria sobrescrito) e a régua não cria: usa um serviço VIVO e ativo do legado (prefere o que já tem
+  // a regra de ISS que a régua usa no faturamento; depois o menor id). D-PR45: o ENQUADRAMENTO FISCAL é da web mesmo em L — se o serviço
+  // escolhido não tem regra de ISS ativa, a régua a vincula pela rota própria `PUT /services/:id/tax-rule` (a prova viva da D-PR45).
+  // Sem serviço vivo nenhum = PENDENTE.
+  const fato = await uma<any>(`SELECT source_kind AS kind FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'`, [INST])
+  if (fato?.kind === 'L') {
     const legado = await uma<any>(
       `SELECT p.id, s.tb_service_tax_rule_id AS ruleId
          FROM \`${SCHEMA}\`.tb_product p
-         INNER JOIN \`${SCHEMA}\`.tb_service s
+         LEFT JOIN \`${SCHEMA}\`.tb_service s
             ON s.id = p.id AND s.tb_institution_id = p.tb_institution_id AND s.deleted = 'N'
-         INNER JOIN \`${SCHEMA}\`.tb_service_tax_rule r
+         LEFT JOIN \`${SCHEMA}\`.tb_service_tax_rule r
             ON r.id = s.tb_service_tax_rule_id AND r.tb_institution_id = s.tb_institution_id AND r.active = 'S' AND r.deleted = 'N'
         WHERE p.tb_institution_id = ? AND p.kind = 'S' AND p.active = 'S' AND p.deleted = 'N'
-        ORDER BY (s.tb_service_tax_rule_id = ?) DESC, p.id LIMIT 1`, [INST, a.serviceTaxRuleId ?? 0])
+        ORDER BY (s.tb_service_tax_rule_id = ?) DESC, (r.id IS NOT NULL) DESC, p.id LIMIT 1`, [INST, a.serviceTaxRuleId ?? 0])
     if (!legado) {
       reporta('P1', 'Cadastro de serviços', 'PENDENTE',
-        'sincronizador ativo (D-PR41: web só consulta) e nenhum serviço vivo com regra de ISS ativa — o legado não enquadra e a web está bloqueada (Q-PR52)')
+        'origem dos cadastros L (D-PR47: web só consulta) e nenhum serviço vivo e ativo do legado para enquadrar')
       return null
+    }
+    let ruleId: number | null = legado.ruleId == null ? null : Number(legado.ruleId)
+    if (ruleId === null) {
+      if (!a.serviceTaxRuleId) {
+        reporta('P1', 'Cadastro de serviços', 'FALHA', 'nenhuma regra de tributação de serviço ativa — sem ela o faturamento bloqueia')
+        return null
+      }
+      const v = await api('PUT', `/services/${legado.id}/tax-rule`, { serviceTaxRuleId: a.serviceTaxRuleId })
+      if (v.status !== 200) { reporta('P1', 'Cadastro de serviços', 'FALHA', `enquadrar pela rota própria (D-PR45): ${motivo(v)}`); return null }
+      ruleId = a.serviceTaxRuleId
     }
     const r = await api('GET', `/services/${legado.id}`)
     if (r.status !== 200) { reporta('P1', 'Cadastro de serviços', 'FALHA', motivo(r)); return null }
     criados.servicoDoLegado = Number(legado.id)
     reporta('P1', 'Cadastro de serviços', 'OK',
-      `serviço do legado (D-PR41) ${legado.id} com regra de ISS ${legado.ruleId} — sincronizador ativo, a web não cria`)
+      `serviço do legado ${legado.id} com regra de ISS ${ruleId} — origem L (D-PR47): a web não cria, só enquadra (D-PR45)`)
     return Number(legado.id)
   }
 

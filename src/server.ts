@@ -7,6 +7,7 @@ import { detectLockWaitSupport } from '@shared/db/counters'
 import { assertIbscbsCatalogSchema } from '@shared/ibscbs-classification'
 import { assertJwtKeys } from '@shared/auth/product-token'
 import { assertFiscalVoiceReadable } from '@shared/fiscal-voice'
+import { assertInstitutionSourceKindSchema } from '@shared/catalog-owner'
 import pool from '@shared/db/connection'
 import { runMigrationsForAllInstitutions } from './migrations/runner'
 import { assertF2aFreezeTriggers } from './migrations/f2a-freeze-triggers'
@@ -31,6 +32,7 @@ async function bootstrap() {
     await runMigrationsForAllInstitutions()
     // D-F135 (F2a): os gatilhos de TRAVA da f2a_fiscal_passivo conferidos pelo NOME em cada schema — faltando, o setes-api NÃO sobe
     logger.info(`Gatilhos de TRAVA da F2a: ${await assertF2aFreezeTriggers()}`)
+    logger.info(`Origem dos cadastros (072, D-PR47): ${await assertInstitutionSourceKindSchema()}`)
     logger.info('Migrations concluidas. Subindo servidor...')
 
     app.listen(PORT, () => {

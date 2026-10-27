@@ -27,6 +27,7 @@ import financialPlansRoutes from '@modules/financial-plans/financial-plans.route
 import paymentTypesRoutes from '@modules/payment-types/payment-types.routes'
 import contractsRoutes from '@modules/contracts/contracts.routes'
 import bankAccountsRoutes from '@modules/bank-accounts/bank-accounts.routes'
+import bankAccountsChannelRoutes from '@modules/bank-accounts/bank-accounts.channel.routes'
 import settlementRulesRoutes from '@modules/settlement-rules/settlement-rules.routes'
 import bankSlipsRoutes from '@modules/bank-slips/bank-slips.routes'
 import bankChargeAgreementsRoutes from '@modules/bank-charge-agreements/bank-charge-agreements.routes'
@@ -40,12 +41,13 @@ import banksRoutes from '@modules/banks/banks.routes'
 import modulesRoutes from '@modules/modules/modules.routes'
 import establishmentRoutes from '@modules/establishment/establishment.routes'
 import servicesRoutes from '@modules/services/services.routes'
+import servicesFiscalRoutes from '@modules/services/services.fiscal.routes'
 import priceListsRoutes from '@modules/price-lists/price-lists.routes'
 import merchandiseRoutes from '@modules/merchandise/merchandise.routes'
 import serviceTaxRulesRoutes from '@modules/service-tax-rules/service-tax-rules.routes'
 import { superGuard, superWriteGuard } from './super.guard'
 import { adminGuard } from './admin.guard'
-import { syncWriteGuard } from './sync-write.guard'
+import { catalogOwnerGuard } from './catalog-owner.guard'
 
 const router = Router()
 
@@ -148,13 +150,14 @@ router.use('/billing', billingRoutes)
 
 // Categorias de produtos/serviços (2026-07-18): cadastro de CLIENTE — sem
 // superGuard; escopo por institution no service; flag 'categories'.
-// syncWriteGuard (D-PR41 revista, Rodada 6 de produtos): o legado alimenta tb_category (grupos/subgrupos) e o id MAX+1 da web
+// catalogOwnerGuard (D-PR41 revista + D-PR47, Rodada 7 de produtos): o legado alimenta tb_category (grupos/subgrupos) e o id MAX+1 da web
 // cairia no espaço do gerador dele — com sincronizador ativo, só consulta.
-router.use('/categories', syncWriteGuard, categoriesRoutes)
+router.use('/categories', catalogOwnerGuard, categoriesRoutes)
 
 // Plano de contas (2026-07-18): 2º cadastro em ÁRVORE — mesmo desenho do
 // categories; escopo por institution no service; flag 'financial-plans'.
-router.use('/financial-plans', financialPlansRoutes)
+// catalogOwnerGuard (D-PR51, Rodada 7 de produtos): o legado envia o plano de contas (ID LOCAL, MAX+1 na web) — em modo L só consulta.
+router.use('/financial-plans', catalogOwnerGuard, financialPlansRoutes)
 
 // Formas de pagamento (2026-07-18): catálogo CENTRAL compartilhado (cliente
 // inicia o cadastro) + vínculo por institution — grupo Financeiro; flag
@@ -172,7 +175,10 @@ router.use('/contracts', contractsRoutes)
 
 // Contas bancárias (Software House, 5.6): cadastro de CLIENTE — grupo
 // Financeiro; catálogo central tb_bank (DP2); flag 'bank-accounts'.
-router.use('/bank-accounts', bankAccountsRoutes)
+// catalogOwnerGuard (D-PR51, Rodada 7 de produtos): o legado envia as contas (ID LOCAL, MAX+1 na web) — em modo L só consulta.
+// O CANAL API da conta (Inter) é fato só da web — rotas próprias ANTES da guarda (`bank-accounts.channel.routes.ts`).
+router.use('/bank-accounts', bankAccountsChannelRoutes)
+router.use('/bank-accounts', catalogOwnerGuard, bankAccountsRoutes)
 
 // Regras de recebimento (política de baixa automática por forma de
 // pagamento — migration 038, prompt_contrato_financeiro_baixa_automatica.md
@@ -198,15 +204,19 @@ router.use('/checks', checksRoutes)
 // kind='S' fixo + grade de preços tb_price; tela irmã do futuro cadastro
 // de produtos (D5/D6); flag 'services'. Tabelas de Preço = módulo próprio
 // (D7); flag 'price-lists'.
-// syncWriteGuard (D-PR41 revista, Valdo 2026-10-18: "aplicar mesma regra do mercadoria para o serviço... já que compartilham a mesma
-// base de dados"): o serviço cunha id no MESMO espaço de tb_product que o legado (id = PRO_CODIGO) e a tabela de preço no espaço de
-// tb_price_list — com sincronizador ativo os dois cadastros são só consulta na web.
-router.use('/services', syncWriteGuard, servicesRoutes)
-router.use('/price-lists', syncWriteGuard, priceListsRoutes)
+// catalogOwnerGuard (D-PR41 revista, Valdo 2026-10-18: "aplicar mesma regra do mercadoria para o serviço... já que compartilham a mesma
+// base de dados"; Rodada 7 — D-PR47: a guarda lê o DONO do catálogo, `tb_institution.source_kind`, nunca a chave): o serviço cunha id no
+// MESMO espaço de tb_product que o legado (id = PRO_CODIGO) e a tabela de preço no espaço de tb_price_list — em modo L os dois cadastros
+// são só consulta na web.
+// D-PR45 (Rodada 7, 2026-10-20): o ENQUADRAMENTO FISCAL do serviço (regra de ISS, presunção IBS/CBS) é fato que o legado não produz —
+// rotas próprias montadas ANTES do roteador guardado, em qualquer modo do estabelecimento (`services.fiscal.routes.ts`).
+router.use('/services', servicesFiscalRoutes)
+router.use('/services', catalogOwnerGuard, servicesRoutes)
+router.use('/price-lists', catalogOwnerGuard, priceListsRoutes)
 // Produtos (MERCADORIA) — prompt_modulo_products.md §16, onda 1 (2026-10-18): tb_product kind P/M + tb_merchandise + unidades de
 // venda (071); tela irmã de Serviços (D6); nome = a tabela (D-PR3); flag 'merchandise'; liberação só sem legado (D-PR14) — com o gate
-// TÉCNICO da D-PR32: institution com sincronizador ativo só CONSULTA (escrita = 409 SYNC_MANAGED_CATALOG).
-router.use('/merchandise', syncWriteGuard, merchandiseRoutes)
+// TÉCNICO da D-PR32/D-PR47: institution em transição do legado (source_kind L) só CONSULTA (escrita = 409 CATALOG_LEGACY_OWNED).
+router.use('/merchandise', catalogOwnerGuard, merchandiseRoutes)
 // Regra de Tributacao de SERVICO (ISS) — prompt_regra_tributacao_servico.md
 // D1-D14: cidade de incidencia x item LC 116 -> aliquota + codigo municipal;
 // caminho individual do servico (nada de @shared/tax-rule); flag 'service-tax-rules'.

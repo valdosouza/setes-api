@@ -3,11 +3,12 @@ import { ErrorCodes } from '@shared/errors/error-codes'
 import { HttpError } from '@shared/errors/http-error'
 import { ListQuery, PagedRows, PublicSearchCriterion, publicCriteria } from '@shared/list'
 import logger from '@shared/logger/logger'
-import { WebBornRows } from '@shared/sync-key'
 import { withDeadlockRetry } from '@shared/db/deadlock-retry'
+import { sourceKindHasSync } from '@shared/catalog-owner'
+import { invalidateSessionContextForInstitution } from '@shared/session-context'
 import { runMigrationsForSchema } from '../../migrations/runner'
 import {
-  InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
+  InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow, LegacyTransitionResult,
 } from './institutions.interface'
 import { md5Password } from '@shared/auth/password'
 import { findLoginEmailOwner, insertUserCascade } from '@shared/user'
@@ -19,7 +20,7 @@ import {
   insertInstitutionCascade, updateInstitutionCascade,
   setInstitutionActive, deleteInstitution, insertDefaultFlags,
   grantStructuralInterfaces,
-  getSyncApiKey, insertSyncApiKey, switchSyncApiKeyTx, getInstitutionSchema,
+  getSyncApiKey, insertSyncApiKey, switchSyncApiKeyTx, endLegacyTransitionTx, getInstitutionFact,
   INSTITUTION_SEARCH_CRITERIA,
 } from './institutions.repository'
 
@@ -159,9 +160,14 @@ export async function fetchSyncApiKey(id: number): Promise<SyncApiKeyRow | null>
  * intervenção manual consciente no banco se um dia for preciso.
  */
 export async function generateSyncApiKey(id: number): Promise<SyncApiKeyRow> {
-  const institution = await getInstitution(id)
+  const institution = await getInstitutionFact(id)
   if (!institution) {
     throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
+  }
+  // D-PR47: a chave só existe para quem TEM fonte externa (L ou P) — W (nativo web, ou L encerrado para W) não tem sincronizador
+  if (!sourceKindHasSync(institution.sourceKind)) {
+    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador — a chave só existe para L e P',
+      [{ field: 'apiKey', message: `origem dos cadastros: ${institution.sourceKind}` }], ErrorCodes.SYNC_KEY_NOT_FOR_SOURCE)
   }
   const existing = await getSyncApiKey(id)
   if (existing) {
@@ -171,61 +177,92 @@ export async function generateSyncApiKey(id: number): Promise<SyncApiKeyRow> {
   }
   const apiKey = crypto.randomBytes(24).toString('hex')
   const establishmentCode = institution.schemaName.toUpperCase()
-  await insertSyncApiKey(id, apiKey, establishmentCode)
+  // as conferências acima são a resposta rápida; as que DECIDEM repetem DENTRO da transação (ADV-R7-03: o ato pode comitar no meio)
+  const outcome = await insertSyncApiKey(id, apiKey, establishmentCode)
+  if (outcome.kind === 'missing') throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
+  if (outcome.kind === 'not-for-source') {
+    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador — a chave só existe para L e P',
+      [{ field: 'apiKey', message: `origem dos cadastros: ${outcome.sourceKind}` }], ErrorCodes.SYNC_KEY_NOT_FOR_SOURCE)
+  }
+  if (outcome.kind === 'exists') {
+    throw new HttpError(409,
+      'Este estabelecimento já possui uma chave de sincronização',
+      [{ field: 'apiKey', message: 'chave já gerada — trocar exige intervenção manual' }])
+  }
   logger.info('Chave de sincronização gerada', { institutionId: id, establishmentCode })
   return { apiKey, establishmentCode, active: 'S' }
 }
 
-/** Frase do aviso ao desligar (Q-PR46 (a), Rodada 6 de produtos — procedimento: parar o sincronizador ANTES). */
-export const SYNC_OFF_NOTICE =
-  'Pare o sincronizador do cliente ANTES de desligar a chave: o setes-sync aceita a chave por até 5 min (cache) e o que ele gravar '
-  + 'nesse intervalo pode contar como nascido na web — e impedir religar.'
-
-const WEB_BORN_LABEL: Record<WebBornRows['table'], string> = {
-  tb_product: 'produto(s)/serviço(s)', tb_price_list: 'tabela(s) de preço', tb_category: 'categoria(s)',
-}
-
 /**
- * D-PR43 (Valdo 2026-10-18): a opção de DESATIVAR o sincronizador do estabelecimento — o caminho de saída do legado. Com a chave
- * desligada o setes-sync recusa o envio (401 — em até 5 min, pelo cache dele) e a guarda da D-PR32 libera NA HORA a escrita dos
- * cadastros na web. Rodada 6 de produtos:
- *  - desligar devolve o AVISO do procedimento (Q-PR46 (a)) e cria "Serviços" se o estabelecimento não tem categoria S viva (Q-PR49 (a));
- *  - religar devolve a MESMA chave, mas é RECUSADO (409 SYNC_KEY_WEB_ROWS) quando nasceu produto/serviço, tabela de preço ou categoria
- *    na web desde o desligamento — o legado as sobrescreveria sem aviso (Q-PR47 (a)); o que o legado tentou enviar no período ficou
- *    ESTACIONADO no sincronizador (D-SY13 do grupo do sync).
- * Repetir o estado atual não muda nada. Nunca apaga (PADROES §3.1); o ato fica no log com o autor (Q-PR48 (a)).
+ * Interruptor da chave (D-PR43; Rodada 7 — D-PR48 item 1): só PAUSA de emergência, reversível. Com a chave pausada o setes-sync recusa o
+ * envio (D-SY13 — em até 5 min, pelo cache dele; o sincronizador fica INATIVO até "Ativar sincronia"). O dono do catálogo NÃO muda: é o
+ * fato `source_kind` (D-PR47). Repetir o estado atual não muda nada. Nunca apaga (PADROES §3.1); o ato fica no log com o autor.
  */
-export async function switchSyncApiKey(
-  id: number, active: 'S' | 'N', actorUserId: number | null
-): Promise<SyncApiKeyRow & { notice?: string; defaultServiceCategoryId?: number | null }> {
-  const schemaName = await getInstitutionSchema(id)
-  if (!schemaName) throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
-  // cunha id de categoria por MAX+1 (o "Serviços" do desligar) — reexecuta em deadlock como os outros cunhadores (D-PR2); o ato é idempotente
-  const outcome = await withDeadlockRetry('institutions sync-api-key/active PUT', { institutionId: id }, 3,
-    () => switchSyncApiKeyTx(id, schemaName, active))
+export async function switchSyncApiKey(id: number, active: 'S' | 'N', actorUserId: number | null): Promise<SyncApiKeyRow> {
+  if (!(await institutionExists(id))) throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
+  const outcome = await switchSyncApiKeyTx(id, active)
   if (outcome.kind === 'missing') {
     throw new HttpError(404, 'Este estabelecimento não tem chave de sincronização', [{ field: 'active', message: 'sem chave gerada' }],
       ErrorCodes.SYNC_KEY_MISSING)
   }
-  if (outcome.kind === 'web-rows') {
-    const summary = outcome.rows
-      .map(r => `${r.count} ${WEB_BORN_LABEL[r.table]} (id ${r.ids.join(', ')}${r.count > r.ids.length ? ', …' : ''})`)
-      .join('; ')
-    logger.warn('Religar o sincronizador RECUSADO — nasceram linhas na web desde o desligamento', {
-      institutionId: id, actorUserId, since: outcome.since.toISOString(),
-      rows: outcome.rows.map(r => ({ table: r.table, count: r.count })),
-    })
-    throw new HttpError(409,
-      `Não dá para religar o sincronizador: desde o desligamento nasceram na web ${summary} — o legado os sobrescreveria sem aviso`,
-      [{ field: 'active', message: summary }], ErrorCodes.SYNC_KEY_WEB_ROWS)
+  if (outcome.kind === 'not-for-source') {
+    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador para retomar — a chave só existe para L e P',
+      [{ field: 'active', message: `origem dos cadastros: ${outcome.sourceKind}` }], ErrorCodes.SYNC_KEY_NOT_FOR_SOURCE)
   }
   if (outcome.kind === 'switched') {
-    logger.info(active === 'N' ? 'Sincronizador DESATIVADO' : 'Sincronizador reativado', { institutionId: id, actorUserId })
+    logger.info(active === 'N' ? 'Sincronizador PAUSADO (chave inativa)' : 'Sincronizador retomado (chave ativa)',
+      { institutionId: id, actorUserId, keys: outcome.keys })
   }
-  const row = (await getSyncApiKey(id))!
-  if (active === 'S') return row
+  return (await getSyncApiKey(id))!
+}
+
+/**
+ * ENCERRAR A TRANSIÇÃO do desktop legado (D-PR48/D-PR49 — ato ÚNICO e IRREVERSÍVEL do Super, tela Institutions): L → W (cliente sem
+ * PDV) ou L → P (cliente com PDV — os PDVs passam a receber o catálogo da web). Grava `transition_ended_at`, muda o fato, cria as
+ * categorias padrão que faltarem e, no destino W, inativa a chave do sincronizador em definitivo; no destino P a chave fica (é a dos
+ * PDVs — A-PR4/Q-PR60) e o servidor desktop passa a ser recusado pelo FATO no setes-sync (`SYNC_TRANSITION_ENDED` — contrato com o grupo
+ * do sync). O motivo e o autor vão ao log (Q-PR48 (a); coluna própria = Q-PR59). Reexecuta em deadlock (cunha id de categoria).
+ */
+/**
+ * BARREIRA INTERINA (A-PR5 — gate socrático da Rodada 7; questão Q-PR62 ao Valdo): o destino P deixa a chave viva para os PDVs (A-PR4) e
+ * conta com o setes-sync RECUSAR o servidor desktop pelo FATO (`SYNC_TRANSITION_ENDED`) — contrato que ainda não existe. Até lá, L → P
+ * abriria DOIS escritores no catálogo (o desktop pela chave viva + a web, agora dona) — exatamente o que a guarda existe para impedir; e o
+ * ato é irreversível. Destino W já vale (a chave fica inativa e o setes-sync a recusa pela pausa). Liberar P = tirar daqui quando o contrato
+ * for honrado (ou decisão do Valdo em contrário).
+ */
+export const OPEN_TRANSITION_DESTINATIONS: ReadonlySet<'W' | 'P'> = new Set<'W' | 'P'>(['W'])
+
+export async function endLegacyTransition(
+  id: number, destination: 'W' | 'P', reason: string, actorUserId: number | null
+): Promise<LegacyTransitionResult> {
+  if (!OPEN_TRANSITION_DESTINATIONS.has(destination)) {
+    throw new HttpError(409,
+      `Destino ${destination} ainda não disponível: o sincronizador precisa honrar o fato da origem dos cadastros antes (contrato SYNC_TRANSITION_ENDED) — por enquanto só W`,
+      [{ field: 'destination', message: `destinos abertos: ${[...OPEN_TRANSITION_DESTINATIONS].join(', ')}` }],
+      ErrorCodes.LEGACY_TRANSITION_DESTINATION_PENDING)
+  }
+  const outcome = await withDeadlockRetry('institutions end-legacy-transition POST', { institutionId: id }, 3,
+    () => endLegacyTransitionTx(id, destination))
+  if (outcome.kind === 'missing') throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
+  if (outcome.kind === 'not-applicable') {
+    // o instante não vai na prosa (PADROES §10: instante na zona é da fronteira do app) — vai tipado em fields[]
+    const fields = [{ field: 'destination', message: `origem atual: ${outcome.sourceKind}` }]
+    if (outcome.transitionEndedAt) fields.push({ field: 'transitionEndedAt', message: outcome.transitionEndedAt })
+    throw new HttpError(409,
+      outcome.transitionEndedAt
+        ? `A transição deste estabelecimento já foi encerrada (origem atual: ${outcome.sourceKind}) — o ato é único`
+        : `Encerrar a transição só vale para estabelecimento em transição do legado (origem atual: ${outcome.sourceKind})`,
+      fields, ErrorCodes.LEGACY_TRANSITION_NOT_APPLICABLE)
+  }
+  invalidateSessionContextForInstitution(id)      // o bloco `context` do app passa a dizer o dono novo sem esperar o TTL
+  const fact = (await getInstitutionFact(id))!
+  logger.info('Transição do legado ENCERRADA', {
+    institutionId: id, schemaName: outcome.schemaName, destination, reason, actorUserId,
+    transitionEndedAt: fact.transitionEndedAt, defaultCategories: outcome.defaultCategories,
+    syncKeysInactivated: outcome.syncKeysInactivated,
+  })
   return {
-    ...row, notice: SYNC_OFF_NOTICE,
-    defaultServiceCategoryId: outcome.kind === 'switched' ? outcome.defaultServiceCategoryId : null,
+    sourceKind: fact.sourceKind, transitionEndedAt: fact.transitionEndedAt,
+    defaultCategories: outcome.defaultCategories, syncKeysInactivated: outcome.syncKeysInactivated,
   }
 }

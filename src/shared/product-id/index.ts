@@ -3,7 +3,6 @@ import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import { lockInstitutionCounters } from '@shared/db/counters'
 import { assertSchema } from '@shared/db/schema'
-import { assertNoActiveSyncKey } from '@shared/sync-key'
 
 /**
  * Peça TÉCNICA do espaço de chaves de `tb_product` (cadastro de produtos — D-PR2/D-PR7/A-PR1; prompt_modulo_products.md §3/§16.3):
@@ -23,14 +22,14 @@ import { assertNoActiveSyncKey } from '@shared/sync-key'
  * `groupInstitutionId`: a chave do catálogo (D-PR24 regra 4, frente do grupo §11) — hoje = a institution da sessão.
  */
 
-/** Trava a institution (1º lock da transação) e cunha o próximo id de `tb_product`. Chame ANTES de qualquer outra leitura. Depois da
- *  trava, reconfere a chave do sincronizador (`assertNoActiveSyncKey` — o espaço de id é do legado quando ela está ativa; Rodada 6). */
+/** Trava a institution (1º lock da transação) e cunha o próximo id de `tb_product`. Chame ANTES de qualquer outra leitura. Quem decide se a
+ *  web pode cunhar aqui é a guarda do dono do catálogo no gateway (`catalogOwnerGuard` — D-PR47); como o fato é monotônico (L → W/P,
+ *  nunca de volta), não há reconferência dentro da transação (a `assertNoActiveSyncKey` da Rodada 6 morreu — Rodada 7). */
 export async function allocateProductId(
   conn: PoolConnection, schemaName: string, groupInstitutionId: number
 ): Promise<number> {
   const s = assertSchema(schemaName)
   await lockInstitutionCounters(conn, groupInstitutionId)
-  await assertNoActiveSyncKey(conn, groupInstitutionId)
   const [rows] = await conn.query<any[]>(
     `SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM \`${s}\`.tb_product WHERE tb_institution_id = ?`,
     [groupInstitutionId]

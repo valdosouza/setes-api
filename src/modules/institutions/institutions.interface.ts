@@ -1,4 +1,6 @@
 import { EntityFiscalInput, EntityFiscalFull } from '@shared/entity'
+import { CategoryKind } from '@shared/category-kind'
+import { SourceKind } from '@shared/catalog-owner'
 
 /**
  * Tipos do CONCRETO Institution (tb_institution na setes_central).
@@ -11,6 +13,10 @@ import { EntityFiscalInput, EntityFiscalFull } from '@shared/entity'
 /** Cadeia completa + campos do concreto enviados no POST/PUT. */
 export interface InstitutionInput extends EntityFiscalInput {
   active?: 'S' | 'N'
+  /** D-PR47: o TIPO DA FONTE EXTERNA que alimenta o estabelecimento (W nativo web · L transição do desktop legado · P PDV) — declarado
+   *  pelo Super no cadastro (obrigatório no POST), IMUTÁVEL na edição (409 SOURCE_KIND_IMMUTABLE se vier diferente): só muda pelo ato
+   *  "encerrar a transição" (D-PR48/D-PR49). */
+  sourceKind?: SourceKind
 }
 
 /** Linha da pesquisa (GET /api/institutions). */
@@ -20,12 +26,33 @@ export interface InstitutionListRow {
   nameCompany: string | null
   schemaName:  string
   active:      'S' | 'N' | null
+  sourceKind:  SourceKind
 }
 
 /** Objeto COMPLETO devolvido no GET /api/institutions/:id. */
 export interface InstitutionFull extends EntityFiscalFull {
-  schemaName: string
-  active:     'S' | 'N' | null
+  schemaName:        string
+  active:            'S' | 'N' | null
+  sourceKind:        SourceKind
+  /** Instante do ato "encerrar a transição" (write-once); NULL = nunca foi L ou ainda é. */
+  transitionEndedAt: string | null
+}
+
+/** O FATO do estabelecimento sem a cadeia (leituras do interruptor da chave e do ato — D-PR47/D-PR48). */
+export interface InstitutionFact {
+  schemaName:        string
+  sourceKind:        SourceKind
+  transitionEndedAt: string | null
+}
+
+/** Resposta do ato "encerrar a transição" (POST /api/institutions/:id/end-legacy-transition — D-PR48/D-PR49). */
+export interface LegacyTransitionResult {
+  sourceKind:          SourceKind
+  transitionEndedAt:   string | null
+  /** id da categoria padrão criada por natureza (null = já havia uma viva). */
+  defaultCategories:   Record<CategoryKind, number | null>
+  /** Destino W: chaves do sincronizador inativadas em definitivo; destino P: 0 (os PDVs seguem com a chave — A-PR4/Q-PR60). */
+  syncKeysInactivated: number
 }
 
 /**

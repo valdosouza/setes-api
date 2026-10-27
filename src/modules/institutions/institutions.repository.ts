@@ -5,10 +5,11 @@ import { entityRoleSearchCriteria, roleStatusSearchCriteria, saveEntityFiscalCha
 import { SETES_INSTITUTION_ID, SETES_SCHEMA } from '@shared/auth/roles'
 import { assertSchema } from '@shared/db/schema'
 import { lockInstitutionCounters } from '@shared/db/counters'
-import { WebBornRows, webBornSince } from '@shared/sync-key'
-import { ensureDefaultCategory } from '@shared/category-kind'
+import { ensureDefaultCategories, CategoryKind } from '@shared/category-kind'
+import { SourceKind, isSourceKind, sourceKindHasSync } from '@shared/catalog-owner'
+import { ErrorCodes } from '@shared/errors/error-codes'
 import {
-  InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
+  InstitutionInput, InstitutionListRow, InstitutionFull, InstitutionFact, SyncApiKeyRow,
 } from './institutions.interface'
 
 /**
@@ -53,7 +54,8 @@ export async function listInstitutions(query: ListQuery): Promise<PagedRows<Inst
             e.nick_trade   AS nickTrade,
             e.name_company AS nameCompany,
             i.schema_name  AS schemaName,
-            i.active
+            i.active,
+            i.source_kind  AS sourceKind
      ${where}
      ORDER BY e.nick_trade, i.id
      LIMIT ? OFFSET ?`,
@@ -68,7 +70,7 @@ export async function listInstitutions(query: ListQuery): Promise<PagedRows<Inst
 /** Objeto COMPLETO: cadeia compartilhada (shared/entity) + tb_institution. */
 export async function getInstitution(id: number): Promise<InstitutionFull | null> {
   const [rows] = await pool.query<any[]>(
-    `SELECT schema_name AS schemaName, active
+    `SELECT schema_name AS schemaName, active, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt
      FROM setes_central.tb_institution
      WHERE id = ? AND deleted = 'N'`,
     [id]
@@ -78,8 +80,23 @@ export async function getInstitution(id: number): Promise<InstitutionFull | null
   const chain = await getEntityFiscalFull(id)
   if (!chain) return null
 
-  return { ...chain, schemaName: rows[0].schemaName, active: rows[0].active }
+  return {
+    ...chain, schemaName: rows[0].schemaName, active: rows[0].active,
+    sourceKind: rows[0].sourceKind, transitionEndedAt: toIso(rows[0].transitionEndedAt),
+  }
 }
+
+/** O FATO do estabelecimento sem a cadeia (D-PR47): schema + origem dos cadastros + instante do encerramento. null = inexistente. */
+export async function getInstitutionFact(id: number): Promise<InstitutionFact | null> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT schema_name AS schemaName, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt
+       FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'`,
+    [id])
+  if (!rows[0]) return null
+  return { schemaName: rows[0].schemaName, sourceKind: rows[0].sourceKind, transitionEndedAt: toIso(rows[0].transitionEndedAt) }
+}
+
+const toIso = (v: unknown): string | null => v == null ? null : (v instanceof Date ? v.toISOString() : String(v))
 
 /** schema_name é UNIQUE e nunca reaproveitado — verifica INCLUINDO deleted='S'. */
 export async function schemaNameExists(schemaName: string): Promise<boolean> {
@@ -138,10 +155,15 @@ export async function insertInstitutionCascade(
         [{ field: 'id', message: String(id) }])
     }
 
+    // D-PR47: a origem dos cadastros é DECLARADA no cadastro (o DTO exige; aqui é o cinto — a coluna é NOT NULL sem default)
+    if (!isSourceKind(input.sourceKind)) {
+      throw new HttpError(400, 'Informe a origem dos cadastros do estabelecimento (W, L ou P)',
+        [{ field: 'sourceKind', message: 'W = nativo web · L = transição do desktop legado · P = PDV' }])
+    }
     await conn.query(
-      `INSERT INTO setes_central.tb_institution (id, schema_name, active, created_at, updated_at)
-       VALUES (?, ?, 'N', NOW(), NOW())`,
-      [id, schemaName]
+      `INSERT INTO setes_central.tb_institution (id, schema_name, source_kind, active, created_at, updated_at)
+       VALUES (?, ?, ?, 'N', NOW(), NOW())`,
+      [id, schemaName, input.sourceKind]
     )
 
     // Decisão 13 da Fase 3 (Valdo, 2026-07-16): todo institution nasce também
@@ -176,6 +198,17 @@ export async function updateInstitutionCascade(
     await conn.beginTransaction()
 
     await saveEntityFiscalChain(conn, id, input, updatedBy)
+
+    // D-PR47: a origem dos cadastros é IMUTÁVEL pela edição — só o ato "encerrar a transição" a muda (L → W/P). Igual ao gravado passa;
+    // diferente recusa (nunca descarte silencioso). Leitura travante: a linha é a que o ato trava.
+    if (input.sourceKind !== undefined) {
+      const [cur] = await conn.query<any[]>(
+        `SELECT source_kind AS sourceKind FROM setes_central.tb_institution WHERE id = ? FOR UPDATE`, [id])
+      if (cur[0] && cur[0].sourceKind !== input.sourceKind) {
+        throw new HttpError(409, 'A origem dos cadastros não se edita — use o ato "encerrar a transição"',
+          [{ field: 'sourceKind', message: `gravado: ${cur[0].sourceKind}` }], ErrorCodes.SOURCE_KIND_IMMUTABLE)
+      }
+    }
 
     if (input.active !== undefined) {
       await conn.query(
@@ -325,64 +358,45 @@ export async function getSyncApiKey(institutionId: number): Promise<SyncApiKeyRo
   return rows[0] ?? null
 }
 
-/** Desfecho do ato de ligar/desligar o sincronizador (D-PR43 + Rodada 6 de produtos). */
+/** Desfecho do interruptor da chave (D-PR43 + D-PR48 item 1: só PAUSA/RETOMADA, reversível). */
 export type SyncKeySwitchOutcome =
   | { kind: 'missing' }
   | { kind: 'unchanged' }
-  | { kind: 'switched'; defaultServiceCategoryId: number | null }
-  | { kind: 'web-rows'; since: Date; rows: WebBornRows[] }
+  | { kind: 'switched'; keys: number }
+  | { kind: 'not-for-source'; sourceKind: SourceKind }
 
 /**
- * Liga/desliga a chave VIVA do estabelecimento NUMA transação (D-PR43; Q-PR47 (a) e Q-PR49 (a) da Rodada 6) — nunca apaga (PADROES §3.1):
- *  - 1º statement: a trava da institution (PADROES §9 regra 7) — serializa com quem cunha id de produto e com outro ato de ligar/desligar;
- *    depois as chaves vivas `FOR UPDATE` (locking read: o snapshot do REPEATABLE READ ainda não nasceu).
- *  - estado já é o pedido → nada muda (o `updated_at` da chave desligada é o INSTANTE do desligamento que o religar confere — repetir o
- *    'N' não pode empurrá-lo para a frente e esconder o que a web criou no período).
- *  - DESLIGAR: o instante do desligamento é UM `NOW()` lido uma vez (T); cria "Serviços" (kind S) se não houver categoria S viva (peça
- *    `@shared/category-kind`) com `created_at` = T − 1 s, e grava a chave com `updated_at` = T — a categoria do próprio ato nunca conta
- *    como "nascida na web" no religar (que confere `>=` T).
- *  - RELIGAR: confere o que NASCEU nas tabelas do legado (`webBornSince`, leitura consistente depois das travas) desde o desligamento —
- *    havendo, desfaz e devolve as linhas (o serviço responde 409).
- * Sem `updated_at` (chave desligada por SQL manual), o instante é o `created_at` da chave; sem os dois, a época — o religar só passa se a
- * web nunca criou nada ali (falha fechado).
+ * Pausa/retoma a chave VIVA do estabelecimento NUMA transação (D-PR43; Rodada 7 — D-PR48 item 1): NÃO muda o dono do catálogo, não cria
+ * categoria, não confere linhas (a Rodada 6 fazia isso e caiu: o dono é o fato `source_kind`, nunca a chave). Nunca apaga (PADROES §3.1).
+ *  - 1º statement: a trava da institution (PADROES §9 regra 7) — serializa com o ato "encerrar a transição" (que lê e muda o fato) e
+ *    com outro interruptor; depois o FATO (leitura consistente DEPOIS da trava — o retrato já vê o ato comitado) e as chaves vivas
+ *    `FOR UPDATE`.
+ *  - RETOMAR ('S') em W é recusado: W não tem sincronizador — nativo web, ou transição encerrada para W (a chave inativada pelo ato
+ *    nunca reativa — D-PR48). Pausar em W (nada vivo) cai em `unchanged`.
+ *  - estado já é o pedido → nada muda.
  */
-export async function switchSyncApiKeyTx(
-  institutionId: number, schemaName: string, active: 'S' | 'N'
-): Promise<SyncKeySwitchOutcome> {
-  const s = assertSchema(schemaName)
+export async function switchSyncApiKeyTx(institutionId: number, active: 'S' | 'N'): Promise<SyncKeySwitchOutcome> {
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
     await lockInstitutionCounters(conn, institutionId)
+    const [fact] = await conn.query<any[]>(
+      `SELECT source_kind AS sourceKind FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'`, [institutionId])
+    const sourceKind: SourceKind | undefined = fact[0]?.sourceKind
+    if (active === 'S' && sourceKind === 'W') { await conn.rollback(); return { kind: 'not-for-source', sourceKind } }
     const [keys] = await conn.query<any[]>(
-      `SELECT id, active, created_at AS createdAt, updated_at AS updatedAt
-         FROM setes_central.tb_sync_api_key
+      `SELECT id, active FROM setes_central.tb_sync_api_key
         WHERE tb_institution_id = ? AND deleted = 'N' FOR UPDATE`,
       [institutionId])
     if ((keys as any[]).length === 0) { await conn.rollback(); return { kind: 'missing' } }
     const toFlip = (keys as any[]).filter(k => k.active !== active)
     if (toFlip.length === 0) { await conn.rollback(); return { kind: 'unchanged' } }
-
-    let defaultServiceCategoryId: number | null = null
-    let at: Date | null = null
-    if (active === 'N') {
-      const [[{ now }]] = await conn.query<any[]>('SELECT NOW() AS now') as any
-      at = new Date(now)
-      defaultServiceCategoryId = await ensureDefaultCategory(conn, s, institutionId, 'S', new Date(at.getTime() - 1000))
-    } else {
-      const since = new Date(Math.min(...toFlip.map(k => {
-        const at = k.updatedAt ?? k.createdAt
-        return at ? new Date(at).getTime() : 0
-      })))
-      const rows = await webBornSince(conn, s, institutionId, since)
-      if (rows.length > 0) { await conn.rollback(); return { kind: 'web-rows', since, rows } }
-    }
     await conn.query(
-      `UPDATE setes_central.tb_sync_api_key SET active = ?, updated_at = COALESCE(?, NOW())
+      `UPDATE setes_central.tb_sync_api_key SET active = ?, updated_at = NOW()
         WHERE tb_institution_id = ? AND deleted = 'N' AND active <> ?`,
-      [active, at, institutionId, active])
+      [active, institutionId, active])
     await conn.commit()
-    return { kind: 'switched', defaultServiceCategoryId }
+    return { kind: 'switched', keys: toFlip.length }
   } catch (err) {
     await conn.rollback()
     throw err
@@ -391,13 +405,99 @@ export async function switchSyncApiKeyTx(
   }
 }
 
-/** Uma chave por estabelecimento; id sem auto_increment → MAX+1 na transação. */
-export async function insertSyncApiKey(
-  institutionId: number, apiKey: string, establishmentCode: string
-): Promise<void> {
+/** Desfecho do ato "encerrar a transição" (D-PR48/D-PR49). */
+export type LegacyTransitionOutcome =
+  | { kind: 'missing' }
+  | { kind: 'not-applicable'; sourceKind: SourceKind; transitionEndedAt: string | null }
+  | { kind: 'ended'; schemaName: string; defaultCategories: Record<CategoryKind, number | null>; syncKeysInactivated: number }
+
+/**
+ * ENCERRAR A TRANSIÇÃO do desktop legado (D-PR48/D-PR49 — ato ÚNICO e IRREVERSÍVEL do Super), NUMA transação, na linha do FATO:
+ *  1. trava da institution (PADROES §9 regra 7 — a MESMA linha que todo cunhador de id e o interruptor da chave travam: quem esperar
+ *     por ela lê o fato novo) e o fato `FOR UPDATE` (regra 2 do §9 — leitura que decide trava);
+ *  2. só `source_kind = 'L'` passa (não-L = `not-applicable`: repetir o ato cai aqui — não há 2º código, depois do ato a institution
+ *     simplesmente não é L);
+ *  3. `UPDATE … SET source_kind = destino, transition_ended_at = NOW() WHERE id = ? AND source_kind = 'L'` — a condição NO COMANDO
+ *     (PADROES §11 regra 10: fato monotônico); 0 linhas = alguém mudou o fato por baixo → falha alto;
+ *  4. destino W: as chaves vivas do sincronizador ficam INATIVAS em definitivo (W nunca reativa — `switchSyncApiKeyTx`); destino P: a
+ *     chave fica — é a MESMA que os PDVs usam (D-PR49/D-TM11; A-PR4 — Q-PR60 ao Valdo); o servidor desktop passa a ser recusado pelo
+ *     FATO, lido pelo setes-sync (contrato `SYNC_TRANSITION_ENDED` — grupo do sync);
+ *  5. as categorias padrão que faltarem ("Produtos" P / "Serviços" S — `ensureDefaultCategories`, a MESMA regra da migration 073).
+ * Falha em qualquer passo desfaz TUDO (o fato segue L). Quem chama reexecuta em deadlock (o passo 5 cunha id).
+ */
+export async function endLegacyTransitionTx(institutionId: number, destination: 'W' | 'P'): Promise<LegacyTransitionOutcome> {
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
+    await lockInstitutionCounters(conn, institutionId)
+    const [rows] = await conn.query<any[]>(
+      `SELECT schema_name AS schemaName, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt
+         FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N' FOR UPDATE`,
+      [institutionId])
+    if ((rows as any[]).length === 0) { await conn.rollback(); return { kind: 'missing' } }
+    const { schemaName, sourceKind, transitionEndedAt } = rows[0]
+    if (sourceKind !== 'L') {
+      await conn.rollback()
+      return { kind: 'not-applicable', sourceKind, transitionEndedAt: toIso(transitionEndedAt) }
+    }
+    const s = assertSchema(schemaName)
+    const [upd] = await conn.query<any>(
+      `UPDATE setes_central.tb_institution
+          SET source_kind = ?, transition_ended_at = NOW(), updated_at = NOW()
+        WHERE id = ? AND source_kind = 'L' AND transition_ended_at IS NULL`,
+      [destination, institutionId])
+    if (Number(upd.affectedRows) !== 1) {
+      throw new Error(`encerrar a transição: o fato da institution ${institutionId} mudou por baixo da trava (affectedRows = ${upd.affectedRows})`)
+    }
+    let syncKeysInactivated = 0
+    if (destination === 'W') {
+      const [k] = await conn.query<any>(
+        `UPDATE setes_central.tb_sync_api_key SET active = 'N', updated_at = NOW()
+          WHERE tb_institution_id = ? AND deleted = 'N' AND active = 'S'`,
+        [institutionId])
+      syncKeysInactivated = Number(k.affectedRows)
+    }
+    const defaultCategories = await ensureDefaultCategories(conn, s, institutionId)
+    await conn.commit()
+    return { kind: 'ended', schemaName: s, defaultCategories, syncKeysInactivated }
+  } catch (err) {
+    await conn.rollback()
+    throw err
+  } finally {
+    conn.release()
+  }
+}
+
+/** Desfecho de gerar a chave (D12 + D-PR47). */
+export type SyncKeyCreateOutcome =
+  | { kind: 'missing' }
+  | { kind: 'not-for-source'; sourceKind: SourceKind }
+  | { kind: 'exists' }
+  | { kind: 'created' }
+
+/**
+ * Uma chave por estabelecimento; id sem auto_increment → MAX+1 na transação. As DECISÕES ficam DENTRO da transação (gate adversarial
+ * R7, ADV-R7-03 — TOCTOU): trava da institution 1º (PADROES §9 regra 7 — a MESMA linha que o ato "encerrar a transição" trava) → o fato
+ * `FOR UPDATE` (W não tem chave — nativo web, ou L encerrado para W; lido FORA da transação, o ato podia comitar no meio e nascer uma
+ * chave ATIVA numa institution W: dois escritores) → "já existe chave viva" na mesma transação (dois POSTs simultâneos) → INSERT.
+ */
+export async function insertSyncApiKey(
+  institutionId: number, apiKey: string, establishmentCode: string
+): Promise<SyncKeyCreateOutcome> {
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    await lockInstitutionCounters(conn, institutionId)
+    const [fact] = await conn.query<any[]>(
+      `SELECT source_kind AS sourceKind FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N' FOR UPDATE`, [institutionId])
+    if ((fact as any[]).length === 0) { await conn.rollback(); return { kind: 'missing' } }
+    const sourceKind: SourceKind = fact[0].sourceKind
+    if (!sourceKindHasSync(sourceKind)) { await conn.rollback(); return { kind: 'not-for-source', sourceKind } }
+    const [keys] = await conn.query<any[]>(
+      `SELECT id, active FROM setes_central.tb_sync_api_key
+        WHERE tb_institution_id = ? AND deleted = 'N' FOR UPDATE`,
+      [institutionId])
+    if ((keys as any[]).length > 0) { await conn.rollback(); return { kind: 'exists' } }
     const [rows] = await conn.query<any[]>(
       'SELECT COALESCE(MAX(id), 0) + 1 AS nextId FROM setes_central.tb_sync_api_key FOR UPDATE'
     )
@@ -408,6 +508,7 @@ export async function insertSyncApiKey(
       [Number(rows[0].nextId), apiKey, institutionId, establishmentCode]
     )
     await conn.commit()
+    return { kind: 'created' }
   } catch (err) {
     await conn.rollback()
     throw err

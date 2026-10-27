@@ -108,7 +108,6 @@ describe('services repository', () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])          // trava da institution (D-PR2)
-      .mockResolvedValueOnce([[]])                   // reconferência da chave do sincronizador (Rodada 6) — nenhuma ativa
       .mockResolvedValueOnce([[{ nextId: 7 }]])      // MAX+1
       .mockResolvedValueOnce([[{ 1: 1 }]])           // assertRefs: categoria viva
       .mockResolvedValueOnce([[{ 1: 1 }]])           // assertRefs: categoria serve ao serviço (Q-PR49 (a))
@@ -131,7 +130,6 @@ describe('services repository', () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])          // trava da institution
-      .mockResolvedValueOnce([[]])                   // reconferência da chave do sincronizador (Rodada 6) — nenhuma ativa
       .mockResolvedValueOnce([[{ nextId: 8 }]])      // MAX+1
       .mockResolvedValueOnce([[{ 1: 1 }]])           // categoria viva
       .mockResolvedValueOnce([[{ 1: 1 }]])           // categoria serve ao serviço
@@ -147,11 +145,10 @@ describe('services repository', () => {
     expect(insertCall[1][1]).toBe('SRV-01')
   })
 
-  it('categoria inexistente -> 400 com fields[] e rollback (id cunhado ANTES — D-PR2: trava da institution é o 1º statement)', async () => {
+  it('categoria inexistente -> 400 com fields[] e rollback (id cunhado ANTES — D-PR2: trava da institution é o 1º statement; sem reconferência da chave — Rodada 7)', async () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])       // lockInstitutionCounters (1º statement da transação)
-      .mockResolvedValueOnce([[]])                // reconferência da chave do sincronizador (Rodada 6)
       .mockResolvedValueOnce([[{ nextId: 10 }]])  // MAX + 1 — sem FOR UPDATE nas linhas de produto
       .mockResolvedValueOnce([[]])                // categoria não achada
 
@@ -162,10 +159,9 @@ describe('services repository', () => {
     const sqls = conn.query.mock.calls.map((c: any[]) => c[0] as string)
     expect(sqls[0]).toContain('setes_central.tb_institution')
     expect(sqls[0]).toContain('FOR UPDATE')
-    expect(sqls[1]).toContain('setes_central.tb_sync_api_key')
-    expect(sqls[1]).toContain('LOCK IN SHARE MODE')
-    expect(sqls[2]).toContain('MAX(id)')
-    expect(sqls[2]).not.toContain('FOR UPDATE')
+    expect(sqls[1]).toContain('MAX(id)')
+    expect(sqls[1]).not.toContain('FOR UPDATE')
+    expect(sqls.some((x: string) => /tb_sync_api_key|source_kind/.test(x))).toBe(false)
   })
 
   it("update de id que é MERCADORIA devolve false (kind='S' no WHERE — D5)", async () => {
@@ -218,7 +214,6 @@ describe('services repository', () => {
     const second: any = { query: jest.fn(), beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
     second.query
       .mockResolvedValueOnce([[{ id: 1 }]])                  // trava da institution
-      .mockResolvedValueOnce([[]])                           // reconferência da chave (Rodada 6)
       .mockResolvedValueOnce([[{ nextId: 11 }]])             // MAX+1
       .mockResolvedValueOnce([[{ id: 1 }]])                  // categoria
       .mockResolvedValueOnce([[{ 1: 1 }]])                   // categoria serve ao serviço (Q-PR49 (a))
@@ -235,17 +230,16 @@ describe('services repository', () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])          // trava
-      .mockResolvedValueOnce([[]])                   // reconferência da chave do sincronizador (Rodada 6) — nenhuma ativa
       .mockResolvedValueOnce([[{ nextId: 9 }]])      // MAX+1
       .mockResolvedValueOnce([[{ 1: 1 }]])           // categoria viva
       .mockResolvedValueOnce([[]])                   // predicado do serviço não casa
     await expect(svcRepo.insertService({ description: 'X', categoryId: 4 }, 'setes_setes', 1))
       .rejects.toMatchObject({ statusCode: 400, fields: [{ field: 'categoryId', message: 'Escolha uma categoria de serviço' }] })
-    const kindSql = conn.query.mock.calls[4][0] as string
+    const kindSql = conn.query.mock.calls[3][0] as string
     expect(kindSql).toContain("c.kind = 'S'")
     expect(kindSql).toContain("c.kind = 'S' OR NOT EXISTS")
     expect(kindSql).toContain("sk.kind = 'S' AND sk.deleted = 'N' AND sk.active = 'S'")
-    expect(conn.query.mock.calls[4][1]).toEqual([4, 1])
+    expect(conn.query.mock.calls[3][1]).toEqual([4, 1])
     expect(conn.rollback).toHaveBeenCalled()
   })
 
@@ -302,11 +296,10 @@ describe('price-lists repository', () => {
     expect(mockQuery.mock.calls[1][0] as string).toContain('COUNT(*)')
   })
 
-  it('insert: trava a institution (regra 7), reconfere a chave do sincronizador (Rodada 6) e cunha MAX+1 FOR UPDATE por institution', async () => {
+  it('insert: trava a institution (regra 7) e cunha MAX+1 FOR UPDATE por institution — sem reconferência da chave (Rodada 7: o dono é o fato monotônico)', async () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])          // trava da institution
-      .mockResolvedValueOnce([[]])                   // chave do sincronizador: nenhuma ativa
       .mockResolvedValueOnce([[{ nextId: 3 }]])
       .mockResolvedValueOnce([{}])
     const id = await plRepo.insertPriceList(
@@ -314,19 +307,8 @@ describe('price-lists repository', () => {
     expect(id).toBe(3)
     const sqls = conn.query.mock.calls.map((c: any[]) => c[0] as string)
     expect(sqls[0]).toMatch(/setes_central\.tb_institution WHERE id = \? FOR UPDATE/)
-    expect(sqls[1]).toContain('LOCK IN SHARE MODE')
-    expect(sqls[2]).toContain('FOR UPDATE')
-  })
-
-  it('insert com a chave do sincronizador RELIGADA enquanto esperava a trava → 409 SYNC_MANAGED_CATALOG e rollback (reconferência — gate socrático R6)', async () => {
-    const conn = fakeConn()
-    conn.query
-      .mockResolvedValueOnce([[{ id: 1 }]])
-      .mockResolvedValueOnce([[{ 1: 1 }]])          // a chave está ativa agora
-    await expect(plRepo.insertPriceList({ description: 'Atacado' }, 'setes_setes', 1))
-      .rejects.toMatchObject({ statusCode: 409, code: 'SYNC_MANAGED_CATALOG' })
-    expect(conn.rollback).toHaveBeenCalled()
-    expect(conn.query.mock.calls.some((c: any[]) => /INSERT INTO/.test(c[0]))).toBe(false)
+    expect(sqls[1]).toContain('FOR UPDATE')
+    expect(sqls.some((x: string) => /tb_sync_api_key|LOCK IN SHARE MODE/.test(x))).toBe(false)
   })
 
   it('update/softDelete devolvem false quando não acham a linha', async () => {
@@ -335,5 +317,87 @@ describe('price-lists repository', () => {
       9, { description: 'X' }, 'setes_setes', 1)).toBe(false)
     mockQuery.mockResolvedValueOnce([{ affectedRows: 0 }])
     expect(await plRepo.softDeletePriceList(9, 'setes_setes', 1)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------
+// D-PR45 (Rodada 7): o enquadramento fiscal do serviço por rota própria
+// ---------------------------------------------------------------------
+
+describe('services — D-PR45: rotas próprias do enquadramento fiscal (fora da guarda do dono do catálogo)', () => {
+  it('updateServiceTaxRule: trava o produto (kind S) 1º, confere a regra na transação, grava pelo MESMO upsert de tb_service; null = sem regra', async () => {
+    const conn = fakeConn()
+    conn.query
+      .mockResolvedValueOnce([[{ id: 2 }]])          // tb_product FOR UPDATE (kind S)
+      .mockResolvedValueOnce([[{ 1: 1 }]])           // regra existe
+      .mockResolvedValueOnce([{}])                   // INSERT … ON DUPLICATE KEY UPDATE tb_service
+    await expect(svcRepo.updateServiceTaxRule(2, 7, 'setes_setes', 1)).resolves.toBe(true)
+    const sqls = conn.query.mock.calls.map((c: any[]) => c[0] as string)
+    expect(sqls[0]).toMatch(/tb_product[\s\S]*kind = 'S' FOR UPDATE/)
+    expect(sqls[1]).toMatch(/tb_service_tax_rule WHERE id = \?/)
+    expect(sqls[2]).toMatch(/INSERT INTO `setes_setes`\.tb_service[\s\S]*ON DUPLICATE KEY UPDATE/)
+    expect(conn.query.mock.calls[2][1]).toEqual([2, 1, 7])
+    expect(sqls.some((x: string) => /tb_product\s+SET|tb_price|tb_service_ibscbs/.test(x))).toBe(false)     // só o fato da regra
+    expect(conn.commit).toHaveBeenCalled()
+
+    const c2 = fakeConn()
+    c2.query.mockResolvedValueOnce([[{ id: 2 }]]).mockResolvedValueOnce([{}])
+    await expect(svcRepo.updateServiceTaxRule(2, null, 'setes_setes', 1)).resolves.toBe(true)
+    expect(c2.query.mock.calls[1][1]).toEqual([2, 1, null])                                     // null = sem regra, sem conferir FK
+  })
+
+  it('updateServiceTaxRule: regra inexistente → 400 fields[serviceTaxRuleId] e rollback; serviço inexistente (ou mercadoria) → false sem escrever', async () => {
+    const conn = fakeConn()
+    conn.query.mockResolvedValueOnce([[{ id: 2 }]]).mockResolvedValueOnce([[]])
+    await expect(svcRepo.updateServiceTaxRule(2, 99, 'setes_setes', 1))
+      .rejects.toMatchObject({ statusCode: 400, fields: [{ field: 'serviceTaxRuleId', message: expect.any(String) }] })
+    expect(conn.rollback).toHaveBeenCalled()
+    const c2 = fakeConn()
+    c2.query.mockResolvedValueOnce([[]])
+    await expect(svcRepo.updateServiceTaxRule(16, 7, 'setes_setes', 1)).resolves.toBe(false)
+    expect(c2.query.mock.calls.some((c: any[]) => /^\s*(INSERT|UPDATE)/.test(c[0]))).toBe(false)
+  })
+
+  it('updateServiceFiscalClassification: só NBS (ibscbs ausente não mexe), só o par (nbs ausente não mexe), null remove — pelo MESMO escritor do PUT', async () => {
+    const conn = fakeConn()
+    conn.query
+      .mockResolvedValueOnce([[{ id: 2 }]])                     // tb_product FOR UPDATE
+      .mockResolvedValueOnce([[{ nbs: '115013000' }]])          // changedClassification: NBS igual → nada a conferir
+      .mockResolvedValueOnce([{}])                              // UPDATE tb_service SET nbs
+    await expect(svcRepo.updateServiceFiscalClassification(2, { nbs: '115013000' }, 'setes_setes', 1, 9)).resolves.toBe(true)
+    let sqls = conn.query.mock.calls.map((c: any[]) => c[0] as string)
+    expect(sqls[2]).toMatch(/UPDATE `setes_setes`\.tb_service SET nbs = \?/)
+    expect(sqls.some((x: string) => /tb_service_ibscbs/.test(x))).toBe(false)
+
+    const c2 = fakeConn()
+    c2.query
+      .mockResolvedValueOnce([[{ id: 2 }]])
+      .mockResolvedValueOnce([[{ c: '000001', p: '100301' }]])  // par igual ao gravado → não reconfere o catálogo
+      .mockResolvedValueOnce([{}])                              // upsert tb_service_ibscbs
+    await expect(svcRepo.updateServiceFiscalClassification(2, { ibscbs: { classificationCode: '000001', placeIndicatorCode: '100301' } }, 'setes_setes', 1, 9)).resolves.toBe(true)
+    sqls = c2.query.mock.calls.map((c: any[]) => c[0] as string)
+    expect(sqls[2]).toMatch(/INSERT INTO `setes_setes`\.tb_service_ibscbs/)
+    expect(c2.query.mock.calls[2][1]).toEqual([2, 1, '000001', '100301', 9])                  // autor do JWT
+    expect(sqls.some((x: string) => /SET nbs/.test(x))).toBe(false)
+
+    const c3 = fakeConn()
+    c3.query.mockResolvedValueOnce([[{ id: 2 }]]).mockResolvedValueOnce([{}])
+    await expect(svcRepo.updateServiceFiscalClassification(2, { ibscbs: null }, 'setes_setes', 1, 9)).resolves.toBe(true)
+    expect(c3.query.mock.calls[1][0]).toMatch(/UPDATE `setes_setes`\.tb_service_ibscbs SET deleted = 'S'/)
+  })
+
+  it('DTOs das rotas próprias: tax-rule exige o campo (null vale); ibscbs exige nbs e/ou ibscbs e recusa formas erradas', () => {
+    const { serviceTaxRuleDto, serviceIbscbsDto } = require('../modules/services/services.dto')
+    expect(serviceTaxRuleDto.safeParse({ serviceTaxRuleId: 7 }).success).toBe(true)
+    expect(serviceTaxRuleDto.safeParse({ serviceTaxRuleId: null }).success).toBe(true)
+    for (const bad of [{}, { serviceTaxRuleId: '7' }, { serviceTaxRuleId: 0 }, { serviceTaxRuleId: 1.5 }]) {
+      expect([JSON.stringify(bad), serviceTaxRuleDto.safeParse(bad).success]).toEqual([JSON.stringify(bad), false])
+    }
+    expect(serviceIbscbsDto.safeParse({ nbs: '115013000' }).success).toBe(true)
+    expect(serviceIbscbsDto.safeParse({ ibscbs: null }).success).toBe(true)
+    expect(serviceIbscbsDto.safeParse({ nbs: null, ibscbs: { classificationCode: '000001', placeIndicatorCode: '100301' } }).success).toBe(true)
+    for (const bad of [{}, { nbs: '1150130' }, { ibscbs: { classificationCode: '1' } }, { outro: 1 }]) {
+      expect([JSON.stringify(bad), serviceIbscbsDto.safeParse(bad).success]).toEqual([JSON.stringify(bad), false])
+    }
   })
 })

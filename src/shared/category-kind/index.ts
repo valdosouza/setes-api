@@ -5,11 +5,13 @@ import { pathSegment } from '@shared/tree-path'
 
 /**
  * A NATUREZA da categoria (`tb_category.kind` — árvore P de produtos × S de serviços) para quem a CONSOME fora da tela Categorias
- * (cadastro de produtos, Rodada 6 — Q-PR38' (a) + Q-PR49 (a), Valdo 2026-10-18; `Infra-IA/prompts/prompt_modulo_products.md`).
+ * (cadastro de produtos, Rodada 6 — Q-PR38' (a) + Q-PR49 (a), Valdo 2026-10-18; Rodada 7 — D-PR47/D-PR48, 2026-10-20;
+ * `Infra-IA/prompts/prompt_modulo_products.md`).
  *
  * Fato que decide: o legado não marca categoria de serviço — toda categoria sincronizada nasce 'P' (grupo do sync,
- * `setes-sync/verificacao-comissao-margem-mercadoria.md` §8) — e o estabelecimento que nasce na web recebe "Produtos" (P) e "Serviços"
- * (S) da migration 072. A regra do serviço é pelo FATO, nunca pelo modo (ter chave do sincronizador): o estabelecimento que TEM
+ * `setes-sync/verificacao-comissao-margem-mercadoria.md` §8) — e o estabelecimento cujo catálogo é da WEB (origem dos cadastros W ou P —
+ * D-PR47) recebe "Produtos" (P) e "Serviços" (S): pela migration 072 (os que já existem), pelo onboarding (os que nascem W/P) e pelo ato
+ * "encerrar a transição" (o L que vira W ou P — D-PR48). A regra do serviço é pelo FATO, nunca pelo modo: o estabelecimento que TEM
  * categoria S viva usa só as S; o que não tem (o do legado, até ele separar — D-SY11) usa as P.
  */
 
@@ -36,16 +38,14 @@ export const LIVE_SERVICE_CATEGORY_SQL = (alias: string) => `${alias}.kind = 'S'
 
 /**
  * Cria a categoria padrão do kind (`DEFAULT_CATEGORY_DESCRIPTION`) quando o estabelecimento não tem NENHUMA viva (não excluída e ativa)
- * daquele kind — o ATO
- * de desligar o sincronizador (Q-PR49 (a)) usa esta peça; a migration 072 faz o mesmo em SQL. Raiz, `posit_level` = o próprio id em 3
- * dígitos (`@shared/tree-path`), id MAX+1 da institution contando as excluídas (o id nunca volta com outro significado).
+ * daquele kind — peça do onboarding W/P e do ato "encerrar a transição" (D-PR48); a migration 072 faz o mesmo em SQL para os que já
+ * existem. Raiz, `posit_level` = o próprio id em 3 dígitos (`@shared/tree-path`), id MAX+1 da institution contando as excluídas (o id
+ * nunca volta com outro significado).
  * Protocolo de trava: a institution (PADROES §9 regra 7) e a faixa das categorias dela (`FOR UPDATE` — o mesmo do módulo `categories`,
  * que cunha por MAX+1 travante); pode ser o 1º statement da transação. Devolve o id criado, ou null se já havia uma viva.
- * `at` = o instante gravado em created_at/updated_at (ausente = NOW()) — o ato de desligar o sincronizador grava 1 s ANTES do instante do
- * desligamento, para a própria categoria nunca contar como "nascida na web" quando o super religar (Q-PR47).
  */
 export async function ensureDefaultCategory(
-  conn: PoolConnection, schemaName: string, institutionId: number, kind: CategoryKind, at: Date | null = null
+  conn: PoolConnection, schemaName: string, institutionId: number, kind: CategoryKind
 ): Promise<number | null> {
   const s = assertSchema(schemaName)
   await lockInstitutionCounters(conn, institutionId)
@@ -61,7 +61,18 @@ export async function ensureDefaultCategory(
   const id = Number(nextId)
   await conn.query(
     `INSERT INTO \`${s}\`.tb_category (id, tb_institution_id, description, posit_level, kind, active, created_at, updated_at, deleted)
-     VALUES (?, ?, ?, ?, ?, 'S', COALESCE(?, NOW()), COALESCE(?, NOW()), 'N')`,
-    [id, institutionId, DEFAULT_CATEGORY_DESCRIPTION[kind], pathSegment(id), kind, at, at])
+     VALUES (?, ?, ?, ?, ?, 'S', NOW(), NOW(), 'N')`,
+    [id, institutionId, DEFAULT_CATEGORY_DESCRIPTION[kind], pathSegment(id), kind])
   return id
+}
+
+/** As DUAS categorias padrão de um catálogo da web ("Produtos" P e "Serviços" S) — o que falta nasce, o que existe vivo fica.
+ *  Chamada pelo onboarding (origem W/P) e pelo ato "encerrar a transição" (D-PR48). Devolve o id criado por kind (null = já havia). */
+export async function ensureDefaultCategories(
+  conn: PoolConnection, schemaName: string, institutionId: number
+): Promise<Record<CategoryKind, number | null>> {
+  return {
+    P: await ensureDefaultCategory(conn, schemaName, institutionId, 'P'),
+    S: await ensureDefaultCategory(conn, schemaName, institutionId, 'S'),
+  }
 }

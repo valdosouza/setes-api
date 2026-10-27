@@ -97,7 +97,7 @@ router.get('/:id', controller.getOne)
  *     responses:
  *       201: { description: "{ ok, data: { id } }" }
  *       400: { description: Validação falhou }
- *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: a tabela de preço é só consulta (D-PR41 revista)" }
+ *       409: { description: "CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro é só consulta na web (D-PR47)" }
  */
 router.post('/', controller.create)
 
@@ -116,7 +116,7 @@ router.post('/', controller.create)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrada }
- *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: a tabela de preço é só consulta (D-PR41 revista)" }
+ *       409: { description: "CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro é só consulta na web (D-PR47)" }
  *   delete:
  *     summary: Exclui (soft delete) — preços gravados ficam como histórico
  *     tags: [price-lists]
@@ -129,7 +129,7 @@ router.post('/', controller.create)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrada }
- *       409: { description: "SYNC_MANAGED_CATALOG — estabelecimento com sincronizador ativo: a tabela de preço é só consulta (D-PR41 revista)" }
+ *       409: { description: "CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro é só consulta na web (D-PR47)" }
  */
 router.put('/:id', controller.update)
 router.delete('/:id', controller.remove)

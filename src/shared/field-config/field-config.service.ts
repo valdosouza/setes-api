@@ -98,6 +98,9 @@ export async function assertClientRequired(
   moduleKey: string,
   values: Record<string, unknown>,
   payloadPaths: Readonly<Record<string, string>> = {},
+  /** Rota que grava só PARTE do cadastro (ex.: `PUT /services/:id/tax-rule` — D-PR45): confere a obrigatoriedade do cliente só sobre
+   *  estes `fieldName`s; ausente = o cadastro inteiro (o form). */
+  only?: readonly string[],
 ): Promise<void> {
   const interfaceId = await findInterfaceIdByKeyCached(moduleKey)
   if (interfaceId === null) return
@@ -108,6 +111,7 @@ export async function assertClientRequired(
   const missing: FieldError[] = []
   for (const field of fields) {
     if (field.requiredTech === 'S' || field.required !== 'S') continue
+    if (only && !only.includes(field.fieldName)) continue
     const path = payloadPaths[field.fieldName] ?? fieldNameToCamel(field.fieldName)
     const value = valueAtPath(values, path)
     if (value === undefined || value === null || String(value).trim() === '') {

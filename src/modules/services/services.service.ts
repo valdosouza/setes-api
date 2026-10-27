@@ -6,10 +6,11 @@ import {
 } from '@shared/ibscbs-classification'
 import { ListQuery, PagedRows, PublicSearchCriterion, publicCriteria } from '@shared/list'
 import {
-  ServiceListRow, ServiceFull, ServiceInput, ServiceLookupRow,
+  ServiceListRow, ServiceFull, ServiceInput, ServiceLookupRow, ServiceFiscalClassificationInput,
 } from './services.interface'
 import {
   listServices, getService, insertService, updateService, softDeleteService,
+  updateServiceTaxRule, updateServiceFiscalClassification,
   listCategoriesLookup, listFinancialPlansLookup, listPriceListsLookup,
   listServiceTaxRulesLookup,
   SERVICE_SEARCH_CRITERIA,
@@ -67,6 +68,24 @@ export async function editService(
 ): Promise<void> {
   const found = await withDeadlockRetry('services PUT', { institutionId: scope.institutionId, id }, RETRIES,
     () => updateService(id, input, scope.schemaName, scope.institutionId, scope.userId ?? null))
+  if (!found) throw new HttpError(404, `Serviço ${id} não encontrado`)
+}
+
+/** D-PR45: o vínculo serviço → regra de ISS pela rota própria (fora da guarda do dono do catálogo). */
+export async function editServiceTaxRule(
+  id: number, serviceTaxRuleId: number | null, scope: ServiceScope
+): Promise<void> {
+  const found = await withDeadlockRetry('services/:id/tax-rule PUT', { institutionId: scope.institutionId, id }, RETRIES,
+    () => updateServiceTaxRule(id, serviceTaxRuleId, scope.schemaName, scope.institutionId))
+  if (!found) throw new HttpError(404, `Serviço ${id} não encontrado`)
+}
+
+/** D-PR45: a presunção IBS/CBS pela rota própria (fora da guarda do dono do catálogo). */
+export async function editServiceIbscbs(
+  id: number, input: ServiceFiscalClassificationInput, scope: ServiceScope
+): Promise<void> {
+  const found = await withDeadlockRetry('services/:id/ibscbs PUT', { institutionId: scope.institutionId, id }, RETRIES,
+    () => updateServiceFiscalClassification(id, input, scope.schemaName, scope.institutionId, scope.userId ?? null))
   if (!found) throw new HttpError(404, `Serviço ${id} não encontrado`)
 }
 

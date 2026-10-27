@@ -1,12 +1,12 @@
 /// <reference types="jest" />
-// GATE ADVERSARIAL — delta D-PR41/D-PR43 do cadastro de produtos (2026-10-18; skill testar-adversarial.md;
-// prompt_modulo_products.md §19.1). Alvo: o interruptor `PUT /api/institutions/:id/sync-api-key/active` (D-PR43) e o lookup de
-// categorias do serviço pelo MODO do estabelecimento (D-PR41), pelo app REAL (auth RS256 de teste → feature flag → rate limit →
-// router → superGuard → controller → service → repository), com o banco num MODELO em memória (estado das chaves) e o serviço do
-// merchandise MOCKADO (o que se prova é se a ESCRITA chega). `it('[RESISTIU] …')` = o ataque foi barrado / a promessa vale;
-// `it('[ACHADO] …')` = fixa o comportamento observado que vira questão para o dono.
-// Rodada 6 (2026-10-18): o modelo passou a atender a TRANSAÇÃO do ato (trava, chaves FOR UPDATE, categoria padrão, webBornSince) e o
-// lookup do serviço vai pelo FATO (Q-PR49 (a)) — o ACHADO MEDIUM do lookup esvaziado virou [CORRIGIDO].
+// GATE ADVERSARIAL — Rodada 7 do cadastro de produtos (2026-10-20; skill testar-adversarial.md; prompt_modulo_products.md "Rodada 7").
+// Alvo: os DOIS atos do cadastro de Institutions sobre o sincronizador — o interruptor `PUT /api/institutions/:id/sync-api-key/active`
+// (D-PR43 + D-PR48 item 1: só PAUSA, reversível, não decide dono) e o ato ÚNICO e IRREVERSÍVEL `POST /api/institutions/:id/
+// end-legacy-transition` (D-PR48/D-PR49: L → W ou L → P) — e o efeito deles na guarda do dono do catálogo (D-PR47), pelo app REAL
+// (auth RS256 de teste → feature flag → rate limit → router → superGuard → controller → service → repository), com o banco num MODELO em
+// memória (fato por institution, chaves, categorias) e o serviço do merchandise MOCKADO (o que se prova é se a ESCRITA chega).
+// `it('[RESISTIU] …')` = o ataque foi barrado / a promessa vale; `it('[ACHADO] …')` = fixa o comportamento observado que vira questão.
+// Rodada 6 → 7: caíram a "Serviços" do desligar, o 409 SYNC_KEY_WEB_ROWS do religar e a reconferência na transação (não há religar).
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
 
@@ -47,83 +47,117 @@ const MERCH_IFACE = 40
 const KEY = 'k'.repeat(48)
 
 // ---- modelo do banco (só o que o delta toca) ----
-// Rodada 6: o ato vira UMA transação (getConnection) — o modelo atende o pool E a conexão com o mesmo estado.
-const NOW = new Date(Date.UTC(2026, 9, 18, 12, 0, 0))
-const SCHEMA_OF: Record<number, string> = { 1: 'setes_setes', 2: 'setes_x' }
-type Key = { active: 'S' | 'N'; deleted: 'S' | 'N'; updatedAt?: Date | null }
-type Cat = { id: number; kind: 'P' | 'S'; deleted: 'S' | 'N'; createdAt: Date }
-let institutions: Set<number>
+const NOW = new Date(Date.UTC(2026, 9, 20, 12, 0, 0))
+type Inst = { schemaName: string; kind: 'W' | 'L' | 'P'; endedAt: Date | null }
+type Key = { active: 'S' | 'N'; deleted: 'S' | 'N' }
+type Cat = { id: number; kind: 'P' | 'S'; deleted: 'S' | 'N'; active: 'S' | 'N' }
+let institutions: Map<number, Inst>
 let keys: Map<number, Key[]>        // institution → chaves (sem UNIQUE por institution no DDL real)
 let cats: Map<number, Cat[]>         // institution → categorias
-let webBorn: Map<number, { table: string; createdAt: Date }[]>
-let updates: any[][]
+let keyUpdates: any[][]
+let instUpdates: any[][]
+let failOn: RegExp | null
+let deadlockOnce: boolean
 function db(sql: string, params: any[] = []): any {
   const s = String(sql)
+  if (failOn && failOn.test(s)) {
+    throw Object.assign(new Error("Table 'setes_setes.tb_category' doesn't exist"), { code: 'ER_NO_SUCH_TABLE', errno: 1146 })
+  }
+  // deadlock no MAX+1 da categoria (o InnoDB desfaz a transação INTEIRA — o modelo também, no rollback)
+  if (deadlockOnce && /MAX\(id\), 0\) \+ 1 AS nextId FROM `\w+`\.tb_category/.test(s)) {
+    deadlockOnce = false
+    throw Object.assign(new Error('Deadlock found when trying to get lock'), { code: 'ER_LOCK_DEADLOCK', errno: 1213 })
+  }
   if (/FROM setes_central\.tb_institution WHERE id = \? FOR UPDATE/.test(s)) return [institutions.has(Number(params[0])) ? [{ id: params[0] }] : []]
-  if (/SELECT schema_name AS schemaName FROM setes_central\.tb_institution/.test(s)) {
-    const id = Number(params[0])
-    return [institutions.has(id) ? [{ schemaName: SCHEMA_OF[id] }] : []]
+  if (/SELECT id FROM setes_central\.tb_institution WHERE id = \? AND deleted = 'N'/.test(s)) return [institutions.has(Number(params[0])) ? [{ id: params[0] }] : []]
+  if (/SELECT source_kind AS kind FROM setes_central\.tb_institution/.test(s)) {
+    const i = institutions.get(Number(params[0])); return [i ? [{ kind: i.kind }] : []]
+  }
+  if (/SELECT source_kind AS sourceKind FROM setes_central\.tb_institution WHERE id = \? AND deleted = 'N'/.test(s)) {
+    const i = institutions.get(Number(params[0])); return [i ? [{ sourceKind: i.kind }] : []]
+  }
+  if (/SELECT schema_name AS schemaName, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt/.test(s)) {
+    const i = institutions.get(Number(params[0]))
+    return [i ? [{ schemaName: i.schemaName, sourceKind: i.kind, transitionEndedAt: i.endedAt }] : []]
+  }
+  if (/SELECT schema_name AS schemaName, active, source_kind AS sourceKind, transition_ended_at/.test(s)) {
+    const i = institutions.get(Number(params[0]))
+    return [i ? [{ schemaName: i.schemaName, active: 'S', sourceKind: i.kind, transitionEndedAt: i.endedAt }] : []]
+  }
+  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\)/.test(s)) {
+    instUpdates.push(params)
+    const i = institutions.get(Number(params[1]))
+    if (!i || i.kind !== 'L' || i.endedAt) return [{ affectedRows: 0 }]
+    i.kind = params[0]; i.endedAt = NOW
+    return [{ affectedRows: 1 }]
   }
   if (/FROM setes_central\.tb_sync_api_key\s+WHERE tb_institution_id = \? AND deleted = 'N' FOR UPDATE/.test(s)) {
-    return [(keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N')
-      .map((k, i) => ({ id: i + 1, active: k.active, createdAt: new Date(0), updatedAt: k.updatedAt ?? null }))]
+    return [(keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N').map((k, i) => ({ id: i + 1, active: k.active }))]
   }
-  if (/SELECT NOW\(\) AS now/.test(s)) return [[{ now: NOW }]]
-  if (/UPDATE setes_central\.tb_sync_api_key SET active/.test(s)) {
-    updates.push(params)
-    const [active, at, inst] = params
+  if (/UPDATE setes_central\.tb_sync_api_key SET active = \?, updated_at = NOW\(\)/.test(s)) {
+    keyUpdates.push(params)
+    const [active, inst] = params
     const hit = (keys.get(Number(inst)) ?? []).filter(k => k.deleted === 'N' && k.active !== active)
-    hit.forEach(k => { k.active = active; k.updatedAt = at ?? NOW })
+    hit.forEach(k => { k.active = active })
     return [{ affectedRows: hit.length }]
   }
-  if (/SELECT 1 FROM setes_central\.tb_sync_api_key/.test(s)) {
-    const any = (keys.get(Number(params[0])) ?? []).some(k => k.active === 'S' && k.deleted === 'N')
-    return [any ? [{ 1: 1 }] : []]
+  if (/UPDATE setes_central\.tb_sync_api_key SET active = 'N', updated_at = NOW\(\)/.test(s)) {
+    keyUpdates.push(['N(ato)', params[0]])
+    const hit = (keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N' && k.active === 'S')
+    hit.forEach(k => { k.active = 'N' })
+    return [{ affectedRows: hit.length }]
   }
   if (/api_key AS apiKey/.test(s)) {
     const first = (keys.get(Number(params[0])) ?? []).find(k => k.deleted === 'N')
     return [first ? [{ apiKey: KEY, establishmentCode: 'SETES_SETES', active: first.active }] : []]
   }
-  // @shared/category-kind (ato de desligar)
+  if (/MAX\(id\), 0\) \+ 1 AS nextId FROM setes_central\.tb_sync_api_key/.test(s)) return [[{ nextId: 1 }]]
+  if (/INSERT INTO setes_central\.tb_sync_api_key/.test(s)) {
+    const inst = Number(params[2])
+    keys.set(inst, [...(keys.get(inst) ?? []), { active: 'S', deleted: 'N' }])
+    return [{}]
+  }
+  // @shared/category-kind (o ato "encerrar a transição")
   if (/tb_category\s+WHERE tb_institution_id = \? AND kind = \? AND deleted = 'N' AND active = 'S' LIMIT 1 FOR UPDATE/.test(s)) {
-    return [(cats.get(Number(params[0])) ?? []).filter(c => c.kind === params[1] && c.deleted === 'N').slice(0, 1).map(c => ({ id: c.id }))]
+    return [(cats.get(Number(params[0])) ?? []).filter(c => c.kind === params[1] && c.deleted === 'N' && c.active === 'S').slice(0, 1).map(c => ({ id: c.id }))]
   }
   if (/MAX\(id\), 0\) \+ 1 AS nextId FROM `\w+`\.tb_category/.test(s)) {
     return [[{ nextId: Math.max(0, ...(cats.get(Number(params[0])) ?? []).map(c => c.id)) + 1 }]]
   }
   if (/INSERT INTO `\w+`\.tb_category/.test(s)) {
-    const [id, inst, , , kind, at] = params
-    const list = cats.get(Number(inst)) ?? []
-    list.push({ id: Number(id), kind, deleted: 'N', createdAt: at ?? NOW })
-    cats.set(Number(inst), list)
+    const [id, inst, , , kind] = params
+    cats.set(Number(inst), [...(cats.get(Number(inst)) ?? []), { id: Number(id), kind, deleted: 'N', active: 'S' }])
     return [{}]
   }
-  // @shared/sync-key webBornSince (religar)
-  if (/SELECT COUNT\(\*\) AS n FROM `\w+`\.(tb_\w+) WHERE tb_institution_id = \? AND created_at >= \?/.test(s)) {
-    const table = /\.(tb_\w+) WHERE/.exec(s)![1]
-    const since = params[1] as Date
-    const fromCats = table === 'tb_category' ? (cats.get(Number(params[0])) ?? []).filter(c => c.createdAt >= since).length : 0
-    const fromWeb = (webBorn.get(Number(params[0])) ?? []).filter(r => r.table === table && r.createdAt >= since).length
-    return [[{ n: fromCats + fromWeb }]]
-  }
-  if (/SELECT id FROM `\w+`\.(tb_\w+) WHERE tb_institution_id = \? AND created_at >= \? ORDER BY id/.test(s)) return [[{ id: 99 }]]
   // lookup de categorias do serviço pelo FATO (Q-PR49 (a))
   if (/FROM `\w+`\.tb_category c/.test(s) && /c\.kind = 'S' OR NOT EXISTS/.test(s)) {
     const list = (cats.get(Number(params[0])) ?? []).filter(c => c.deleted === 'N')
-    const hasS = list.some(c => c.kind === 'S')                       // o modelo não tem inativas: viva = não excluída
+    const hasS = list.some(c => c.kind === 'S' && c.active === 'S')
     return [list.filter(c => (hasS ? c.kind === 'S' : true)).map(c => ({ id: c.id, description: `C${c.id}`, name: `C${c.id}` }))]
   }
   if (/FROM setes_central\.tb_interface WHERE i18n_key/.test(s)) return [String(params[0]) === 'merchandise' ? [{ id: MERCH_IFACE }] : []]
   if (/tb_institution_has_interface/.test(s)) return [Number(params[1]) === MERCH_IFACE ? [{ 1: 1 }] : []]
   if (/tb_user_has_privilege/.test(s)) return [[]]
+  if (/^\s*SELECT/i.test(s)) return [[]]
   throw new Error(`SQL inesperado: ${s.slice(0, 100)}`)
 }
 let txConns: any[]
+// o modelo DESFAZ em rollback o que a transação escreveu (retrato no beginTransaction) — como o InnoDB
 function routeDb(): void {
   q.mockImplementation(async (sql: string, params: any[] = []) => db(sql, params))
   ;(pool as any).getConnection.mockImplementation(async () => {
-    const c = { query: jest.fn(async (sql: string, params: any[] = []) => db(sql, params)),
-      beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+    let snap: any = null
+    const c = {
+      query: jest.fn(async (sql: string, params: any[] = []) => db(sql, params)),
+      beginTransaction: jest.fn(async () => { snap = structuredClone({ institutions, keys, cats, keyUpdates, instUpdates }) }),
+      commit: jest.fn(async () => { snap = null }),
+      rollback: jest.fn(async () => {
+        if (!snap) return
+        institutions = snap.institutions; keys = snap.keys; cats = snap.cats; keyUpdates = snap.keyUpdates; instUpdates = snap.instUpdates
+        snap = null
+      }),
+      release: jest.fn(),
+    }
     txConns.push(c)
     return c
   })
@@ -136,30 +170,36 @@ const USER2 = { institutionId: 2, userId: 10, role: 'user', schemaName: 'setes_x
 const FAKE_SUPER2 = { institutionId: 2, userId: 11, role: 'super', schemaName: 'setes_x' }   // "super" fora da Setes
 const bearer = (p: object) => `Bearer ${testToken(p)}`
 const switchUrl = (id: string | number) => `/api/institutions/${id}/sync-api-key/active`
+const endUrl = (id: string | number) => `/api/institutions/${id}/end-legacy-transition`
+const end = (id: number | string, body: object, who: object = SUPER) => request(app).post(endUrl(id)).set('Authorization', bearer(who)).send(body)
+const brandWrite = (who: object = SETES_ADMIN) => request(app).post('/api/merchandise/brands').set('Authorization', bearer(who)).send({ description: 'MARCA' })
 
 beforeEach(() => {
   jest.clearAllMocks()
   resetPrivilegeCache()
-  institutions = new Set([1, 2])
-  keys = new Map([[1, [{ active: 'S', deleted: 'N' }]]])
-  // fato do dev (setes_setes, 2026-10-18): só 2 categorias, ambas kind 'P'; nenhuma 'S'
-  cats = new Map([[1, [{ id: 8, kind: 'P', deleted: 'N', createdAt: new Date(0) }, { id: 9, kind: 'P', deleted: 'N', createdAt: new Date(0) }]]])
-  webBorn = new Map()
-  updates = []
+  // fato do dev (2026-10-20): a Setes é L (chave ativa); 2 = cliente nativo web; 3 = cliente PDV
+  institutions = new Map([[1, { schemaName: 'setes_setes', kind: 'L', endedAt: null }], [2, { schemaName: 'setes_x', kind: 'W', endedAt: null }],
+    [3, { schemaName: 'setes_pdv', kind: 'P', endedAt: null }]])
+  keys = new Map([[1, [{ active: 'S', deleted: 'N' }]], [3, [{ active: 'S', deleted: 'N' }]]])
+  // dev: só 2 categorias na Setes, ambas kind 'P' (ids 8 e 9 do gerador do legado); nenhuma 'S'
+  cats = new Map([[1, [{ id: 8, kind: 'P', deleted: 'N', active: 'S' }, { id: 9, kind: 'P', deleted: 'N', active: 'S' }]]])
+  keyUpdates = []; instUpdates = []
+  failOn = null; deadlockOnce = false
   txConns = []
   routeDb()
 })
 
-describe('D-PR43 — quem alcança o interruptor', () => {
-  it('[RESISTIU] sem token 401; usuário, admin do PRÓPRIO estabelecimento, admin da Setes e "super" fora da Setes = 403 — nada chega ao UPDATE', async () => {
-    const anon = await request(app).put(switchUrl(1)).send({ active: 'N' })
-    expect(anon.status).toBe(401)
+describe('quem alcança os dois atos (superGuard do módulo)', () => {
+  it('[RESISTIU] sem token 401; usuário, admin do PRÓPRIO estabelecimento, admin da Setes e "super" fora da Setes = 403 — nada chega ao UPDATE (interruptor E ato)', async () => {
+    const anon = await Promise.all([request(app).put(switchUrl(1)).send({ active: 'N' }), request(app).post(endUrl(1)).send({ destination: 'W', reason: 'sem token' })])
+    expect(anon.map(r => r.status)).toEqual([401, 401])
     for (const [who, target] of [[USER2, 2], [ADMIN2, 2], [ADMIN2, 1], [SETES_ADMIN, 1], [FAKE_SUPER2, 1]] as const) {
-      keys.set(2, [{ active: 'S', deleted: 'N' }])
-      const res = await request(app).put(switchUrl(target)).set('Authorization', bearer(who)).send({ active: 'N' })
-      expect([who.role, who.institutionId, target, res.status]).toEqual([who.role, who.institutionId, target, 403])
+      const a = await request(app).put(switchUrl(target)).set('Authorization', bearer(who)).send({ active: 'N' })
+      const b = await end(target, { destination: 'W', reason: 'tentativa' }, who)
+      expect([who.role, who.institutionId, target, a.status, b.status]).toEqual([who.role, who.institutionId, target, 403, 403])
     }
-    expect(updates).toEqual([])
+    expect(keyUpdates).toEqual([]); expect(instUpdates).toEqual([])
+    expect(institutions.get(1)!.kind).toBe('L')
   })
 
   it('[RESISTIU] forma da URL (caixa, barra final, barra dupla) não contorna o superGuard para o admin', async () => {
@@ -167,70 +207,64 @@ describe('D-PR43 — quem alcança o interruptor', () => {
     const res = await Promise.all([
       request(app).put('/api/INSTITUTIONS/1/SYNC-API-KEY/ACTIVE').set('Authorization', auth).send({ active: 'N' }),
       request(app).put('/api/institutions/1/sync-api-key/active/').set('Authorization', auth).send({ active: 'N' }),
-      request(app).put('/api/institutions//1/sync-api-key/active').set('Authorization', auth).send({ active: 'N' }),
-      request(app).put('/api//institutions/1/sync-api-key/active').set('Authorization', auth).send({ active: 'N' }),
+      request(app).post('/api/INSTITUTIONS/1/END-LEGACY-TRANSITION').set('Authorization', auth).send({ destination: 'W', reason: 'caixa alta' }),
+      request(app).post('/api/institutions//1/end-legacy-transition').set('Authorization', auth).send({ destination: 'W', reason: 'barra' }),
     ])
     for (const r of res) expect([403, 404]).toContain(r.status)
-    expect(updates).toEqual([])
+    expect(keyUpdates).toEqual([]); expect(instUpdates).toEqual([])
   })
 
-  it('[RESISTIU] método errado (POST/PATCH/DELETE) e override por cabeçalho não ligam/desligam — nem para o super', async () => {
+  it('[RESISTIU] método errado e override por cabeçalho não acionam nenhum dos atos — nem para o super', async () => {
     const auth = bearer(SUPER)
     const res = await Promise.all([
       request(app).post(switchUrl(1)).set('Authorization', auth).send({ active: 'N' }),
       request(app).patch(switchUrl(1)).set('Authorization', auth).send({ active: 'N' }),
-      request(app).delete(switchUrl(1)).set('Authorization', auth),
-      request(app).post(switchUrl(1)).set('Authorization', auth).set('X-HTTP-Method-Override', 'PUT').send({ active: 'N' }),
+      request(app).put(endUrl(1)).set('Authorization', auth).send({ destination: 'W', reason: 'put em vez de post' }),
+      request(app).get(endUrl(1)).set('Authorization', auth),
+      request(app).put(switchUrl(1)).set('Authorization', auth).set('X-HTTP-Method-Override', 'POST').send({ destination: 'W', reason: 'override' }),
     ])
-    expect(res.map(r => r.status)).toEqual([404, 404, 404, 404])
-    expect(updates).toEqual([])
-    expect(keys.get(1)![0].active).toBe('S')
+    expect(res.map(r => r.status)).toEqual([404, 404, 404, 404, 400])      // o último é o PUT do interruptor sem `active` = 400
+    expect(instUpdates).toEqual([])
+    expect(institutions.get(1)!.kind).toBe('L')
   })
 })
 
-describe('D-PR43 — bordas do corpo e do id (super)', () => {
-  it('[RESISTIU] active fora de S/N (minúscula, espaço, lista, null, número, ausente, corpo-lista, corpo-texto) = 400 sem UPDATE', async () => {
+describe('bordas do corpo e do id (super)', () => {
+  it('[RESISTIU] interruptor: active fora de S/N = 400 sem UPDATE; campo extra é ignorado (só active vai ao UPDATE, com placeholders)', async () => {
     const auth = bearer(SUPER)
-    const bodies: any[] = [{ active: 'n' }, { active: 'N ' }, { active: ['N'] }, { active: null }, { active: 0 }, {}, [{ active: 'N' }]]
-    for (const b of bodies) {
+    for (const b of [{ active: 'n' }, { active: 'N ' }, { active: ['N'] }, { active: null }, { active: 0 }, {}, [{ active: 'N' }]] as any[]) {
       const r = await request(app).put(switchUrl(1)).set('Authorization', auth).send(b)
       expect([JSON.stringify(b), r.status]).toEqual([JSON.stringify(b), 400])
     }
-    const txt = await request(app).put(switchUrl(1)).set('Authorization', auth).set('Content-Type', 'text/plain').send('N')
-    expect(txt.status).toBe(400)
-    expect(updates).toEqual([])
-  })
-
-  it('[RESISTIU] campo extra é ignorado (não vira coluna): só active vai ao UPDATE, com placeholders', async () => {
-    const r = await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER))
-      .send({ active: 'N', deleted: 'S', tb_institution_id: 2, api_key: "x'; DROP TABLE t; --" })
+    const r = await request(app).put(switchUrl(1)).set('Authorization', auth).send({ active: 'N', deleted: 'S', api_key: "x'; DROP TABLE t; --" })
     expect(r.status).toBe(200)
-    expect(updates).toEqual([['N', NOW, 1, 'N']])
-    expect(keys.get(1)![0]).toEqual({ active: 'N', deleted: 'N', updatedAt: NOW })
+    expect(keyUpdates).toEqual([['N', 1, 'N']])
   })
 
-  it('[RESISTIU] id inválido = 400; estabelecimento inexistente = 404; existente sem chave = 404 (nada criado)', async () => {
-    const auth = bearer(SUPER)
-    const bad = await Promise.all(['abc', '-1', '1.5'].map(id => request(app).put(switchUrl(id)).set('Authorization', auth).send({ active: 'N' })))
-    expect(bad.map(r => r.status)).toEqual([400, 400, 400])
-    const missing = await request(app).put(switchUrl(999)).set('Authorization', auth).send({ active: 'N' })
-    const noKey = await request(app).put(switchUrl(2)).set('Authorization', auth).send({ active: 'N' })
-    expect([missing.status, noKey.status]).toEqual([404, 404])
-    expect(noKey.body.fields?.[0]?.field).toBe('active')
-    expect(keys.has(2)).toBe(false)
+  it('[RESISTIU] ato: destino fora de W/P (inclusive L e minúscula), motivo ausente/curto/branco, corpo-lista = 400 sem tocar no fato', async () => {
+    const bodies: any[] = [{ destination: 'L', reason: 'voltar ao legado' }, { destination: 'w', reason: 'minúscula' }, { destination: 'W' },
+      { destination: 'W', reason: '   ' }, { destination: 'W', reason: 'abc' }, { destination: 'W', reason: 'x'.repeat(256) }, [{ destination: 'W', reason: 'lista' }], {}]
+    for (const b of bodies) {
+      const r = await end(1, b)
+      expect([JSON.stringify(b).slice(0, 40), r.status]).toEqual([JSON.stringify(b).slice(0, 40), 400])
+    }
+    expect(instUpdates).toEqual([])
+    expect(institutions.get(1)).toMatchObject({ kind: 'L', endedAt: null })
   })
 
-  it('[ACHADO LOW] o id da rota aceita formas não canônicas do Number(): "0x1" e "1e0" desligam o estabelecimento 1 (só super; parseId compartilhado)', async () => {
-    const auth = bearer(SUPER)
-    const hex = await request(app).put(switchUrl('0x1')).set('Authorization', auth).send({ active: 'N' })
-    const exp = await request(app).put(switchUrl('1e0')).set('Authorization', auth).send({ active: 'S' })
-    expect([hex.status, exp.status]).toEqual([200, 200])
-    expect(updates).toEqual([['N', NOW, 1, 'N'], ['S', null, 1, 'S']])
+  it('[RESISTIU] id inválido = 400; estabelecimento inexistente = 404 (nos dois atos); existente sem chave = 404 só no interruptor', async () => {
+    const bad = await Promise.all(['abc', '-1', '1.5'].flatMap(id => [
+      request(app).put(switchUrl(id)).set('Authorization', bearer(SUPER)).send({ active: 'N' }), end(id, { destination: 'W', reason: 'id ruim' })]))
+    expect(bad.map(r => r.status)).toEqual([400, 400, 400, 400, 400, 400])
+    const missing = await Promise.all([request(app).put(switchUrl(999)).set('Authorization', bearer(SUPER)).send({ active: 'N' }), end(999, { destination: 'W', reason: 'não existe' })])
+    expect(missing.map(r => r.status)).toEqual([404, 404])
+    const noKey = await request(app).put(switchUrl(2)).set('Authorization', bearer(SUPER)).send({ active: 'N' })
+    expect([noKey.status, noKey.body.code]).toEqual([404, 'SYNC_KEY_MISSING'])
   })
 })
 
-describe('D-PR43 — semântica do interruptor', () => {
-  it('[RESISTIU] idempotente: N duas vezes = 200 nas duas e a 2ª NÃO regrava (o instante do desligamento fica — Rodada 6); religar devolve a MESMA chave; nunca DELETE/REPLACE', async () => {
+describe('D-PR48 item 1 — o interruptor é PAUSA: reversível, idempotente, e NÃO mexe no dono do catálogo', () => {
+  it('[RESISTIU] N, N, S: 200 nas três, o 2º N não regrava, a MESMA chave volta; nunca DELETE/REPLACE/INSERT na chave; nenhuma categoria nasce', async () => {
     const auth = bearer(SUPER)
     const a = await request(app).put(switchUrl(1)).set('Authorization', auth).send({ active: 'N' })
     const b = await request(app).put(switchUrl(1)).set('Authorization', auth).send({ active: 'N' })
@@ -238,81 +272,147 @@ describe('D-PR43 — semântica do interruptor', () => {
     expect([a.status, b.status, c.status]).toEqual([200, 200, 200])
     expect([a.body.data.active, b.body.data.active, c.body.data.active]).toEqual(['N', 'N', 'S'])
     expect(c.body.data.apiKey).toBe(KEY)
-    expect(updates.map(u => u[0])).toEqual(['N', 'S'])               // o 2º 'N' não chegou ao UPDATE
+    expect(a.body.data).not.toHaveProperty('notice'); expect(a.body.data).not.toHaveProperty('defaultServiceCategoryId')
+    expect(keyUpdates.map(u => u[0])).toEqual(['N', 'S'])
     const all = [...q.mock.calls, ...txConns.flatMap(t => t.query.mock.calls)].map(call => call[0] as string)
-    expect(all.some(sql => /\bDELETE\s+FROM\b|\bREPLACE\s+INTO\b|\bINSERT\s+INTO\s+setes_central\.tb_sync_api_key/i.test(sql))).toBe(false)
+    expect(all.some(sql => /\bDELETE\s+FROM\b|\bREPLACE\s+INTO\b|\bINSERT\s+INTO\s+setes_central\.tb_sync_api_key|INSERT INTO `\w+`\.tb_category|COUNT\(\*\)/i.test(sql))).toBe(false)
+    expect(cats.get(1)!.map(x => x.id)).toEqual([8, 9])
   })
 
-  it('[RESISTIU] chave soft-deletada não é religada pelo interruptor (o estabelecimento "sem chave" = 404)', async () => {
-    keys.set(1, [{ active: 'N', deleted: 'S' }])
-    const r = await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER)).send({ active: 'S' })
+  it('[RESISTIU] pausar NÃO libera a escrita do catálogo em L (o dono é o fato, não a chave) — antes 409, pausado 409, retomado 409', async () => {
+    const sup = bearer(SUPER)
+    const before = await brandWrite()
+    await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'N' })
+    const paused = await brandWrite()
+    await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'S' })
+    const resumed = await brandWrite()
+    expect([before.status, paused.status, resumed.status].concat([before.body.code, paused.body.code, resumed.body.code]))
+      .toEqual([409, 409, 409, 'CATALOG_LEGACY_OWNED', 'CATALOG_LEGACY_OWNED', 'CATALOG_LEGACY_OWNED'])
+    expect((merch.createBrand as jest.Mock).mock.calls).toHaveLength(0)
+  })
+
+  it('[RESISTIU] chave soft-deletada não é retomada pelo interruptor (404); duas chaves vivas: pausa TODAS; o log leva autor e estabelecimento — nunca a chave', async () => {
+    keys.set(3, [{ active: 'N', deleted: 'S' }])
+    const r = await request(app).put(switchUrl(3)).set('Authorization', bearer(SUPER)).send({ active: 'S' })
     expect(r.status).toBe(404)
-    expect(keys.get(1)![0]).toEqual({ active: 'N', deleted: 'S' })
-  })
-
-  it('[RESISTIU] duas chaves vivas no MESMO estabelecimento (DDL sem UNIQUE por institution): o interruptor desliga TODAS — a guarda concorda', async () => {
     keys.set(1, [{ active: 'S', deleted: 'N' }, { active: 'S', deleted: 'N' }])
     await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER)).send({ active: 'N' })
     expect(keys.get(1)!.map(k => k.active)).toEqual(['N', 'N'])
-    const w = await request(app).post('/api/merchandise/brands').set('Authorization', bearer(SETES_ADMIN)).send({ description: 'MARCA' })
-    expect(w.status).toBe(201)
+    const info = (logger.info as jest.Mock).mock.calls.find(c => /PAUSADO/.test(c[0]))
+    expect(info?.[1]).toEqual({ institutionId: 1, actorUserId: 1, keys: 2 })
+    expect(JSON.stringify((logger.info as jest.Mock).mock.calls)).not.toContain(KEY)
   })
 
-  it('[RESISTIU] o log do ato leva autor e estabelecimento — nunca a chave', async () => {
-    await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER)).send({ active: 'N' })
-    const info = (logger.info as jest.Mock).mock.calls.find(c => /Sincronizador DESATIVADO/.test(c[0]))
-    expect(info?.[1]).toEqual({ institutionId: 1, actorUserId: 1 })
-    expect(JSON.stringify((logger.info as jest.Mock).mock.calls)).not.toContain(KEY)
+  it('[RESISTIU] retomar em W = 409 SYNC_KEY_NOT_FOR_SOURCE (nativo web não tem sincronizador); gerar chave em W = 409 pelo mesmo código; em P gera', async () => {
+    keys.set(2, [{ active: 'N', deleted: 'N' }])
+    const resume = await request(app).put(switchUrl(2)).set('Authorization', bearer(SUPER)).send({ active: 'S' })
+    expect([resume.status, resume.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
+    expect(keys.get(2)![0].active).toBe('N')
+    keys.delete(2)
+    const gen = await request(app).post('/api/institutions/2/sync-api-key').set('Authorization', bearer(SUPER)).send({})
+    expect([gen.status, gen.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
+    expect(keys.has(2)).toBe(false)
+    keys.delete(3)
+    const pdv = await request(app).post('/api/institutions/3/sync-api-key').set('Authorization', bearer(SUPER)).send({})
+    expect(pdv.status).toBe(201)
+    expect(keys.get(3)).toEqual([{ active: 'S', deleted: 'N' }])
   })
 })
 
-describe('D-PR43 × D-PR32 × D-PR41 — o efeito do interruptor na web (sem cache)', () => {
-  it('[RESISTIU] desligar libera a escrita do merchandise NA HORA e religar trava NA HORA (mesmo processo, sem reinício)', async () => {
-    const admin = bearer(SETES_ADMIN), sup = bearer(SUPER)
-    const before = await request(app).post('/api/merchandise/brands').set('Authorization', admin).send({ description: 'MARCA' })
-    await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'N' })
-    const off = await request(app).post('/api/merchandise/brands').set('Authorization', admin).send({ description: 'MARCA' })
-    await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'S' })
-    const on = await request(app).post('/api/merchandise/brands').set('Authorization', admin).send({ description: 'MARCA' })
-    expect([before.status, before.body.code, off.status, on.status, on.body.code]).toEqual([409, 'SYNC_MANAGED_CATALOG', 201, 409, 'SYNC_MANAGED_CATALOG'])
-    expect((merch.createBrand as jest.Mock).mock.calls).toHaveLength(1)
+describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível, com destino', () => {
+  it('[RESISTIU] L → W: o fato vira W com a data, a chave fica INATIVA, "Produtos" (já havia P viva: nada) e "Serviços" (10) nascem; a resposta diz tudo; log com autor e motivo', async () => {
+    const r = await end(1, { destination: 'W', reason: 'servidor desktop desligado em 20/10' })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual({ sourceKind: 'W', transitionEndedAt: NOW.toISOString(), defaultCategories: { P: null, S: 10 }, syncKeysInactivated: 1 })
+    expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'W', endedAt: NOW })
+    expect(keys.get(1)![0].active).toBe('N')
+    expect(cats.get(1)!.find(c => c.id === 10)).toMatchObject({ kind: 'S', active: 'S' })
+    expect(instUpdates).toEqual([['W', 1]])
+    const log = (logger.info as jest.Mock).mock.calls.find(c => /ENCERRADA/.test(c[0]))
+    expect(log?.[1]).toMatchObject({ institutionId: 1, destination: 'W', reason: 'servidor desktop desligado em 20/10', actorUserId: 1, syncKeysInactivated: 1 })
+    expect(JSON.stringify((logger.info as jest.Mock).mock.calls)).not.toContain(KEY)
   })
 
-  it('[RESISTIU] Q-PR49 (a): o lookup do serviço vai pelo FATO — sem categoria S viva aparecem as P (as 2 do legado); estabelecimento sem categoria → vazio', async () => {
-    const admin = bearer(SETES_ADMIN)
-    const synced = await request(app).get('/api/services/categories').set('Authorization', admin)
-    expect(synced.status).toBe(200)
-    expect(synced.body.data.map((c: any) => c.id)).toEqual([8, 9])
-    const other = await request(app).get('/api/services/categories').set('Authorization', bearer(ADMIN2))
-    expect(other.body.data).toEqual([])
-    const sqls = q.mock.calls.filter(c => /tb_category/.test(c[0])).map(c => c[0])
-    expect(sqls).toHaveLength(2)
-    for (const sql of sqls) expect(sql).toContain("c.kind = 'S' OR NOT EXISTS")
-    expect(q.mock.calls.filter(c => /tb_sync_api_key/.test(c[0]))).toHaveLength(0)       // nunca pelo MODO
+  it('[RESISTIU] L → P: barreira INTERINA (A-PR5/Q-PR62) — 409 LEGACY_TRANSITION_DESTINATION_PENDING, nada gravado, nenhuma transação aberta (o desktop ainda autentica pela chave viva: dois escritores)', async () => {
+    const r = await end(1, { destination: 'P', reason: 'servidor desktop desativado; ficam os PDVs' })
+    expect([r.status, r.body.code]).toEqual([409, 'LEGACY_TRANSITION_DESTINATION_PENDING'])
+    expect(r.body.fields).toEqual([{ field: 'destination', message: 'destinos abertos: W' }])
+    expect(institutions.get(1)).toMatchObject({ kind: 'L', endedAt: null })
+    expect(keys.get(1)![0].active).toBe('S')
+    expect(instUpdates).toEqual([]); expect(keyUpdates).toEqual([])
+    expect(txConns).toHaveLength(0)
   })
 
-  it('[CORRIGIDO — era ACHADO MEDIUM do delta R5] desligar o sincronizador da Setes cria "Serviços" (kind S) e o lookup passa a mostrar SÓ ela — o "Novo serviço" volta a ser possível', async () => {
+  it('[RESISTIU] depois do ato a web escreve NA HORA (sem cache) e o interruptor em W recusa retomar: a chave de L encerrado nunca reativa', async () => {
+    const before = await brandWrite()
+    await end(1, { destination: 'W', reason: 'encerrando a transição' })
+    const after = await brandWrite()
+    expect([before.status, after.status]).toEqual([409, 201])
+    const resume = await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER)).send({ active: 'S' })
+    expect([resume.status, resume.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
+    expect(keys.get(1)![0].active).toBe('N')
+    const gen = await request(app).post('/api/institutions/1/sync-api-key').set('Authorization', bearer(SUPER)).send({})
+    expect([gen.status, gen.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
+  })
+
+  it('[RESISTIU] irreversível: repetir o ato (W → W de novo) = 409 LEGACY_TRANSITION_NOT_APPLICABLE "já foi encerrada" (instante em fields[], não na prosa); W nativo = 409 "só vale para L"; nada gravado', async () => {
+    await end(1, { destination: 'W', reason: 'primeira vez' })
+    const again = await end(1, { destination: 'W', reason: 'segunda vez' })
+    expect([again.status, again.body.code]).toEqual([409, 'LEGACY_TRANSITION_NOT_APPLICABLE'])
+    expect(again.body.error).toMatch(/já foi encerrada/)
+    expect(again.body.error).not.toMatch(/\d{4}-\d{2}-\d{2}T/)                                   // nenhum instante UTC na prosa (PADROES §10)
+    expect(again.body.fields).toEqual([{ field: 'destination', message: 'origem atual: W' }, { field: 'transitionEndedAt', message: NOW.toISOString() }])
+    const native = await end(2, { destination: 'W', reason: 'nativo web' })
+    expect([native.status, native.body.code]).toEqual([409, 'LEGACY_TRANSITION_NOT_APPLICABLE'])
+    expect(native.body.error).toMatch(/só vale para estabelecimento em transição/)
+    expect(instUpdates).toEqual([['W', 1]])
+    expect(institutions.get(1)!.kind).toBe('W'); expect(institutions.get(2)!.kind).toBe('W')
+  })
+
+  it('[RESISTIU] falha ao criar a categoria padrão desfaz o ato INTEIRO: 500 com ref, o fato segue L, a chave segue S, a guarda segue travando', async () => {
+    failOn = /INSERT INTO `\w+`\.tb_category/
+    const r = await end(1, { destination: 'W', reason: 'schema sem tb_category' })
+    expect([r.status, r.body.ref]).toEqual([500, 'REFADVSW'])
+    expect(txConns.some(c => c.rollback.mock.calls.length > 0)).toBe(true)
+    expect(txConns.every(c => c.commit.mock.calls.length === 0)).toBe(true)
+    expect(institutions.get(1)).toMatchObject({ kind: 'L', endedAt: null })
+    expect(keys.get(1)![0].active).toBe('S')
+    expect((logger.info as jest.Mock).mock.calls.some(c => /ENCERRADA/.test(c[0]))).toBe(false)
+    const w = await brandWrite()
+    expect([w.status, w.body.code]).toEqual([409, 'CATALOG_LEGACY_OWNED'])
+  })
+
+  it('[RESISTIU] deadlock na 1ª tentativa (o ato cunha id de categoria): reexecuta INTEIRO — 200, uma "Serviços", uma chave inativada', async () => {
+    deadlockOnce = true
+    const r = await end(1, { destination: 'W', reason: 'com deadlock no meio' })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({ sourceKind: 'W', syncKeysInactivated: 1, defaultCategories: { P: null, S: 10 } })
+    expect(cats.get(1)!.filter(c => c.kind === 'S')).toHaveLength(1)
+    expect(instUpdates).toEqual([['W', 1]])                                            // a 1ª tentativa foi desfeita
+    expect(txConns.length).toBeGreaterThanOrEqual(2)
+    expect(txConns[0].rollback).toHaveBeenCalled()
+    expect(txConns[0].commit).not.toHaveBeenCalled()
+    expect(txConns[txConns.length - 1].commit).toHaveBeenCalled()
+  })
+
+  it('[RESISTIU] a transação do ato: trava da institution 1º, o fato FOR UPDATE 2º, o UPDATE com `source_kind = L` NO COMANDO, e só depois chave e categorias', async () => {
+    await end(1, { destination: 'W', reason: 'ordem das travas' })
+    const tx = txConns.find(c => c.query.mock.calls.some((x: any[]) => /UPDATE setes_central\.tb_institution/.test(x[0])))!
+    const calls = tx.query.mock.calls.map((x: any[]) => String(x[0]))
+    expect(calls[0]).toMatch(/FROM setes_central\.tb_institution WHERE id = \? FOR UPDATE/)
+    expect(calls[1]).toMatch(/transition_ended_at AS transitionEndedAt[\s\S]*FOR UPDATE/)
+    expect(calls[2]).toMatch(/UPDATE setes_central\.tb_institution[\s\S]*WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
+    expect(calls.findIndex((s: string) => /tb_sync_api_key/.test(s))).toBeGreaterThan(2)
+    expect(calls.findIndex((s: string) => /tb_category/.test(s))).toBeGreaterThan(calls.findIndex((s: string) => /tb_sync_api_key/.test(s)))
+  })
+
+  it('[RESISTIU] Q-PR49 (a) segue: o lookup do serviço vai pelo FATO — antes do ato as P do legado (8, 9); depois SÓ a "Serviços" (10); nunca pela chave', async () => {
     const admin = bearer(SETES_ADMIN)
     const before = await request(app).get('/api/services/categories').set('Authorization', admin)
-    const off = await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER)).send({ active: 'N' })
+    await end(1, { destination: 'W', reason: 'lookup pelo fato' })
     const after = await request(app).get('/api/services/categories').set('Authorization', admin)
     expect(before.body.data.map((c: any) => c.id)).toEqual([8, 9])
-    expect(off.body.data).toMatchObject({ active: 'N', defaultServiceCategoryId: 10 })
-    expect(off.body.data.notice).toMatch(/ANTES/)
     expect(after.body.data.map((c: any) => c.id)).toEqual([10])
-    expect(cats.get(1)!.find(c => c.id === 10)).toMatchObject({ kind: 'S', createdAt: new Date(NOW.getTime() - 1000) })
-  })
-
-  it('[RESISTIU] Q-PR47 (a): a "Serviços" do PRÓPRIO ato não impede religar; uma categoria criada pela web no segundo do desligamento (mesmo já excluída) impede (409 SYNC_KEY_WEB_ROWS)', async () => {
-    const sup = bearer(SUPER)
-    await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'N' })
-    const on = await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'S' })
-    expect(on.status).toBe(200)
-    await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'N' })      // novo desligamento (instante = NOW)
-    cats.get(1)!.push({ id: 11, kind: 'P', deleted: 'S', createdAt: NOW })                  // nascida no MESMO segundo e já excluída
-    const refused = await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'S' })
-    expect([refused.status, refused.body.code]).toEqual([409, 'SYNC_KEY_WEB_ROWS'])
-    expect(refused.body.fields[0].field).toBe('active')
-    expect(keys.get(1)![0].active).toBe('N')
+    expect(q.mock.calls.filter(c => /tb_category/.test(c[0]) && /tb_sync_api_key/.test(c[0]))).toHaveLength(0)
   })
 })

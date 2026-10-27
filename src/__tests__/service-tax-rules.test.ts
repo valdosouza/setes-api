@@ -125,7 +125,6 @@ describe('services × regra de serviço (D1 FK literal, D3 tb_service)', () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])      // lockInstitutionCounters — 1º statement (D-PR2, regra 7 do PADROES §9)
-      .mockResolvedValueOnce([[]])               // reconferência da chave do sincronizador (Rodada 6)
       .mockResolvedValueOnce([[{ nextId: 9 }]])  // MAX+1 (sem FOR UPDATE)
       .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria
       .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria serve ao serviço (Q-PR49 (a))
@@ -149,7 +148,6 @@ describe('services × regra de serviço (D1 FK literal, D3 tb_service)', () => {
     const conn = fakeConn()
     conn.query
       .mockResolvedValueOnce([[{ id: 1 }]])      // lockInstitutionCounters
-      .mockResolvedValueOnce([[]])               // reconferência da chave do sincronizador (Rodada 6)
       .mockResolvedValueOnce([[{ nextId: 10 }]]) // MAX+1
       .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria
       .mockResolvedValueOnce([[{ 1: 1 }]])       // categoria serve ao serviço (Q-PR49 (a))

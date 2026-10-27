@@ -10,8 +10,13 @@ import { entityFiscalBody, withFiscalRefinements } from '@shared/entity'
  * Saída: InstitutionListRow / InstitutionFull (institutions.interface.ts).
  */
 
+/** D-PR47: W nativo web · L transição do desktop legado · P PDV — as mesmas letras do `tb_terminal.kind` (D-TM9). */
+export const sourceKindDto = z.enum(['W', 'L', 'P'])
+
 const institutionBase = entityFiscalBody.extend({
   active: z.enum(['S', 'N']).optional(),
+  // na edição é só conferência: igual ao gravado passa, diferente = 409 SOURCE_KIND_IMMUTABLE (nunca descarte silencioso)
+  sourceKind: sourceKindDto.optional(),
 })
 
 // Primeiro admin do cliente (A2, 2026-08-15): OBRIGATÓRIO no create e
@@ -33,6 +38,9 @@ export const institutionCreateDto = withFiscalRefinements(
       .regex(/^setes_[a-z0-9_]+$/,
         'schemaName deve começar com "setes_" e conter apenas letras minúsculas, números e underscores'),
     admin: institutionAdminDto,
+    // D-PR47 (parecer do guardião): fato DECLARADO, nunca presumido — sem default (um cliente de legado cadastrado como W nunca
+    // conseguiria a chave do sincronizador, e W não volta atrás).
+    sourceKind: sourceKindDto,
   })
 )
 
@@ -41,8 +49,17 @@ export const institutionUpdateDto = withFiscalRefinements(institutionBase)
 export type InstitutionCreateDto = z.infer<typeof institutionCreateDto>
 export type InstitutionUpdateDto = z.infer<typeof institutionUpdateDto>
 
-/** Interruptor da chave do sincronizador (D-PR43 — Valdo 2026-10-18: "só criar uma opção para desativar"): 'N' = o estabelecimento sai
- *  do legado (a web volta a escrever os cadastros — D-PR32/D-PR41 revista); 'S' = religa a MESMA chave, recusado se a web criou linha
- *  nas tabelas do legado no período (Q-PR47 (a)). Limites (grupo do sync, §9.2 do `setes-sync/verificacao-comissao-margem-mercadoria.md`):
- *  o setes-sync guarda a chave válida em cache por até 5 min (o desligamento avisa: pare o sincronizador ANTES — Q-PR46 (a)). */
+/** Interruptor da chave do sincronizador (D-PR43 + D-PR48 item 1, Rodada 7): só PAUSA de emergência, reversível — 'N' = o setes-sync
+ *  recusa a chave (D-SY13: sincronizador INATIVO até reativar; o cache dele leva até 5 min), 'S' = retoma a MESMA chave. NÃO muda o dono
+ *  do catálogo, não cria categoria, não confere linhas (isso era a Rodada 6 e caiu). Em W (nativo web, ou L encerrado para W) não há o que
+ *  retomar: 409 SYNC_KEY_NOT_FOR_SOURCE. */
 export const syncApiKeyActiveDto = z.object({ active: z.enum(['S', 'N']) })
+
+/** Ato "encerrar a transição" (D-PR48/D-PR49): único e IRREVERSÍVEL — o Super escolhe o DESTINO (W = cliente sem PDV · P = cliente com
+ *  PDV; os PDVs passam a receber o catálogo da web) e confirma com o MOTIVO (vai ao log com o autor — Q-PR48 (a); coluna própria é a
+ *  Q-PR59). */
+export const endLegacyTransitionDto = z.object({
+  destination: z.enum(['W', 'P']),
+  reason:      z.string().trim().min(5, 'Informe o motivo (mínimo 5 caracteres)').max(255),
+})
+export type EndLegacyTransitionDto = z.infer<typeof endLegacyTransitionDto>

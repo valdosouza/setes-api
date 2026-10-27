@@ -1,6 +1,8 @@
 /// <reference types="jest" />
 // GATE ADVERSARIAL r3 — delta D-PR32/D-PR33/D-PR40 do cadastro de produtos (2026-10-18; skill testar-adversarial.md).
-// Alvo deste arquivo: D-PR32 (`syncWriteGuard` no /api/merchandise) e D-PR33 (CATALOGAR nas criações da central), pelo app REAL
+// Rodada 7 (2026-10-20, D-PR47): a guarda passou a ler o FATO `tb_institution.source_kind` (L = só consulta) — o modelo abaixo diz o
+// fato por institution, nunca a chave; o código da recusa é CATALOG_LEGACY_OWNED.
+// Alvo deste arquivo: D-PR32 (`catalogOwnerGuard` no /api/merchandise) e D-PR33 (CATALOGAR nas criações da central), pelo app REAL
 // (auth RS256 de teste → feature flag → rate limit → router), com o serviço do módulo MOCKADO (o que se prova é se a ESCRITA chega).
 // `it('[RESISTIU] …')` = o ataque foi barrado.
 import net from 'net'
@@ -44,12 +46,13 @@ import app from '../app'
 
 const q = (pool as any).query as jest.Mock
 const MERCH_IFACE = 40, SERVICES_IFACE = 34
-let synced: Set<number>
+let legacy: Set<number>                        // institutions em transição do desktop (source_kind L)
 let contracted: Set<number>
 let privileged: Set<string>                     // `${userId}:${interfaceId}:${privilegeId}`
 function routeDb(): void {
   q.mockImplementation(async (sql: string, params: any[] = []) => {
-    if (/setes_central\.tb_sync_api_key/.test(sql)) return [synced.has(Number(params[0])) ? [{ 1: 1 }] : []]
+    if (/SELECT source_kind AS kind FROM setes_central\.tb_institution/.test(sql)) return [[{ kind: legacy.has(Number(params[0])) ? 'L' : 'W' }]]
+    if (/tb_sync_api_key/.test(sql)) throw new Error('a guarda NUNCA consulta a chave (D-PR47)')
     if (/FROM setes_central\.tb_interface WHERE i18n_key/.test(sql)) {
       const id = ({ merchandise: MERCH_IFACE, services: SERVICES_IFACE } as Record<string, number>)[String(params[0])]
       return [id ? [{ id }] : []]
@@ -72,12 +75,12 @@ const brand = { description: 'MARCA ADV3' }
 beforeEach(() => {
   jest.clearAllMocks()
   resetPrivilegeCache()
-  synced = new Set([1]); contracted = new Set([MERCH_IFACE]); privileged = new Set()
+  legacy = new Set([1]); contracted = new Set([MERCH_IFACE]); privileged = new Set()
   routeDb()
 })
 
-describe('D-PR32 — institution com sincronizador ativo só CONSULTA', () => {
-  it('[RESISTIU] toda escrita do módulo (ficha, níveis, exclusão, criação na central) = 409 SYNC_MANAGED_CATALOG — admin e super', async () => {
+describe('D-PR32/D-PR47 — institution em transição do legado (L) só CONSULTA', () => {
+  it('[RESISTIU] toda escrita do módulo (ficha, níveis, exclusão, criação na central) = 409 CATALOG_LEGACY_OWNED — admin e super', async () => {
     for (const who of [SETES_ADMIN, SETES_SUPER]) {
       const auth = bearer(who)
       const res = await Promise.all([
@@ -89,7 +92,7 @@ describe('D-PR32 — institution com sincronizador ativo só CONSULTA', () => {
         request(app).post('/api/merchandise/measures').set('Authorization', auth).send({ description: 'X', abbreviation: 'X' }),
         request(app).post('/api/merchandise/packages').set('Authorization', auth).send(brand),
       ])
-      expect(res.map(r => [r.status, r.body.code])).toEqual(res.map(() => [409, 'SYNC_MANAGED_CATALOG']))
+      expect(res.map(r => [r.status, r.body.code])).toEqual(res.map(() => [409, 'CATALOG_LEGACY_OWNED']))
     }
     expect(writesReached()).toEqual([])
   })
@@ -132,7 +135,7 @@ describe('D-PR32 — institution com sincronizador ativo só CONSULTA', () => {
     const o = await request(app).options('/api/merchandise/brands').set('Authorization', auth)
     expect([h.status, o.status]).toEqual([200, 204])
     expect(writesReached()).toEqual([])
-    expect(q.mock.calls.some(c => /tb_sync_api_key/.test(c[0]))).toBe(false)
+    expect(q.mock.calls.some(c => /source_kind|tb_sync_api_key/.test(c[0]))).toBe(false)
   })
 
   it('[RESISTIU] método em minúsculas na linha de requisição ("post") é recusado pelo parser HTTP do Node (400) antes do Express', async () => {
@@ -153,7 +156,7 @@ describe('D-PR32 — institution com sincronizador ativo só CONSULTA', () => {
     } finally { server.close() }
   })
 
-  it('[RESISTIU] a consulta segue liberada para a institution sincronizada (lista de apoio e ficha)', async () => {
+  it('[RESISTIU] a consulta segue liberada para a institution em L (lista de apoio e ficha)', async () => {
     const auth = bearer(SETES_ADMIN)
     const [a, b] = await Promise.all([
       request(app).get('/api/merchandise/brands').set('Authorization', auth),
@@ -162,8 +165,8 @@ describe('D-PR32 — institution com sincronizador ativo só CONSULTA', () => {
     expect([a.status, b.status]).toEqual([200, 200])
   })
 
-  it('[RESISTIU] chave revogada/excluída deixa de travar NA HORA (sem cache): a mesma institution passa a escrever', async () => {
-    synced = new Set()
+  it('[RESISTIU] transição encerrada (L → W no banco) deixa de travar NA HORA (sem cache): a mesma institution passa a escrever', async () => {
+    legacy = new Set()
     const r = await request(app).post('/api/merchandise/brands').set('Authorization', bearer({ ...SETES_ADMIN, role: 'admin' })).send(brand)
     expect(r.status).toBe(201)
   })
@@ -207,7 +210,7 @@ describe('D-PR33 — CATALOGAR (10) nas criações da central (institution SEM s
     expect(writesReached()).toEqual([])
   })
 
-  it('[RESISTIU] com CATALOGAR na interface contratada (ou admin) cria; super só na Setes, que hoje tem chave → 409', async () => {
+  it('[RESISTIU] com CATALOGAR na interface contratada (ou admin) cria; super só na Setes, que hoje é L → 409', async () => {
     privileged.add(`${USER.userId}:${MERCH_IFACE}:10`)
     const [u, a, s] = await Promise.all([
       request(app).post('/api/merchandise/brands').set('Authorization', bearer(USER)).send(brand),

@@ -3,10 +3,12 @@ import logger from '@shared/logger/logger'
 import { handleError, parseBody, parseId } from '@shared/http/controller-utils'
 import { parseListQuery, pagedEnvelope } from '@shared/list'
 import { assertClientRequired } from '@shared/field-config'
-import { serviceDto, SERVICE_FIELD_PATHS } from './services.dto'
+import {
+  serviceDto, SERVICE_FIELD_PATHS, serviceTaxRuleDto, serviceIbscbsDto, SERVICE_TAX_RULE_FIELDS, SERVICE_IBSCBS_FIELDS,
+} from './services.dto'
 import {
   ServiceScope, fetchServices, fetchService, createService, editService,
-  removeService, fetchCategoriesLookup, fetchFinancialPlansLookup,
+  removeService, editServiceTaxRule, editServiceIbscbs, fetchCategoriesLookup, fetchFinancialPlansLookup,
   fetchPriceListsLookup, fetchServiceTaxRulesLookup,
   SERVICE_SEARCH_CRITERIA, fetchServiceSearchCriteria,
   fetchNbsLookup, fetchIbscbsClassificationsLookup, fetchIbscbsPlaceIndicatorsLookup,
@@ -72,6 +74,47 @@ export async function update(req: Request, res: Response): Promise<void> {
     res.json({ ok: true })
   } catch (err) {
     handleError(res, err, 'services/:id PUT')
+  }
+}
+
+/** D-PR45: só o vínculo com a regra de ISS — rota própria, fora da guarda do dono do catálogo. A obrigatoriedade configurada pelo
+ *  cliente (campo `tb_service_tax_rule_id`) vale aqui também — só sobre o campo desta rota. */
+export async function updateTaxRule(req: Request, res: Response): Promise<void> {
+  const id = parseId(req, res)
+  if (id === null) return
+  const body = parseBody(serviceTaxRuleDto, req, res)
+  if (body === null) return
+  try {
+    await assertClientRequired(req.institution!, 'services', body, SERVICE_FIELD_PATHS, SERVICE_TAX_RULE_FIELDS)
+    await editServiceTaxRule(id, body.serviceTaxRuleId, scopeOf(req))
+    logger.info('Serviço: regra de ISS vinculada (D-PR45)', {
+      institutionId: req.institution!.institutionId, id, serviceTaxRuleId: body.serviceTaxRuleId, userId: req.institution!.userId,
+    })
+    res.json({ ok: true })
+  } catch (err) {
+    handleError(res, err, 'services/:id/tax-rule PUT')
+  }
+}
+
+/** D-PR45: só a presunção IBS/CBS (NBS e/ou par) — rota própria, fora da guarda do dono do catálogo. */
+export async function updateIbscbs(req: Request, res: Response): Promise<void> {
+  const id = parseId(req, res)
+  if (id === null) return
+  const body = parseBody(serviceIbscbsDto, req, res)
+  if (body === null) return
+  try {
+    // ausente = não mexe (semântica do PUT): a obrigatoriedade do cliente só é conferida sobre o par quando ele VEM no corpo
+    // (null = remover → se o cliente apertou o campo, 400 REQUIRED_FIELDS é a resposta certa); um PUT só com `nbs` não é barrado
+    if (body.ibscbs !== undefined) {
+      await assertClientRequired(req.institution!, 'services', body, SERVICE_FIELD_PATHS, SERVICE_IBSCBS_FIELDS)
+    }
+    await editServiceIbscbs(id, body, scopeOf(req))
+    logger.info('Serviço: presunção IBS/CBS gravada (D-PR45)', {
+      institutionId: req.institution!.institutionId, id, userId: req.institution!.userId,
+    })
+    res.json({ ok: true })
+  } catch (err) {
+    handleError(res, err, 'services/:id/ibscbs PUT')
   }
 }
 

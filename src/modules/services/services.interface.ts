@@ -95,6 +95,10 @@ export interface ServiceInput {
   ibscbs?:           { classificationCode: string; placeIndicatorCode: string } | null
 }
 
+/** D-PR45: a PRESUNÇÃO IBS/CBS do serviço (NBS + par cClassTrib × cIndOp) — a parte do payload que a rota própria
+ *  `PUT /api/services/:id/ibscbs` grava; o PUT do cadastro carrega os mesmos dois campos. */
+export type ServiceFiscalClassificationInput = Pick<ServiceInput, 'nbs' | 'ibscbs'>
+
 /** Lookups de apoio do form (id + descrição, LIMIT 100). */
 export interface ServiceLookupRow {
   id:          number

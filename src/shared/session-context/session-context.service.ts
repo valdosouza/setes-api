@@ -1,5 +1,6 @@
 import { InstitutionPayload } from '@shared/types/express'
-import { existsSalesman } from './session-context.repository'
+import { catalogOwnerOf } from '@shared/catalog-owner'
+import { existsSalesman, readSourceKind } from './session-context.repository'
 import { SessionContext } from './session-context.types'
 
 /**
@@ -27,11 +28,20 @@ export async function getSessionContext(
   const isSalesman = await existsSalesman(
     payload.schemaName, payload.institutionId, payload.userId
   )
-  const data: SessionContext = { isSalesman }
+  // D-PR47: o fato do estabelecimento (hoje = a institution; com @shared/group, a fundadora) — o ato "encerrar a transição" invalida
+  // o cache da institution inteira (`invalidateSessionContextForInstitution`); a guarda lê o fato ao vivo, nunca por aqui
+  const sourceKind = (await readSourceKind(payload.institutionId)) ?? null
+  const data: SessionContext = { isSalesman, sourceKind, catalogOwner: sourceKind ? catalogOwnerOf(sourceKind) : null }
   cache.set(key, { expires: Date.now() + TTL_MS, data })
   return data
 }
 
 export function invalidateSessionContext(institutionId: number, userId: number): void {
   cache.delete(cacheKey(institutionId, userId))
+}
+
+/** O fato da institution mudou para TODOS os usuários dela (o ato "encerrar a transição" — D-PR48). */
+export function invalidateSessionContextForInstitution(institutionId: number): void {
+  const prefix = `${institutionId}:`
+  for (const k of [...cache.keys()]) if (k.startsWith(prefix)) cache.delete(k)
 }

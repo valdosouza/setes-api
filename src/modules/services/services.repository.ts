@@ -14,7 +14,7 @@ import {
 } from '@shared/ibscbs-classification'
 import {
   ServiceListRow, ServiceFull, ServiceInput, ServicePriceRow,
-  ServiceLookupRow, ServiceIbscbsRow,
+  ServiceLookupRow, ServiceIbscbsRow, ServiceFiscalClassificationInput,
 } from './services.interface'
 
 /**
@@ -195,14 +195,32 @@ async function assertRefs(
       'financialPlansId', 'Plano financeiro')
   }
   await assertPriceListsAlive(conn, schemaName, institutionId, input.prices ?? [])
-  if (input.serviceTaxRuleId != null) {
-    await check('tb_service_tax_rule', input.serviceTaxRuleId,
-      'serviceTaxRuleId', 'Regra de tributação de serviço')
+  await assertServiceTaxRuleRef(conn, input.serviceTaxRuleId ?? null, schemaName, institutionId)
+  await assertClassificationIfChanged(conn, input, schemaName, institutionId, serviceId)
+}
+
+/** FK literal da regra de ISS (D1 da regra de serviço) conferida na transação — 400 com fields[]. Usada pelo PUT do cadastro e pela rota
+ *  própria do enquadramento (D-PR45). */
+async function assertServiceTaxRuleRef(
+  conn: PoolConnection, serviceTaxRuleId: number | null, schemaName: string, institutionId: number
+): Promise<void> {
+  if (serviceTaxRuleId == null) return
+  const [rows] = await conn.query<any[]>(
+    `SELECT 1 FROM \`${schemaName}\`.tb_service_tax_rule WHERE id = ? AND tb_institution_id = ? AND deleted = 'N'`,
+    [serviceTaxRuleId, institutionId])
+  if (rows.length === 0) {
+    throw new HttpError(400, 'Regra de tributação de serviço inexistente',
+      [{ field: 'serviceTaxRuleId', message: 'Regra de tributação de serviço não encontrada' }])
   }
-  // Fase IBS/CBS (D-IB6): NBS e classificação conferidas no catálogo central pela peça,
-  // na data de HOJE do estabelecimento (PADROES §10 — conexão da transação). 422 com fields[].
-  // D-IB30: só o que MUDOU em relação ao gravado (precedente D-G34) — a classificação inalterada
-  // que venceu não bloqueia uma edição de preço; quem barra a vencida é o faturamento (D-IB8).
+}
+
+/** Fase IBS/CBS (D-IB6): NBS e classificação conferidas no catálogo central pela peça, na data de HOJE do estabelecimento (PADROES §10 —
+ *  conexão da transação). 422 com fields[]. D-IB30: só o que MUDOU em relação ao gravado (precedente D-G34) — a classificação inalterada
+ *  que venceu não bloqueia uma edição de preço; quem barra a vencida é o faturamento (D-IB8). */
+async function assertClassificationIfChanged(
+  conn: PoolConnection, input: ServiceFiscalClassificationInput,
+  schemaName: string, institutionId: number, serviceId: number | null
+): Promise<void> {
   const changed = await changedClassification(conn, input, schemaName, institutionId, serviceId)
   if (changed.nbs != null || changed.ibscbs != null) {
     const today = await todayFor(schemaName, institutionId, conn)
@@ -220,7 +238,7 @@ interface ChangedClassification {
 /** D-IB30: a parte de NBS/classificação do payload que DIFERE do gravado (lida na transação —
  *  o serviço já está travado pelo FOR UPDATE do tb_product no PUT). Serviço novo = tudo. */
 async function changedClassification(
-  conn: PoolConnection, input: ServiceInput,
+  conn: PoolConnection, input: ServiceFiscalClassificationInput,
   schemaName: string, institutionId: number, serviceId: number | null
 ): Promise<ChangedClassification> {
   if (serviceId === null) return { nbs: input.nbs, ibscbs: input.ibscbs }
@@ -251,7 +269,7 @@ async function changedClassification(
 /** Fase IBS/CBS (D-IB6/D-IB22): NBS em tb_service e a peça 1:1 tb_service_ibscbs, na MESMA
  *  transação do serviço. Ausente = não mexe; null = remove; valor = grava (presença). */
 async function syncServiceClassification(
-  conn: PoolConnection, serviceId: number, input: ServiceInput,
+  conn: PoolConnection, serviceId: number, input: ServiceFiscalClassificationInput,
   schemaName: string, institutionId: number, userId: number | null
 ): Promise<void> {
   if (input.nbs !== undefined) {
@@ -291,7 +309,7 @@ async function syncServiceClassification(
 /** Especialização tb_service (D3) — FK literal para a regra (D1), gravada na
  *  MESMA transação do produto; presença da linha = serviço enquadrado. */
 async function upsertServiceRule(
-  conn: PoolConnection, serviceId: number, input: ServiceInput,
+  conn: PoolConnection, serviceId: number, serviceTaxRuleId: number | null,
   schemaName: string, institutionId: number
 ): Promise<void> {
   await conn.query(
@@ -300,7 +318,7 @@ async function upsertServiceRule(
      VALUES (?, ?, ?, NOW(), NOW(), 'N')
      ON DUPLICATE KEY UPDATE
        tb_service_tax_rule_id = VALUES(tb_service_tax_rule_id), deleted = 'N', updated_at = NOW()`,
-    [serviceId, institutionId, input.serviceTaxRuleId ?? null]
+    [serviceId, institutionId, serviceTaxRuleId]
   )
 }
 
@@ -347,7 +365,7 @@ export async function insertService(
        input.published ?? 'N', input.active ?? 'S', input.note ?? null]
     )
     await syncPrices(conn, id, input, schemaName, institutionId)
-    await upsertServiceRule(conn, id, input, schemaName, institutionId)
+    await upsertServiceRule(conn, id, input.serviceTaxRuleId ?? null, schemaName, institutionId)
     await syncServiceClassification(conn, id, input, schemaName, institutionId, userId)
 
     await conn.commit()
@@ -398,9 +416,69 @@ export async function updateService(
       [identifier, ...PRODUCT_FIELDS(input), id, institutionId]
     )
     await syncPrices(conn, id, input, schemaName, institutionId)
-    await upsertServiceRule(conn, id, input, schemaName, institutionId)
+    await upsertServiceRule(conn, id, input.serviceTaxRuleId ?? null, schemaName, institutionId)
     await syncServiceClassification(conn, id, input, schemaName, institutionId, userId)
 
+    await conn.commit()
+    return true
+  } catch (err) {
+    await conn.rollback()
+    throw err
+  } finally {
+    conn.release()
+  }
+}
+
+/**
+ * D-PR45 (Rodada 7 de produtos, Valdo 2026-10-20 — fecha a Q-PR52): o ENQUADRAMENTO FISCAL do serviço — o vínculo com a regra de ISS
+ * (`tb_service.tb_service_tax_rule_id`) e a presunção IBS/CBS (`tb_service.nbs` + `tb_service_ibscbs`) — tem a WEB como ÚNICA escritora:
+ * o legado não produz esses dois fatos. Por isso as duas gravações têm rota PRÓPRIA (`PUT /api/services/:id/tax-rule` e
+ * `PUT /api/services/:id/ibscbs`, `services.fiscal.routes.ts`) FORA da guarda do dono do catálogo (`catalogOwnerGuard`) — o dono do
+ * CADASTRO pode ser o legado (modo L), o dono do ENQUADRAMENTO é a web. Os dados do cadastro seguem pelo PUT guardado.
+ * Mesmo protocolo do PUT: trava da linha do produto (kind S) 1º, FK/catálogo conferidos na transação, e os MESMOS escritores únicos
+ * (`upsertServiceRule` / `syncServiceClassification`) — a cerca por varredura (`adversarial-r7-gate.test.ts`) confere que só eles existem.
+ */
+async function lockServiceRow(conn: PoolConnection, id: number, schemaName: string, institutionId: number): Promise<boolean> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT id FROM \`${schemaName}\`.tb_product
+      WHERE id = ? AND tb_institution_id = ? AND deleted = 'N' AND kind = 'S' FOR UPDATE`,
+    [id, institutionId])
+  return rows.length > 0
+}
+
+/** D-PR45: só o vínculo serviço → regra de ISS (null = sem regra). false = serviço não encontrado. */
+export async function updateServiceTaxRule(
+  id: number, serviceTaxRuleId: number | null, schemaName: string, institutionId: number
+): Promise<boolean> {
+  assertSchemaName(schemaName)
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    if (!(await lockServiceRow(conn, id, schemaName, institutionId))) { await conn.rollback(); return false }
+    await assertServiceTaxRuleRef(conn, serviceTaxRuleId, schemaName, institutionId)
+    await upsertServiceRule(conn, id, serviceTaxRuleId, schemaName, institutionId)
+    await conn.commit()
+    return true
+  } catch (err) {
+    await conn.rollback()
+    throw err
+  } finally {
+    conn.release()
+  }
+}
+
+/** D-PR45: só a presunção IBS/CBS (NBS e/ou o par cClassTrib × cIndOp) — a mesma semântica do PUT (ausente = não mexe · null = remove ·
+ *  valor = grava), com a conferência do catálogo só do que MUDOU (D-IB30). false = serviço não encontrado. */
+export async function updateServiceFiscalClassification(
+  id: number, input: ServiceFiscalClassificationInput, schemaName: string, institutionId: number, userId: number | null = null
+): Promise<boolean> {
+  assertSchemaName(schemaName)
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    if (!(await lockServiceRow(conn, id, schemaName, institutionId))) { await conn.rollback(); return false }
+    await assertClassificationIfChanged(conn, input, schemaName, institutionId, id)
+    await syncServiceClassification(conn, id, input, schemaName, institutionId, userId)
     await conn.commit()
     return true
   } catch (err) {

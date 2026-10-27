@@ -1,5 +1,6 @@
 import pool from '@shared/db/connection'
 import { assertSchemaName } from '@shared/field-config'
+import { sourceKindOf, SourceKind } from '@shared/catalog-owner'
 
 /**
  * Consultas dos fatos derivados de sessão (decisão 17). tb_salesman vive no
@@ -20,4 +21,10 @@ export async function existsSalesman(
     [userId, institutionId]
   )
   return rows.length > 0
+}
+
+/** D-PR47 (Rodada 7 de produtos): a ORIGEM DOS CADASTROS do estabelecimento — a peça `@shared/catalog-owner` é a fonte (hoje a
+ *  institution; com `@shared/group`, a fundadora). Vive aqui para o contexto de sessão ter UM repositório (e UM ponto de mock). */
+export async function readSourceKind(institutionId: number): Promise<SourceKind | null> {
+  return sourceKindOf(institutionId)
 }

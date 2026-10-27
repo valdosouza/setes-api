@@ -38,6 +38,29 @@ export const serviceDto = z.object({
 
 export type ServiceDto = z.infer<typeof serviceDto>
 
+/**
+ * D-PR45 (Rodada 7 de produtos): rotas PRÓPRIAS do enquadramento fiscal do serviço — fora da guarda do dono do catálogo (o legado
+ * não produz esses fatos; a web é a única escritora deles).
+ *  - `PUT /api/services/:id/tax-rule` — o vínculo com a regra de ISS: `null` = sem regra.
+ *  - `PUT /api/services/:id/ibscbs` — a presunção IBS/CBS: a MESMA semântica do PUT do cadastro (ausente = não mexe · null = remove ·
+ *    valor = grava), mas pelo menos um dos dois campos tem de vir (um corpo vazio não é um ato).
+ */
+export const serviceTaxRuleDto = z.object({
+  serviceTaxRuleId: z.number().int().positive().nullable(),
+})
+export type ServiceTaxRuleDto = z.infer<typeof serviceTaxRuleDto>
+
+export const serviceIbscbsDto = z.object({
+  nbs:    z.string().regex(/^\d{9}$/, 'NBS tem 9 dígitos (sem pontos)').nullable().optional(),
+  ibscbs: ibscbsDto.nullable().optional(),
+}).refine(b => b.nbs !== undefined || b.ibscbs !== undefined,
+  { message: 'Informe a NBS e/ou a classificação IBS/CBS', path: ['ibscbs'] })
+export type ServiceIbscbsDto = z.infer<typeof serviceIbscbsDto>
+
+/** Campos do catálogo da interface services que cada rota própria carrega (a obrigatoriedade do cliente vale só sobre eles). */
+export const SERVICE_TAX_RULE_FIELDS = ['tb_service_tax_rule_id'] as const
+export const SERVICE_IBSCBS_FIELDS   = ['classification_code', 'place_indicator_code'] as const
+
 /** Catálogo de campos da interface services (seed sql/62) × caminho no payload deste DTO —
  *  o nome da coluna nem sempre é a chave (obrigatoriedade apertada pelo cliente). */
 export const SERVICE_FIELD_PATHS: Readonly<Record<string, string>> = {
