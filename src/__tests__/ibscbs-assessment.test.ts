@@ -122,10 +122,10 @@ describe('ibscbsAssessmentAt — a opção que governa a data', () => {
 
 describe('readIbscbsAssessmentView — o que a tela mostra', () => {
   it('sem linha vigente: vale 1 (sem linha); a linha futura é editável e não suportada', async () => {
-    const q = { query: jest.fn().mockResolvedValue([[{ validFrom: '2027-01-01', assessment: '3' }]]) }
+    const q = { query: jest.fn(async (sql: string) => /tb_sync_api_key/.test(sql) ? [[]] : [[{ validFrom: '2027-01-01', assessment: '3' }]]) }
     const v = await readIbscbsAssessmentView('setes_acme', 7, q)
     expect(v).toEqual({
-      today: '2026-11-01', lastInvoice: null, firstStart: '2026-11-01', simplesRegime: null, regularAllowed: false,
+      today: '2026-11-01', lastInvoice: null, firstStart: '2026-11-01', simplesRegime: null, regularAllowed: false, desktopEmission: false,
       regularStart: '2027-01-01', supported: ['1'],
       current: { assessment: '1', validFrom: null, supported: true },
       items: [{ validFrom: '2027-01-01', assessment: '3', supported: false, inEffect: false, editable: true }],
@@ -366,6 +366,20 @@ describe('D-IB102 — só o optante do Simples ME/EPP (3) ou com opção pendent
     fakeTxConn({ lockRow: null, simplesRegime: '1' })
     await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
       .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_NOT_FOUND' })
+  })
+
+  it('D-IB104: a visão diz se o estabelecimento também emite pelo ERP Desktop (chave do sincronizador viva — ativa ou pausada)', async () => {
+    const q = (keys: unknown[]) => ({ query: jest.fn(async (sql: string, params: unknown[] = []) => {
+      if (/tb_sync_api_key/.test(sql)) {
+        expect(sql).toMatch(/tb_institution_id = \? AND deleted = 'N' LIMIT 1/)   // só a PRESENÇA; nunca lê a chave
+        expect(sql).not.toMatch(/api_key\b(?! WHERE)|establishment_code/)
+        expect(params).toEqual([7])
+        return [keys]
+      }
+      return [[]]
+    }) })
+    expect((await readIbscbsAssessmentView('setes_acme', 7, q([{ ok: 1 }]))).desktopEmission).toBe(true)
+    expect((await readIbscbsAssessmentView('setes_acme', 7, q([]))).desktopEmission).toBe(false)
   })
 
   it('a visão diz à tela se o regular é admitido', async () => {

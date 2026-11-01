@@ -120,7 +120,7 @@ router.put('/', controller.update)
  *     responses:
  *       200:
  *         description: >-
- *           { ok: true, data: { today: 'AAAA-MM-DD', lastInvoice: 'AAAA-MM-DD' (null = nenhuma nota), firstStart: 'AAAA-MM-DD' (1º início aceito — D-IB101), simplesRegime (opSimpNac gravado), regularAllowed (2/3 admitidos — D-IB102), regularStart: '2027-01-01', supported: ['1'],
+ *           { ok: true, data: { today: 'AAAA-MM-DD', lastInvoice: 'AAAA-MM-DD' (null = nenhuma nota), firstStart: 'AAAA-MM-DD' (1º início aceito — D-IB101), simplesRegime (opSimpNac gravado), regularAllowed (2/3 admitidos — D-IB102), desktopEmission (tem sincronizador — a opção governa só as notas deste sistema, D-IB104), regularStart: '2027-01-01', supported: ['1'],
  *           current: { assessment, validFrom (null = sem linha), supported },
  *           items: [{ validFrom, assessment, supported, inEffect, editable }] } }
  *       401: { description: Não autenticado }

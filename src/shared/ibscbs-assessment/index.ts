@@ -178,6 +178,11 @@ export interface IbscbsAssessmentView {
   /** D-IB102: o opSimpNac gravado (null = não informado) e se ele admite a opção pelo regime regular (2/3). */
   simplesRegime:  string | null
   regularAllowed: boolean
+  /**
+   * D-IB104: o estabelecimento tem chave do sincronizador (viva — ativa OU pausada): também emite pelo ERP Desktop, cujas notas não passam
+   * pela opção registrada aqui. A tela avisa que a opção governa só as notas emitidas por este sistema (o ERP web).
+   */
+  desktopEmission: boolean
   regularStart: string
   supported:    string[]
   /** O que vale hoje — `validFrom` null = sem linha (D-IB1). */
@@ -192,6 +197,10 @@ export async function readIbscbsAssessmentView(
   const today = await todayFor(schemaName, institutionId, q)
   const lastInvoice = await lastErpWebEmissionDate(q, schemaName, institutionId)
   const { simplesRegime } = await emitterRegimeAt(q, schemaName, institutionId, today, { lock: false })
+  // D-IB104: a chave do sincronizador (escrita pelo módulo institutions — D12 da revisão do sincronizador); só a PRESENÇA, nunca a chave
+  const [keys] = await q.query(
+    "SELECT 1 AS ok FROM setes_central.tb_sync_api_key WHERE tb_institution_id = ? AND deleted = 'N' LIMIT 1", [institutionId])
+  const desktopEmission = (keys as any[]).length > 0
   const [rows] = await q.query(
     `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment
        FROM ?? WHERE tb_institution_id = ? AND deleted = 'N' ORDER BY valid_from`,
@@ -206,6 +215,7 @@ export async function readIbscbsAssessmentView(
   return {
     today, lastInvoice, firstStart: dayAfterInvoice !== null && dayAfterInvoice > today ? dayAfterInvoice : today,
     simplesRegime, regularAllowed: simplesRegime !== null && SIMPLES_REGIMES_WITH_REGULAR_OPTION.has(simplesRegime),
+    desktopEmission,
     regularStart: IBSCBS_REGULAR_ASSESSMENT_START, supported: [...IBSCBS_ASSESSMENTS_SUPPORTED],
     current,
     items: lines.map(l => ({
