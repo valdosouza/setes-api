@@ -16,11 +16,15 @@ const tz = jest.requireMock('@shared/time-zone') as { todayFor: jest.Mock }
 const TABLE = 'setes_acme.tb_establishment_ibscbs_assessment'
 
 /** Conexão de transação simulada: `rows` responde às leituras pela ordem; INSERT/UPDATE registram. */
-function fakeTxConn(opts: { insertError?: unknown; lockRow?: { assessment: string; deleted: string } | null } = {}) {
+function fakeTxConn(opts: {
+  insertError?: unknown; lockRow?: { assessment: string; deleted: string } | null
+  /** D-IB101: a última data de emissão de nota viva do estabelecimento (null = nenhuma nota). */
+  lastInvoice?: string | null
+} = {}) {
   const conn = {
     beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
     query: jest.fn(async (sql: string, _params?: unknown[]) => {
-      if (/^\s*SELECT 1 AS ok/.test(sql)) return [opts.lockRow ? [{ ok: 1 }] : []]   // a linha existe? (escolhe o caminho)
+      if (/MAX\(dt_emission\)/.test(sql)) return [[{ last: opts.lastInvoice ?? null }]]
       if (/^\s*INSERT/.test(sql)) { if (opts.insertError) throw opts.insertError; return [{ affectedRows: 1 }] }
       if (/FOR UPDATE/.test(sql)) return [opts.lockRow ? [opts.lockRow] : []]
       if (/^\s*UPDATE/.test(sql)) return [{ affectedRows: 1 }]
@@ -35,6 +39,7 @@ const sqlOf = (conn: { query: jest.Mock }) => conn.query.mock.calls.map(c => Str
 beforeEach(() => {
   jest.clearAllMocks()
   tz.todayFor.mockResolvedValue('2026-11-01')
+  pool.query.mockResolvedValue([[{ last: null }]])   // a PRÉ-CHECAGEM (pelo pool, sem trava) — nenhuma nota
 })
 
 describe('domínio e regra (D-IB99)', () => {
@@ -110,10 +115,21 @@ describe('readIbscbsAssessmentView — o que a tela mostra', () => {
     const q = { query: jest.fn().mockResolvedValue([[{ validFrom: '2027-01-01', assessment: '3' }]]) }
     const v = await readIbscbsAssessmentView('setes_acme', 7, q)
     expect(v).toEqual({
-      today: '2026-11-01', regularStart: '2027-01-01', supported: ['1'],
+      today: '2026-11-01', lastInvoice: null, firstStart: '2026-11-01', regularStart: '2027-01-01', supported: ['1'],
       current: { assessment: '1', validFrom: null, supported: true },
       items: [{ validFrom: '2027-01-01', assessment: '3', supported: false, inEffect: false, editable: true }],
     })
+  })
+
+  it('D-IB101 (ADV-D101-05): a visão traz a última nota e o 1º início aceito; linha futura até a última nota NÃO é editável', async () => {
+    tz.todayFor.mockResolvedValue('2027-01-01')
+    const q = { query: jest.fn(async (sql: string) => /MAX\(dt_emission\)/.test(sql)
+      ? [[{ last: '2027-01-05' }]]
+      : [[{ validFrom: '2027-01-03', assessment: '1' }, { validFrom: '2027-01-06', assessment: '3' }]]) }
+    const v = await readIbscbsAssessmentView('setes_acme', 7, q)
+    expect(v.lastInvoice).toBe('2027-01-05')
+    expect(v.firstStart).toBe('2027-01-06')
+    expect(v.items.map(i => [i.validFrom, i.editable])).toEqual([['2027-01-03', false], ['2027-01-06', true]])
   })
 
   it('a vigente é a de maior início ≤ hoje; passadas e vigente não são editáveis', async () => {
@@ -130,19 +146,32 @@ describe('readIbscbsAssessmentView — o que a tela mostra', () => {
 })
 
 describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
-  it('registrar: início antes de hoje = 422 DATE_PAST no campo da data, nada gravado, transação desfeita', async () => {
-    const conn = fakeTxConn()
+  const dup = () => Object.assign(new Error('dup'), { code: 'ER_DUP_ENTRY' })
+  /** Posição do 1º comando que casa — a ORDEM trava × leitura da fronteira é a regra da D-IB101. */
+  const at = (conn: { query: jest.Mock }, re: RegExp) => sqlOf(conn).findIndex(x => re.test(x))
+
+  it('registrar: início antes de hoje = 422 DATE_PAST pela PRÉ-CHECAGEM — sem transação, nunca segura o faturamento (ADV-D101-02)', async () => {
+    fakeTxConn()
     await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2026-10-31', assessment: '1' }))
       .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_DATE_PAST', fields: [{ field: 'validFrom' }] })
-    expect(sqlOf(conn).some(s => /INSERT|UPDATE/.test(s))).toBe(false)
+    expect(pool.getConnection).not.toHaveBeenCalled()
+  })
+
+  it('registrar: a conferência DECISIVA continua depois da trava — o hoje virou entre a pré-checagem e a trava = 422 e desfaz', async () => {
+    tz.todayFor.mockResolvedValueOnce('2026-11-01').mockResolvedValueOnce('2026-11-02')   // pré-checagem × depois da espera
+    const conn = fakeTxConn()
+    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2026-11-01', assessment: '1' }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_DATE_PAST' })
+    expect(conn.commit).not.toHaveBeenCalled()
     expect(conn.rollback).toHaveBeenCalled()
     expect(conn.release).toHaveBeenCalled()
   })
 
-  it('registrar: regular antes de 01/01/2027 = 422 REGULAR_TOO_EARLY; HOJE com 1 passa', async () => {
+  it('registrar: regular antes de 01/01/2027 = 422 REGULAR_TOO_EARLY sem abrir transação; HOJE com 1 passa', async () => {
     fakeTxConn()
     await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2026-12-01', assessment: '3' }))
       .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY', fields: [{ field: 'validFrom' }] })
+    expect(pool.getConnection).not.toHaveBeenCalled()
     const conn = fakeTxConn()
     await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2026-11-01', assessment: '1' })
     expect(conn.query.mock.calls.find(c => /^\s*INSERT/.test(String(c[0])))![1]).toEqual([TABLE, 7, '2026-11-01', '1', 3])
@@ -157,27 +186,56 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
     expect(pool.getConnection).not.toHaveBeenCalled()
   })
 
-  it('registrar: PK viva = 409 DUPLICATE; PK morta = REVIVE da mesma linha regravando tudo (nunca herda)', async () => {
-    fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' } })
+  it('D-IB101: a fronteira (hoje + última nota viva) é lida DEPOIS da trava e com o relógio REAL de depois da espera', async () => {
+    const conn = fakeTxConn()
+    await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' })
+    expect(at(conn, /^\s*INSERT/)).toBe(0)                                  // a trava é o 1º comando (nenhuma leitura antes)
+    expect(at(conn, /MAX\(dt_emission\)/)).toBeGreaterThan(0)
+    expect(conn.query.mock.calls[at(conn, /MAX\(dt_emission\)/)][1]).toEqual(['setes_acme.tb_invoice', 7])
+    expect(tz.todayFor).toHaveBeenCalledWith('setes_acme', 7, conn, expect.any(Date))   // nunca o relógio do início da requisição
+  })
+
+  it('D-IB101: registrar com início ≤ a última nota viva = 409 INVOICED (pré-checagem e decisiva); depois dela passa', async () => {
+    pool.query.mockResolvedValue([[{ last: '2027-01-01' }]])
+    fakeTxConn({ lastInvoice: '2027-01-01' })
+    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_INVOICED', fields: [{ field: 'validFrom' }] })
+    expect(pool.getConnection).not.toHaveBeenCalled()                                   // recusada SEM trava
+    pool.query.mockResolvedValue([[{ last: null }]])                                    // a nota nasceu DURANTE a espera
+    const conn = fakeTxConn({ lastInvoice: '2027-01-01' })
+    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_INVOICED' })
+    expect(conn.commit).not.toHaveBeenCalled()
+    tz.todayFor.mockResolvedValue('2027-01-01')
+    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_INVOICED' })   // a opção "a partir de HOJE" depois de uma nota de hoje
+    const ok = fakeTxConn({ lastInvoice: '2027-01-01' })
+    await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-02', assessment: '3' })
+    expect(ok.commit).toHaveBeenCalled()
+  })
+
+  it('registrar: PK viva = 409 DUPLICATE; PK morta = REVIVE da mesma linha regravando tudo (nunca herda), trava de REGISTRO antes', async () => {
+    const live = fakeTxConn({ insertError: dup(), lockRow: { assessment: '3', deleted: 'N' } })
     await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_DUPLICATE' })
-    const conn = fakeTxConn({ lockRow: { assessment: '3', deleted: 'S' } })
+    expect(live.commit).toHaveBeenCalledTimes(1)   // a 1ª transação (INSERT recusado) encerra sem nada gravado
+    const conn = fakeTxConn({ insertError: dup(), lockRow: { assessment: '3', deleted: 'S' } })
     await createIbscbsAssessment('setes_acme', 7, 4, { validFrom: '2027-01-01', assessment: '1' })
-    // ADV-IB99-05: a linha EXISTENTE é travada por registro ANTES de decidir — nenhum INSERT (que pegaria trava S e subiria para X)
-    expect(sqlOf(conn).some(s => /^\s*INSERT/.test(s))).toBe(false)
-    expect(sqlOf(conn).findIndex(s => /FOR UPDATE/.test(s))).toBeLessThan(sqlOf(conn).findIndex(s => /^\s*UPDATE/.test(s)))
+    // ADV-IB99-05 + D-IB101: na 2ª transação a linha EXISTENTE é travada por registro ANTES da fronteira e da gravação
+    const lock = at(conn, /FOR UPDATE/)
+    expect(lock).toBeGreaterThan(at(conn, /^\s*INSERT/))
+    expect(lock).toBeLessThan(sqlOf(conn).lastIndexOf(sqlOf(conn).find(x => /MAX\(dt_emission\)/.test(x))!))
+    expect(lock).toBeLessThan(at(conn, /^\s*UPDATE/))
     const revive = conn.query.mock.calls.find(c => /^\s*UPDATE/.test(String(c[0])))!
     expect(String(revive[0])).toMatch(/SET assessment = \?, tb_user_id = \?, created_at = NOW\(\), updated_at = NOW\(\), deleted = 'N'[\s\S]*deleted = 'S'/)
     expect(revive[1]).toEqual([TABLE, '1', 4, 7, '2027-01-01'])
+    // o revive também respeita a fronteira (D-IB101) — a nota nasceu depois da pré-checagem
+    fakeTxConn({ insertError: dup(), lockRow: { assessment: '3', deleted: 'S' }, lastInvoice: '2027-01-01' })
+    await expect(createIbscbsAssessment('setes_acme', 7, 4, { validFrom: '2027-01-01', assessment: '1' }))
+      .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_INVOICED' })
   })
 
-  it('registrar: outro criador gravou a mesma data no intervalo (chave duplicada no INSERT) = 409 DUPLICATE, nunca 500', async () => {
-    fakeTxConn({ insertError: Object.assign(new Error('dup'), { code: 'ER_DUP_ENTRY' }) })
-    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_DUPLICATE' })
-  })
-
-  it('trocar: inexistente/morta = 404; vigente ou passada = 409 IN_EFFECT; futura troca (com o piso do regular)', async () => {
+  it('trocar: inexistente/morta = 404; vigente ou passada = 409 IN_EFFECT; depois de nota = 409 INVOICED; futura troca', async () => {
     fakeTxConn({ lockRow: null })
     await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' }))
       .rejects.toMatchObject({ statusCode: 404, code: 'IBSCBS_ASSESSMENT_NOT_FOUND' })
@@ -187,23 +245,29 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
     fakeTxConn({ lockRow: { assessment: '1', deleted: 'N' } })
     await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2026-11-01', assessment: '1' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_IN_EFFECT' })
-    fakeTxConn({ lockRow: { assessment: '1', deleted: 'N' } })
+    // D-IB101 (ADV-IB99-02): o fuso trocado faz o "hoje" voltar — a linha parece futura, mas uma nota já leu a data
+    fakeTxConn({ lockRow: { assessment: '1', deleted: 'N' }, lastInvoice: '2027-01-01' })
+    await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_INVOICED' })
     await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2026-12-15', assessment: '2' }))
       .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY' })
     const conn = fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' } })
     await changeIbscbsAssessment('setes_acme', 7, 5, { validFrom: '2027-01-01', assessment: '2' })
-    expect(sqlOf(conn)[0]).toMatch(/WHERE tb_institution_id = \? AND valid_from = \? FOR UPDATE/)   // trava de REGISTRO (PK completa)
+    expect(sqlOf(conn)[0]).toMatch(/WHERE tb_institution_id = \? AND valid_from = \? FOR UPDATE/)   // trava de REGISTRO, 1º comando
     const update = conn.query.mock.calls.find(c => /^\s*UPDATE/.test(String(c[0])))!
     expect(update[1]).toEqual([TABLE, '2', 5, 7, '2027-01-01'])
   })
 
-  it('excluir: SOFT (nunca DELETE), só linha futura, com o autor do ato', async () => {
+  it('excluir: SOFT (nunca DELETE), só linha futura e depois da última nota, com o autor do ato', async () => {
     fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' } })
     await expect(removeIbscbsAssessment('setes_acme', 7, 3, '2026-11-01'))
       .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_IN_EFFECT' })
+    fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' }, lastInvoice: '2027-01-05' })
+    await expect(removeIbscbsAssessment('setes_acme', 7, 3, '2027-01-01'))
+      .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_INVOICED' })
     const conn = fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' } })
     await removeIbscbsAssessment('setes_acme', 7, 6, '2027-01-01')
-    expect(sqlOf(conn).some(s => /DELETE/.test(s))).toBe(false)
+    expect(sqlOf(conn).some(x => /DELETE/.test(x))).toBe(false)
     const update = conn.query.mock.calls.find(c => /^\s*UPDATE/.test(String(c[0])))!
     expect(String(update[0])).toMatch(/SET deleted = 'S', tb_user_id = \?/)
     expect(update[1]).toEqual([TABLE, 6, 7, '2027-01-01'])

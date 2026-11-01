@@ -4,6 +4,7 @@ import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { todayFor } from '@shared/time-zone'
+import { lastLiveEmissionDate } from '@shared/invoice/emission-date'
 
 /**
  * PEÇA @shared/ibscbs-assessment (fase IBS/CBS, D-IB99/D-IB100 — Infra-IA/prompts/prompt_fase_ibs_cbs.md §14): a OPÇÃO de
@@ -14,12 +15,15 @@ import { todayFor } from '@shared/time-zone'
  * - **Fato gerador próprio** (parecer do guardião, D-IB100): opção CGSN 194, semestral e irretratável no semestre — distinta do
  *   enquadramento no Simples (opSimpNac), do sublimite (regApTribSN) e do pTotTribSN, que seguem em `tb_entity_tax` sob a
  *   convenção "sem história" (D-IB66 — limite conhecido) até o 1º fato datado de cada um.
+ * - **Conhecimento negativo (nota do Valdo à Q-IB104, 2026-11-01)**: o sistema NÃO controla as regras do governo sobre a opção —
+ *   permanência no período, prazo/calendário para optar, exclusão por descumprimento. A opção é DADO DECLARADO pelo estabelecimento;
+ *   nunca nasça aqui trava de permanência, calendário de opção ou exclusão automática (a D-IB101 só protege o passado lido por nota).
  * - **Sem linha = 1** (D-IB1: o efeito legal de NÃO optar) — nunca backfill; uma linha '1' explícita só fecha um período 2/3.
  * - **Vida da linha**: sem `valid_until` (a linha seguinte fecha a anterior); inserir com início ≥ hoje do estabelecimento; alterar
  *   e excluir (soft) só linha FUTURA; a vigente e as passadas são imutáveis; 2/3 só a partir de 01/01/2027. O calendário 01/01·01/07
- *   NÃO é travado (MAT/exclusão de ofício têm "data do fato motivador"). ⚠️ LIMITE CONHECIDO (gate socrático, Q-IB105 ao Valdo): a
- *   competência é por DIA — uma opção registrada com início HOJE (ou na virada da meia-noite) passa a cobrir notas já emitidas hoje
- *   sob a opção anterior; a trava abaixo só ORDENA o registro depois do faturamento em curso, não confere as notas já nascidas.
+ *   NÃO é travado (MAT/exclusão de ofício têm "data do fato motivador"). **D-IB101**: a fronteira é o MAIOR entre hoje e a última
+ *   nota viva do estabelecimento — registrar, alterar ou excluir com início ≤ a data de uma nota já emitida = 409 (o passado já lido
+ *   por uma nota nunca muda), conferido DEPOIS da trava e com o relógio de depois da espera (`frontierAfterLock`).
  * - **Suporte é propriedade do CÓDIGO** (nunca coluna): `IBSCBS_ASSESSMENTS_SUPPORTED` cresce quando o cálculo do regime regular
  *   (D-IB11/D-IB12) existir. Até lá o faturamento RECUSA toda nota cuja competência caia na vigência de 2/3 (D-IB99) — a recusa
  *   mora no escritor único da nota (`@shared/invoice.issueInvoice`), para todo modelo e todo produtor.
@@ -80,8 +84,8 @@ export interface IbscbsAssessmentAt {
  * A opção vigente na DATA (a competência da nota = `dt_emission`, D-IB64): a linha viva de maior `valid_from` ≤ data. Dentro da
  * transação que decide (faturamento) a leitura é TRAVANTE compartilhada (PADROES §9 regra 2): o registro de uma opção nova com
  * início ≤ data ESPERA o faturamento terminar (nunca uma nota decidida com uma opção que muda no meio dela) — provado em
- * `scripts/prove-ibscbs-assessment.ts`. A espera ORDENA; não impede que a opção registrada depois cubra a nota já emitida no mesmo
- * dia (limite da Q-IB105).
+ * `scripts/prove-ibscbs-assessment.ts`. A espera ORDENA; quem CONFERE as notas já nascidas é o escritor da opção, depois da trava
+ * (D-IB101 — `frontierAfterLock`).
  */
 export async function ibscbsAssessmentAt(
   q: Queryable, schemaName: string, institutionId: number, date: string, opts: { lock: boolean },
@@ -148,13 +152,17 @@ export interface IbscbsAssessmentLine {
   supported:  boolean
   /** Vigente hoje (a linha que governa a data de hoje). */
   inEffect:   boolean
-  /** Só linha FUTURA muda (alterar/excluir). */
+  /** Só linha FUTURA e depois da última nota muda (alterar/excluir — D-IB100/D-IB101). */
   editable:   boolean
 }
 
 export interface IbscbsAssessmentView {
   /** Hoje do estabelecimento (fuso — PADROES §10): a fronteira passado × futuro. */
   today:        string
+  /** D-IB101: a última data de emissão de nota viva (null = nenhuma) — início ≤ ela é recusado. */
+  lastInvoice:  string | null
+  /** O 1º início que o registro aceita hoje = o maior entre hoje e o dia seguinte à última nota (a tela sugere/limita por ele). */
+  firstStart:   string
   regularStart: string
   supported:    string[]
   /** O que vale hoje — `validFrom` null = sem linha (D-IB1). */
@@ -167,24 +175,34 @@ export async function readIbscbsAssessmentView(
   schemaName: string, institutionId: number, q: Queryable = pool,
 ): Promise<IbscbsAssessmentView> {
   const today = await todayFor(schemaName, institutionId, q)
+  const lastInvoice = await lastLiveEmissionDate(q, schemaName, institutionId)
   const [rows] = await q.query(
     `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment
        FROM ?? WHERE tb_institution_id = ? AND deleted = 'N' ORDER BY valid_from`,
     [tableOf(schemaName), institutionId])
+  const changeable = (validFrom: string) => validFrom > today && (lastInvoice === null || validFrom > lastInvoice)
   const lines = (rows as any[]).map(r => ({ validFrom: String(r.validFrom), assessment: String(r.assessment ?? '') }))
   const governing = [...lines].reverse().find(l => l.validFrom <= today) ?? null
   const current = governing
     ? { ...governing, supported: isAssessmentSupported(governing.assessment) }
     : { assessment: IBSCBS_ASSESSMENT_WITHOUT_OPTION, validFrom: null, supported: true }
+  const dayAfterInvoice = lastInvoice === null ? null : nextDay(lastInvoice)
   return {
-    today, regularStart: IBSCBS_REGULAR_ASSESSMENT_START, supported: [...IBSCBS_ASSESSMENTS_SUPPORTED],
+    today, lastInvoice, firstStart: dayAfterInvoice !== null && dayAfterInvoice > today ? dayAfterInvoice : today,
+    regularStart: IBSCBS_REGULAR_ASSESSMENT_START, supported: [...IBSCBS_ASSESSMENTS_SUPPORTED],
     current,
     items: lines.map(l => ({
       ...l, supported: isAssessmentSupported(l.assessment),
       inEffect: governing !== null && l.validFrom === governing.validFrom,
-      editable: l.validFrom > today,
+      editable: changeable(l.validFrom),
     })),
   }
+}
+
+const nextDay = (iso: string): string => {
+  const d = new Date(`${iso}T00:00:00Z`)
+  d.setUTCDate(d.getUTCDate() + 1)
+  return d.toISOString().slice(0, 10)
 }
 
 /** Piso legal do regular (422 no campo da data — o que a tela corrige). */
@@ -241,44 +259,82 @@ async function lockLine(conn: PoolConnection, schemaName: string, institutionId:
 }
 
 /**
- * Registra uma opção (início ≥ hoje). PK já existente: viva = 409; morta = REVIVE da MESMA linha sem herdar nada (PADROES §3.1 —
- * todas as colunas regravadas). Concorrência (ADV-IB99-05): a linha que EXISTE é travada por REGISTRO antes de decidir (dois
- * reviveres concorrentes se enfileiram — o 2º vê a linha viva e recebe 409, nunca deadlock); a que não existe nasce por INSERT
- * atômico (a corrida de dois criadores dá 1 criação + 409).
+ * D-IB101 (Valdo 2026-11-01, Q-IB104 = (a) — prompt_fase_ibs_cbs.md §14.4): a FRONTEIRA do que a opção pode mudar é o MAIOR entre
+ * HOJE e a ÚLTIMA data de emissão de nota VIVA do estabelecimento — "o passado já lido por uma nota nunca muda", ao pé da letra.
+ * Chamada SEMPRE DEPOIS da trava que serializa com o faturamento (o INSERT da linha nova ou o FOR UPDATE da linha existente — o
+ * faturamento lê a opção com LOCK IN SHARE MODE): nenhuma leitura consistente acontece antes dela nesta transação, então o retrato
+ * nasce DEPOIS da espera e enxerga a nota que o faturamento concorrente acabou de gravar; e o "hoje" é o do relógio REAL de depois
+ * da espera (nunca o do início da requisição — a virada da meia-noite). Fecha os 3 casos do gate (ADV-IB99-01/02): a opção registrada
+ * HOJE depois de uma nota de hoje, a meia-noite e a troca do fuso do estabelecimento (o "hoje" anda para trás; a nota não).
+ */
+async function frontierAfterLock(
+  conn: Queryable, schemaName: string, institutionId: number,
+): Promise<{ today: string; lastInvoice: string | null }> {
+  const today = await todayFor(schemaName, institutionId, conn, new Date())
+  const lastInvoice = await lastLiveEmissionDate(conn, schemaName, institutionId)
+  return { today, lastInvoice }
+}
+
+/** Início ≤ a última nota viva = 409: a opção mudaria o que uma nota já emitida leu. */
+function assertNotInvoiced(validFrom: string, lastInvoice: string | null, act: string): void {
+  if (lastInvoice !== null && validFrom <= lastInvoice) {
+    throw new HttpError(409,
+      `Já existe nota emitida em ${lastInvoice} — ${act} a opção de apuração do IBS/CBS a partir de ${validFrom} mudaria o que essa nota `
+      + `já leu; use início depois de ${lastInvoice} (D-IB101)`,
+      [{ field: 'validFrom', message: `Depois de ${lastInvoice}` }], ErrorCodes.IBSCBS_ASSESSMENT_INVOICED)
+  }
+}
+
+/** Registrar: início ≥ hoje E depois da última nota viva — conferido DEPOIS da trava (D-IB101). */
+async function assertRegistrable(conn: Queryable, schemaName: string, institutionId: number, validFrom: string): Promise<void> {
+  const { today, lastInvoice } = await frontierAfterLock(conn, schemaName, institutionId)
+  if (validFrom < today) {
+    throw new HttpError(422,
+      `A opção de apuração do IBS/CBS começa em ${validFrom}, antes de hoje (${today}) — o passado é imutável; registre a partir de hoje`,
+      [{ field: 'validFrom', message: `A partir de ${today}` }], ErrorCodes.IBSCBS_ASSESSMENT_DATE_PAST)
+  }
+  assertNotInvoiced(validFrom, lastInvoice, 'registrar')
+}
+
+const duplicateOf = (validFrom: string) => new HttpError(409,
+  `Já existe opção de apuração do IBS/CBS a partir de ${validFrom} — altere a existente`,
+  [{ field: 'validFrom', message: 'Data já registrada' }], ErrorCodes.IBSCBS_ASSESSMENT_DUPLICATE)
+
+/**
+ * Registra uma opção (início ≥ hoje e depois da última nota viva — D-IB101). PK já existente: viva = 409; morta = REVIVE da MESMA linha
+ * sem herdar nada (PADROES §3.1 — todas as colunas regravadas). Duas transações, cada uma com a trava ANTES de qualquer leitura:
+ * (1) INSERT da linha nova (a trava é o próprio INSERT — espera o faturamento que leu a data); a chave já existir encerra esta
+ * transação sem nada gravado; (2) a linha EXISTENTE é travada por REGISTRO antes de decidir (ADV-IB99-05: reviveres concorrentes se
+ * enfileiram — o 2º vê a linha viva e recebe 409, nunca deadlock). Corrida de dois criadores: 1 criação + 409.
  */
 export async function createIbscbsAssessment(
   schemaName: string, institutionId: number, userId: number, input: IbscbsAssessmentInput,
 ): Promise<void> {
   assertInput(input.validFrom, input.assessment)
   const { validFrom, assessment } = input
-  await inTransaction('registro da opção IBS/CBS', institutionId, async conn => {
-    const today = await todayFor(schemaName, institutionId, conn)
-    if (validFrom < today) {
-      throw new HttpError(422,
-        `A opção de apuração do IBS/CBS começa em ${validFrom}, antes de hoje (${today}) — o passado é imutável; registre a partir de hoje`,
-        [{ field: 'validFrom', message: `A partir de ${today}` }], ErrorCodes.IBSCBS_ASSESSMENT_DATE_PAST)
+  assertRegularFloor(validFrom, assessment)
+  // PRÉ-CHECAGEM (gate do delta, socrático 2): o pedido inválido é recusado pelo pool, SEM trava — nunca segura o faturamento para
+  // recusar; a conferência DECISIVA continua depois da trava (abaixo)
+  await assertRegistrable(pool, schemaName, institutionId, validFrom)
+  const created = await inTransaction('registro da opção IBS/CBS', institutionId, async conn => {
+    try {
+      await conn.query(
+        `INSERT INTO ?? (tb_institution_id, valid_from, assessment, tb_user_id, created_at, updated_at, deleted)
+         VALUES (?, ?, ?, ?, NOW(), NOW(), 'N')`,
+        [tableOf(schemaName), institutionId, validFrom, assessment, userId])
+    } catch (err: any) {
+      if (err?.code === 'ER_DUP_ENTRY') return false   // a data já existe: decide a transação (2), com a trava de registro
+      throw err
     }
-    assertRegularFloor(validFrom, assessment)
-    const duplicate = () => new HttpError(409, `Já existe opção de apuração do IBS/CBS a partir de ${validFrom} — altere a existente`,
-      [{ field: 'validFrom', message: 'Data já registrada' }], ErrorCodes.IBSCBS_ASSESSMENT_DUPLICATE)
-    // a linha existe (viva ou morta)? Leitura consistente SÓ para escolher o caminho; a decisão é tomada travada abaixo
-    const [seen] = await conn.query<any[]>(
-      `SELECT 1 AS ok FROM ?? WHERE tb_institution_id = ? AND valid_from = ?`, [tableOf(schemaName), institutionId, validFrom])
-    if (seen.length === 0) {
-      try {
-        await conn.query(
-          `INSERT INTO ?? (tb_institution_id, valid_from, assessment, tb_user_id, created_at, updated_at, deleted)
-           VALUES (?, ?, ?, ?, NOW(), NOW(), 'N')`,
-          [tableOf(schemaName), institutionId, validFrom, assessment, userId])
-        return
-      } catch (err: any) {
-        if (err?.code === 'ER_DUP_ENTRY') throw duplicate()   // outro registro criou a mesma data no intervalo
-        throw err
-      }
-    }
-    const line = await lockLine(conn, schemaName, institutionId, validFrom)   // trava de REGISTRO (a linha existe)
-    if (!line) throw new Error(`Opção IBS/CBS ${institutionId}/${validFrom}: linha sumiu entre a leitura e a trava — dado inconsistente`)
-    if (line.deleted === 'N') throw duplicate()
+    await assertRegistrable(conn, schemaName, institutionId, validFrom)   // falhou = a transação desfaz o INSERT
+    return true
+  })
+  if (created) return
+  await inTransaction('revive da opção IBS/CBS', institutionId, async conn => {
+    const line = await lockLine(conn, schemaName, institutionId, validFrom)
+    if (!line) throw new Error(`Opção IBS/CBS ${institutionId}/${validFrom}: chave duplicada sem linha — dado inconsistente`)
+    if (line.deleted === 'N') throw duplicateOf(validFrom)
+    await assertRegistrable(conn, schemaName, institutionId, validFrom)
     await conn.query(
       `UPDATE ?? SET assessment = ?, tb_user_id = ?, created_at = NOW(), updated_at = NOW(), deleted = 'N'
         WHERE tb_institution_id = ? AND valid_from = ? AND deleted = 'S'`,
@@ -286,19 +342,22 @@ export async function createIbscbsAssessment(
   })
 }
 
-/** A linha viva da PK, FUTURA — senão 404 / 409 (vigente ou passada é imutável). */
-async function lockFutureLine(conn: PoolConnection, schemaName: string, institutionId: number, validFrom: string): Promise<void> {
+/** A linha viva da PK, FUTURA e depois da última nota viva — senão 404 / 409 (D-IB100/D-IB101). Trava ANTES de ler a fronteira. */
+async function lockFutureLine(
+  conn: PoolConnection, schemaName: string, institutionId: number, validFrom: string, act: string,
+): Promise<void> {
   const line = await lockLine(conn, schemaName, institutionId, validFrom)
   if (!line || line.deleted !== 'N') {
     throw new HttpError(404, `Opção de apuração do IBS/CBS a partir de ${validFrom} não encontrada`, undefined,
       ErrorCodes.IBSCBS_ASSESSMENT_NOT_FOUND)
   }
-  const today = await todayFor(schemaName, institutionId, conn)
+  const { today, lastInvoice } = await frontierAfterLock(conn, schemaName, institutionId)
   if (validFrom <= today) {
     throw new HttpError(409,
       `A opção de apuração do IBS/CBS a partir de ${validFrom} já está vigente (hoje é ${today}) — linha imutável; registre uma nova `
       + 'opção com data futura', undefined, ErrorCodes.IBSCBS_ASSESSMENT_IN_EFFECT)
   }
+  assertNotInvoiced(validFrom, lastInvoice, act)
 }
 
 /** Troca a opção de uma linha FUTURA (a data é a identidade — mudar a data = excluir e registrar outra). */
@@ -307,9 +366,9 @@ export async function changeIbscbsAssessment(
 ): Promise<void> {
   assertInput(input.validFrom, input.assessment)
   const { validFrom, assessment } = input
+  assertRegularFloor(validFrom, assessment)
   await inTransaction('alteração da opção IBS/CBS', institutionId, async conn => {
-    await lockFutureLine(conn, schemaName, institutionId, validFrom)
-    assertRegularFloor(validFrom, assessment)
+    await lockFutureLine(conn, schemaName, institutionId, validFrom, 'alterar')
     await conn.query(
       `UPDATE ?? SET assessment = ?, tb_user_id = ?, updated_at = NOW()
         WHERE tb_institution_id = ? AND valid_from = ? AND deleted = 'N'`,
@@ -326,7 +385,7 @@ export async function removeIbscbsAssessment(
       ErrorCodes.VALIDATION_FAILED)
   }
   await inTransaction('exclusão da opção IBS/CBS', institutionId, async conn => {
-    await lockFutureLine(conn, schemaName, institutionId, validFrom)
+    await lockFutureLine(conn, schemaName, institutionId, validFrom, 'excluir')
     await conn.query(
       `UPDATE ?? SET deleted = 'S', tb_user_id = ?, updated_at = NOW()
         WHERE tb_institution_id = ? AND valid_from = ? AND deleted = 'N'`,

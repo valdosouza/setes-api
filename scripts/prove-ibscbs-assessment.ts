@@ -41,6 +41,7 @@ async function main() {
   try {
     await conn.query(`CREATE DATABASE \`${PROBE}\``)
     await conn.query(`CREATE TABLE \`${PROBE}\`.tb_institution_has_config LIKE \`${SOURCE}\`.tb_institution_has_config`)
+    await conn.query(`CREATE TABLE \`${PROBE}\`.tb_invoice LIKE \`${SOURCE}\`.tb_invoice`)   // D-IB101: a última nota viva (vazia)
     await conn.query(`USE \`${PROBE}\``)
     const statements = splitStatements(fs.readFileSync(MIGRATION, 'utf8'))
     for (let run = 1; run <= 2; run++) for (const st of statements) await conn.query(st)
@@ -169,6 +170,29 @@ async function main() {
     console.log(`     (informativo) registrar DEPOIS da competência com a leitura travada: ${after}`)
     await conn.commit()
     check('depois do commit do faturamento o registro passa', await insertBy('2027-02-01') === 'gravou')
+
+    // D-IB101 (Valdo 2026-11-01): a espera ORDENA e o escritor da opção CONFERE — o faturamento lê a opção (travado), o registro com
+    // início na competência ESPERA, o faturamento grava a nota e confirma; o registro, ao passar, enxerga a nota (o retrato da transação
+    // dele nasce DEPOIS da espera) e recusa com INVOICED. Sem isso, a opção passaria a cobrir a nota que já leu a anterior.
+    await conn.query('DROP TABLE tb_establishment_ibscbs_assessment')
+    for (const st of statements) await conn.query(st)
+    const raceDay = addDays(today, 7)
+    await conn.beginTransaction()
+    await ibscbsAssessmentAt(conn, S, INSTITUTION, raceDay, { lock: true })            // o faturamento leu "sem linha = 1"
+    const pending = codeOf(createIbscbsAssessment(S, INSTITUTION, 21, { validFrom: raceDay, assessment: '1' }))
+    await new Promise(r => setTimeout(r, 600))                                           // o registro está esperando a trava
+    await conn.query(`INSERT INTO tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (900001, ?, ?, 1, ?, '0')`,
+      [INSTITUTION, INSTITUTION, raceDay])
+    await conn.commit()
+    check(`registro que esperou o faturamento enxerga a nota e recusa: ${await pending}`, (await pending) === 'IBSCBS_ASSESSMENT_INVOICED')
+    const [plan] = await conn.query<any[]>(`EXPLAIN SELECT MAX(dt_emission) FROM tb_invoice WHERE tb_institution_id = ? AND deleted = 'N'`, [INSTITUTION])
+    const extra = String((plan as any[])[0]?.Extra ?? '')
+    check(`fronteira pelo índice da 076 (ADV-D101-02): ${extra || (plan as any[])[0]?.key}`,
+      /optimized away/i.test(extra) || (plan as any[])[0]?.key === 'idx_invoice_live_emission')
+    check('depois da nota, início POSTERIOR a ela passa',
+      await codeOf(createIbscbsAssessment(S, INSTITUTION, 22, { validFrom: addDays(raceDay, 1), assessment: '1' })) === 'ok')
+    check('registrar de novo com início ≤ a última nota = INVOICED (mesmo futuro pelo relógio)',
+      await codeOf(createIbscbsAssessment(S, INSTITUTION, 23, { validFrom: raceDay, assessment: '1' })) === 'IBSCBS_ASSESSMENT_INVOICED')
   } finally {
     try { await conn.rollback() } catch { /* nada aberto */ }
     await conn.query(`DROP DATABASE IF EXISTS \`${PROBE}\``).catch(() => undefined)

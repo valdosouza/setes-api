@@ -40,3 +40,10 @@ CREATE TABLE IF NOT EXISTS `tb_establishment_ibscbs_assessment` (
 ALTER TABLE `tb_establishment_ibscbs_assessment`
   ADD CONSTRAINT IF NOT EXISTS `ck_establishment_ibscbs_assessment`
     CHECK (`assessment` COLLATE utf8mb4_bin IN ('1', '2', '3'));
+
+-- D-IB101 (gate do delta, ADV-D101-02): a FRONTEIRA da opção é a última data de emissão de nota viva do estabelecimento, lida pelo
+-- escritor da opção ENQUANTO segura a trava que o faturamento lê — sem índice próprio a MAX varria todas as notas da institution
+-- (300 mil notas: 4–6 s com o faturamento parado). Com o prefixo de igualdade (institution, deleted) a MAX é "Select tables optimized
+-- away" (provado: 4 ms). Índice ADITIVO em tabela quente: InnoDB cria online; re-executável (IF NOT EXISTS).
+ALTER TABLE `tb_invoice`
+  ADD KEY IF NOT EXISTS `idx_invoice_live_emission` (`tb_institution_id`, `deleted`, `dt_emission`);
