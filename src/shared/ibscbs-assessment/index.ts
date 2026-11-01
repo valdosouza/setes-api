@@ -4,7 +4,7 @@ import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { todayFor } from '@shared/time-zone'
-import { lastLiveEmissionDate } from '@shared/invoice/emission-date'
+import { lastErpWebEmissionDate } from '@shared/invoice/emission-date'
 import { emitterRegimeAt } from '@shared/entity-tax/entity-tax.repository'
 
 /**
@@ -171,7 +171,7 @@ export interface IbscbsAssessmentLine {
 export interface IbscbsAssessmentView {
   /** Hoje do estabelecimento (fuso — PADROES §10): a fronteira passado × futuro. */
   today:        string
-  /** D-IB101: a última data de emissão de nota viva (null = nenhuma) — início ≤ ela é recusado. */
+  /** D-IB101/D-IB103: a última data de emissão de nota viva do ERP web (null = nenhuma) — início ≤ ela é recusado. */
   lastInvoice:  string | null
   /** O 1º início que o registro aceita hoje = o maior entre hoje e o dia seguinte à última nota (a tela sugere/limita por ele). */
   firstStart:   string
@@ -190,7 +190,7 @@ export async function readIbscbsAssessmentView(
   schemaName: string, institutionId: number, q: Queryable = pool,
 ): Promise<IbscbsAssessmentView> {
   const today = await todayFor(schemaName, institutionId, q)
-  const lastInvoice = await lastLiveEmissionDate(q, schemaName, institutionId)
+  const lastInvoice = await lastErpWebEmissionDate(q, schemaName, institutionId)
   const { simplesRegime } = await emitterRegimeAt(q, schemaName, institutionId, today, { lock: false })
   const [rows] = await q.query(
     `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment
@@ -278,6 +278,7 @@ async function lockLine(conn: PoolConnection, schemaName: string, institutionId:
 /**
  * D-IB101 (Valdo 2026-11-01, Q-IB104 = (a) — prompt_fase_ibs_cbs.md §14.4): a FRONTEIRA do que a opção pode mudar é o MAIOR entre
  * HOJE e a ÚLTIMA data de emissão de nota VIVA do estabelecimento — "o passado já lido por uma nota nunca muda", ao pé da letra.
+ * D-IB103 (Q-IB107 = (b)): só conta a nota emitida pelo ERP WEB (a que LEU a opção — evento E); a do ERP Desktop e a compra, não.
  * Chamada SEMPRE DEPOIS da trava que serializa com o faturamento (o INSERT da linha nova ou o FOR UPDATE da linha existente — o
  * faturamento lê a opção com LOCK IN SHARE MODE): nenhuma leitura consistente acontece antes dela nesta transação, então o retrato
  * nasce DEPOIS da espera e enxerga a nota que o faturamento concorrente acabou de gravar; e o "hoje" é o do relógio REAL de depois
@@ -288,7 +289,7 @@ async function frontierAfterLock(
   conn: Queryable, schemaName: string, institutionId: number,
 ): Promise<{ today: string; lastInvoice: string | null }> {
   const today = await todayFor(schemaName, institutionId, conn, new Date())
-  const lastInvoice = await lastLiveEmissionDate(conn, schemaName, institutionId)
+  const lastInvoice = await lastErpWebEmissionDate(conn, schemaName, institutionId)
   return { today, lastInvoice }
 }
 
@@ -332,7 +333,7 @@ function assertRegimeAdmits(simplesRegime: string | null | undefined, assessment
 function assertNotInvoiced(validFrom: string, lastInvoice: string | null, act: string): void {
   if (lastInvoice !== null && validFrom <= lastInvoice) {
     throw new HttpError(409,
-      `Já existe nota emitida em ${lastInvoice} — ${act} a opção de apuração do IBS/CBS a partir de ${validFrom} mudaria o que essa nota `
+      `Já existe nota emitida por este sistema em ${lastInvoice} — ${act} a opção de apuração do IBS/CBS a partir de ${validFrom} mudaria o que essa nota `
       + `já leu; use início depois de ${lastInvoice} (D-IB101)`,
       [{ field: 'validFrom', message: `Depois de ${lastInvoice}` }], ErrorCodes.IBSCBS_ASSESSMENT_INVOICED)
   }

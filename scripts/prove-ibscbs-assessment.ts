@@ -42,6 +42,7 @@ async function main() {
     await conn.query(`CREATE DATABASE \`${PROBE}\``)
     await conn.query(`CREATE TABLE \`${PROBE}\`.tb_institution_has_config LIKE \`${SOURCE}\`.tb_institution_has_config`)
     await conn.query(`CREATE TABLE \`${PROBE}\`.tb_invoice LIKE \`${SOURCE}\`.tb_invoice`)   // D-IB101: a última nota viva (vazia)
+    await conn.query(`CREATE TABLE \`${PROBE}\`.tb_invoice_event LIKE \`${SOURCE}\`.tb_invoice_event`)   // D-IB103: só nota do ERP web conta
     // D-IB102: o emitente é ME/EPP (opSimpNac 3) — admite a opção pelo regime regular
     await conn.query(`CREATE TABLE \`${PROBE}\`.tb_entity_tax LIKE \`${SOURCE}\`.tb_entity_tax`)
     await conn.query(`INSERT INTO \`${PROBE}\`.tb_entity_tax (id, tb_institution_id, simples_regime) VALUES (?, ?, '3')`, [INSTITUTION, INSTITUTION])
@@ -186,12 +187,18 @@ async function main() {
     await new Promise(r => setTimeout(r, 600))                                           // o registro está esperando a trava
     await conn.query(`INSERT INTO tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (900001, ?, ?, 1, ?, '0')`,
       [INSTITUTION, INSTITUTION, raceDay])
+    await conn.query(`INSERT INTO tb_invoice_event (tb_institution_id, tb_invoice_id, terminal, event, kind, dt_record) VALUES (?, 900001, 0, 1, 'E', ?)`,
+      [INSTITUTION, raceDay])   // o evento E que o issueInvoice grava (D-IB103: nota do ERP web)
     await conn.commit()
     check(`registro que esperou o faturamento enxerga a nota e recusa: ${await pending}`, (await pending) === 'IBSCBS_ASSESSMENT_INVOICED')
-    const [plan] = await conn.query<any[]>(`EXPLAIN SELECT MAX(dt_emission) FROM tb_invoice WHERE tb_institution_id = ? AND deleted = 'N'`, [INSTITUTION])
-    const extra = String((plan as any[])[0]?.Extra ?? '')
-    check(`fronteira pelo índice da 076 (ADV-D101-02): ${extra || (plan as any[])[0]?.key}`,
-      /optimized away/i.test(extra) || (plan as any[])[0]?.key === 'idx_invoice_live_emission')
+    const [plan] = await conn.query<any[]>(
+      `EXPLAIN SELECT e.dt_record FROM tb_invoice_event e STRAIGHT_JOIN tb_invoice i
+         ON i.id = e.tb_invoice_id AND i.tb_institution_id = e.tb_institution_id AND i.terminal = e.terminal AND i.deleted = 'N'
+       WHERE e.tb_institution_id = ? AND e.kind = 'E' AND e.deleted = 'N' ORDER BY e.dt_record DESC LIMIT 1`, [INSTITUTION])
+    const steps = (plan as any[]).map(r => `${r.select_type}:${r.table}:${r.key}`)
+    check(`fronteira (D-IB103) pelos EVENTOS, sem materializar (ADV-D103-01): ${steps.join(' → ')}`,
+      (plan as any[])[0]?.table === 'e' && (plan as any[])[0]?.key === 'idx_invoice_event_issue'
+      && !(plan as any[]).some(r => /MATERIALIZED|SUBQUERY/i.test(String(r.select_type))))
     check('depois da nota, início POSTERIOR a ela passa',
       await codeOf(createIbscbsAssessment(S, INSTITUTION, 22, { validFrom: addDays(raceDay, 1), assessment: '1' })) === 'ok')
     check('registrar de novo com início ≤ a última nota = INVOICED (mesmo futuro pelo relógio)',

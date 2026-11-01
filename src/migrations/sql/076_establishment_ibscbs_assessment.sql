@@ -41,9 +41,11 @@ ALTER TABLE `tb_establishment_ibscbs_assessment`
   ADD CONSTRAINT IF NOT EXISTS `ck_establishment_ibscbs_assessment`
     CHECK (`assessment` COLLATE utf8mb4_bin IN ('1', '2', '3'));
 
--- D-IB101 (gate do delta, ADV-D101-02): a FRONTEIRA da opção é a última data de emissão de nota viva do estabelecimento, lida pelo
--- escritor da opção ENQUANTO segura a trava que o faturamento lê — sem índice próprio a MAX varria todas as notas da institution
--- (300 mil notas: 4–6 s com o faturamento parado). Com o prefixo de igualdade (institution, deleted) a MAX é "Select tables optimized
--- away" (provado: 4 ms). Índice ADITIVO em tabela quente: InnoDB cria online; re-executável (IF NOT EXISTS).
-ALTER TABLE `tb_invoice`
-  ADD KEY IF NOT EXISTS `idx_invoice_live_emission` (`tb_institution_id`, `deleted`, `dt_emission`);
+-- D-IB101 + D-IB103: a FRONTEIRA da opção é a última nota VIVA emitida pelo ERP WEB (evento E de emissão), lida pelo escritor da opção
+-- ENQUANTO segura a trava que o faturamento lê. Lida a partir do FATO que a define — o evento E — pelo índice desse fato: varredura
+-- descendente por (institution, kind, deleted, data) que para na 1ª nota viva (gates do delta: ADV-D101-02 — a MAX sem índice varria
+-- todas as notas, 4–6 s com o faturamento parado; ADV-D103-01 — filtrar as notas pela EXISTÊNCIA do evento materializava todos os
+-- eventos e varria as notas do ERP Desktop mais novas: 1,3–1,6 s com 300 mil notas). Provado: O(1) linhas lidas (1 ms). Índice ADITIVO
+-- em tabela quente: InnoDB cria online; re-executável (IF NOT EXISTS).
+ALTER TABLE `tb_invoice_event`
+  ADD KEY IF NOT EXISTS `idx_invoice_event_issue` (`tb_institution_id`, `kind`, `deleted`, `dt_record`);

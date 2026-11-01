@@ -26,7 +26,7 @@ function fakeTxConn(opts: {
   const conn = {
     beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
     query: jest.fn(async (sql: string, _params?: unknown[]) => {
-      if (/MAX\(dt_emission\)/.test(sql)) return [[{ last: opts.lastInvoice ?? null }]]
+      if (/dt_record DESC LIMIT 1/.test(sql)) return [[{ last: opts.lastInvoice ?? null }]]
       if (/simples_regime/.test(sql)) return [[{ simplesRegime: opts.simplesRegime === undefined ? '3' : opts.simplesRegime }]]
       if (/^\s*INSERT/.test(sql)) { if (opts.insertError) throw opts.insertError; return [{ affectedRows: 1 }] }
       if (/FOR UPDATE/.test(sql)) return [opts.lockRow ? [opts.lockRow] : []]
@@ -134,7 +134,7 @@ describe('readIbscbsAssessmentView — o que a tela mostra', () => {
 
   it('D-IB101 (ADV-D101-05): a visão traz a última nota e o 1º início aceito; linha futura até a última nota NÃO é editável', async () => {
     tz.todayFor.mockResolvedValue('2027-01-01')
-    const q = { query: jest.fn(async (sql: string) => /MAX\(dt_emission\)/.test(sql)
+    const q = { query: jest.fn(async (sql: string) => /dt_record DESC LIMIT 1/.test(sql)
       ? [[{ last: '2027-01-05' }]]
       : [[{ validFrom: '2027-01-03', assessment: '1' }, { validFrom: '2027-01-06', assessment: '3' }]]) }
     const v = await readIbscbsAssessmentView('setes_acme', 7, q)
@@ -201,8 +201,13 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
     const conn = fakeTxConn()
     await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' })
     expect(at(conn, /^\s*INSERT/)).toBe(0)                                  // a trava é o 1º comando (nenhuma leitura antes)
-    expect(at(conn, /MAX\(dt_emission\)/)).toBeGreaterThan(0)
-    expect(conn.query.mock.calls[at(conn, /MAX\(dt_emission\)/)][1]).toEqual(['setes_acme.tb_invoice', 7])
+    expect(at(conn, /dt_record DESC LIMIT 1/)).toBeGreaterThan(0)
+    // D-IB103: só a nota do ERP web (com evento E de emissão) — a do ERP Desktop e a compra não entram na fronteira
+    const frontier = conn.query.mock.calls[at(conn, /dt_record DESC LIMIT 1/)]
+    // lida pelo FATO que a define (o evento E), pelo índice dele — nunca as notas filtradas pela existência do evento (ADV-D103-01)
+    expect(frontier[1]).toEqual(['setes_acme.tb_invoice_event', 'setes_acme.tb_invoice', 7])
+    expect(String(frontier[0])).toMatch(/FROM \?\? e STRAIGHT_JOIN \?\? i[\s\S]*e\.kind = 'E'[\s\S]*ORDER BY e\.dt_record DESC LIMIT 1/)
+    expect(String(frontier[0])).not.toMatch(/EXISTS/)
     expect(tz.todayFor).toHaveBeenCalledWith('setes_acme', 7, conn, expect.any(Date))   // nunca o relógio do início da requisição
   })
 
@@ -235,7 +240,7 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
     // ADV-IB99-05 + D-IB101: na 2ª transação a linha EXISTENTE é travada por registro ANTES da fronteira e da gravação
     const lock = at(conn, /FOR UPDATE/)
     expect(lock).toBeGreaterThan(at(conn, /^\s*INSERT/))
-    expect(lock).toBeLessThan(sqlOf(conn).lastIndexOf(sqlOf(conn).find(x => /MAX\(dt_emission\)/.test(x))!))
+    expect(lock).toBeLessThan(sqlOf(conn).lastIndexOf(sqlOf(conn).find(x => /dt_record DESC LIMIT 1/.test(x))!))
     expect(lock).toBeLessThan(at(conn, /^\s*UPDATE/))
     const revive = conn.query.mock.calls.find(c => /^\s*UPDATE/.test(String(c[0])))!
     expect(String(revive[0])).toMatch(/SET assessment = \?, tb_user_id = \?, created_at = NOW\(\), updated_at = NOW\(\), deleted = 'N'[\s\S]*deleted = 'S'/)

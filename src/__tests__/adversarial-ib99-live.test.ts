@@ -28,12 +28,18 @@ const live = process.env.IB99_ADV_LIVE === '1'
     jest.setSystemTime(new Date(iso))
     try { return await actualTz.runWithOperationClock(new Date(iso), fn) } finally { jest.useRealTimers() }
   }
-  const note = (id: number, day: string) => pool.query(
+  /** Nota do ERP WEB: a nota + o evento E que o `issueInvoice` grava (D-IB103 — só ela entra na fronteira). */
+  const webNoteSql = (q: any, id: number, day: string) => q.query(
     `INSERT INTO \`${S}\`.tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (?, 1, 1, 1, ?, 'F')`, [id, day])
+    .then(() => q.query(`INSERT INTO \`${S}\`.tb_invoice_event (tb_institution_id, tb_invoice_id, terminal, event, kind, dt_record) VALUES (1, ?, 0, 1, 'E', ?)`, [id, day]))
+  const note = (id: number, day: string) => webNoteSql(pool, id, day)
+  /** Nota do ERP DESKTOP (chega pelo sincronizador): só a nota, sem evento E — nunca leu a opção do ERP web. */
+  const desktopNote = (id: number, day: string) => pool.query(
+    `INSERT INTO \`${S}\`.tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (?, 1, 99, 1, ?, 'F')`, [id, day])
 
   /** Recomeça as 3 tabelas por DDL (nunca DELETE de dado — PADROES §3.1), no schema descartável. */
   async function freshTables() {
-    for (const t of ['tb_institution_has_config', 'tb_invoice', 'tb_entity_tax']) {
+    for (const t of ['tb_institution_has_config', 'tb_invoice', 'tb_invoice_event', 'tb_entity_tax']) {
       await pool.query(`DROP TABLE IF EXISTS \`${S}\`.${t}`)
       await pool.query(`CREATE TABLE \`${S}\`.${t} LIKE setes_setes.${t}`)
     }
@@ -81,7 +87,7 @@ const live = process.env.IB99_ADV_LIVE === '1'
         await piece.ibscbsAssessmentAt(billing, S, 1, D, { lock: true })          // o faturamento leu "sem linha = 1"
         const pending = codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: D, assessment: '1' }))
         await new Promise(r => setTimeout(r, 600))                                 // o registro espera a trava
-        await billing.query(`INSERT INTO \`${S}\`.tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (9, 1, 1, 1, ?, '0')`, [D])
+        await webNoteSql(billing, 9, D)   // a nota do ERP web (com o evento E) gravada na transação do faturamento
         await billing.commit()
         expect(await pending).toBe('IBSCBS_ASSESSMENT_INVOICED')
       } finally { billing.release() }
@@ -96,7 +102,7 @@ const live = process.env.IB99_ADV_LIVE === '1'
         await piece.ibscbsAssessmentAt(billing, S, 1, D, { lock: true })
         const pending = codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: D, assessment: '3' }))
         await new Promise(r => setTimeout(r, 600))
-        await billing.query(`INSERT INTO \`${S}\`.tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (10, 1, 1, 1, ?, '0')`, [D])
+        await webNoteSql(billing, 10, D)   // a nota do ERP web (com o evento E) gravada na transação do faturamento
         await billing.commit()
         expect(await pending).toBe('IBSCBS_ASSESSMENT_INVOICED')
       } finally { billing.release() }
@@ -144,6 +150,18 @@ const live = process.env.IB99_ADV_LIVE === '1'
         expect(out).not.toContain('ER_LOCK_DEADLOCK')
         expect(bill).toBe('ok')                                                         // o faturamento não esperou o registro
       } finally { billing.release(); admin.release() }
+    })
+  })
+
+  it('D-IB103: nota do ERP DESKTOP (sem evento E) e com data digitada errado não trava a opção; a do ERP web trava', async () => {
+    await clock(`${D}T15:00:00Z`, async () => {
+      await desktopNote(20, '2062-06-20')                              // ADV-D101-01: data futura digitada no desktop/PDV
+      await desktopNote(21, D)                                         // e uma do desktop HOJE
+      expect(await codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: D, assessment: '3' }))).toBe('ok')
+      expect(await piece.readIbscbsAssessmentView(S, 1)).toMatchObject({ lastInvoice: null })
+      await note(22, '2027-03-11')                                      // uma do ERP web amanhã (data de emissão futura)
+      expect(await codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: '2027-03-11', assessment: '1' }))).toBe('IBSCBS_ASSESSMENT_INVOICED')
+      expect(await piece.readIbscbsAssessmentView(S, 1)).toMatchObject({ lastInvoice: '2027-03-11', firstStart: '2027-03-12' })
     })
   })
 
