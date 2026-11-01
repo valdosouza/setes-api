@@ -8,8 +8,20 @@ import {
 } from '../shared/invoice'
 import type { IbscbsDeclaration } from '../shared/ibscbs-classification'
 
+// D-IB99/D-IB100: a opção de apuração do IBS/CBS tem teste próprio (ibscbs-assessment.test.ts) — nos testes de forma do
+// issueInvoice a fronteira é mockada (passa); o bloco "D-IB99" abaixo usa a REAL para provar a ordem (recusa antes do número)
+jest.mock('../shared/ibscbs-assessment', () => {
+  const actual = jest.requireActual('../shared/ibscbs-assessment')
+  return { __esModule: true, ...actual, assertIbscbsAssessmentSupported: jest.fn().mockResolvedValue(undefined) }
+})
+const assessmentPiece = jest.requireMock('../shared/ibscbs-assessment') as { assertIbscbsAssessmentSupported: jest.Mock }
+const actualAssessment = jest.requireActual('../shared/ibscbs-assessment')
+
 function fakeConn() { return { query: jest.fn() } }
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  assessmentPiece.assertIbscbsAssessmentSupported.mockResolvedValue(undefined)
+})
 
 describe('stateFromLastEvent', () => {
   it('C = cancelada; E ou sem evento (sincronizada) = emitida', () => {
@@ -97,6 +109,41 @@ describe('issueInvoice', () => {
     expect(conn.query.mock.calls[3][1].slice(-3)).toEqual([null, null, '115021000'])
     // evento E com a MESMA data da emissão
     expect(conn.query.mock.calls[5][1][4]).toBe('2026-12-20')
+  })
+})
+
+describe('issueInvoice — D-IB99: opção de apuração do IBS/CBS sem suporte recusa ANTES de cunhar o número', () => {
+  const input = {
+    orderId: 100, recipientEntityId: 209, model: '55', serie: '1', totalValue: 250, noteText: null,
+    merchandise: { baseIcms: 0, icms: 0, baseIcmsSt: 0, icmsSt: 0, ipi: 0, totalValue: 250, freight: 0, expenses: 0, discount: 0, quantity: 1 },
+    service: null, dtEmission: '2027-02-10',
+  }
+
+  it('chama a regra com a conexão da transação, o schema, a institution e a COMPETÊNCIA (dtEmission) — em todo modelo', async () => {
+    const conn = fakeConn()
+    conn.query.mockResolvedValueOnce([[{ nextNumber: 1 }]]).mockResolvedValue([[{ nextEvent: 1 }]])
+    await issueInvoice(conn as any, 'setes_setes', 1, 7, input)
+    expect(assessmentPiece.assertIbscbsAssessmentSupported).toHaveBeenCalledWith(conn, 'setes_setes', 1, '2027-02-10')
+  })
+
+  it('opção 3 vigente na competência → 422 IBSCBS_REGULAR_REGIME_UNSUPPORTED e NADA além da leitura travante (nem o MAX+1)', async () => {
+    assessmentPiece.assertIbscbsAssessmentSupported.mockImplementation(actualAssessment.assertIbscbsAssessmentSupported)
+    const conn = fakeConn()
+    conn.query.mockResolvedValueOnce([[{ validFrom: '2027-01-01', assessment: '3' }]])
+    await expect(issueInvoice(conn as any, 'setes_setes', 1, 7, input))
+      .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_REGULAR_REGIME_UNSUPPORTED' })
+    expect(conn.query).toHaveBeenCalledTimes(1)
+    expect(String(conn.query.mock.calls[0][0])).toMatch(/tb_institution_id = \? AND valid_from <= \?[\s\S]*LOCK IN SHARE MODE/)
+    expect(conn.query.mock.calls[0][1]).toEqual(['setes_setes.tb_establishment_ibscbs_assessment', 1, '2027-02-10'])
+  })
+
+  it('sem linha (D-IB1: vale 1) → a nota nasce normalmente', async () => {
+    assessmentPiece.assertIbscbsAssessmentSupported.mockImplementation(actualAssessment.assertIbscbsAssessmentSupported)
+    const conn = fakeConn()
+    conn.query.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ nextNumber: 4 }]]).mockResolvedValue([[{ nextEvent: 1 }]])
+    const r = await issueInvoice(conn as any, 'setes_setes', 1, 7, input)
+    expect(r.invoiceNumber).toBe('4')
+    expect(String(conn.query.mock.calls[1][0])).toMatch(/MAX\(number_seq\)/)
   })
 })
 

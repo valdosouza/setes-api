@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { addressBody, phoneBody, socialMediaBody } from '@shared/entity'
 import { TAX_REGIMES, SIMPLES_REGIME_CODES, SIMPLES_ASSESSMENT_CODES, SPECIAL_TAX_REGIME_CODES } from '@shared/entity-tax/entity-tax.types'
+import { IBSCBS_ASSESSMENTS, isIsoDate } from '@shared/ibscbs-assessment'
 
 /**
  * DTO (Zod) do módulo establishment — SÓ os campos editáveis do próprio
@@ -55,3 +56,27 @@ export const establishmentUpdateDto = z.object({
 }).superRefine(checkUniqueKinds)
 
 export type EstablishmentUpdateDto = z.infer<typeof establishmentUpdateDto>
+
+// ---------------------------------------------------------------------------
+// Sub-recurso OPÇÃO DE APURAÇÃO DO IBS/CBS (D-IB99/D-IB100 — prompt_fase_ibs_cbs.md §14): escritor ÚNICO de
+// a tabela da opção (migration 076) pela peça @shared/ibscbs-assessment (o PUT acima NÃO recebe a opção). A data é a
+// IDENTIDADE da linha (PK estabelecimento × início): POST registra; PUT/DELETE em /:validFrom trocam/excluem só linha FUTURA.
+// ---------------------------------------------------------------------------
+
+/** Data de calendário REAL (o servidor roda sem modo estrito — '2027-02-30' viraria '0000-00-00'). */
+export const isoDate = z.string().refine(isIsoDate, 'Data inválida (AAAA-MM-DD)')
+
+export const ibscbsAssessmentCreateDto = z.object({
+  validFrom:  isoDate,
+  assessment: z.enum(IBSCBS_ASSESSMENTS),
+})
+
+export const ibscbsAssessmentChangeDto = z.object({
+  assessment: z.enum(IBSCBS_ASSESSMENTS),
+})
+
+/** Campos do catálogo (seed sql/71) que o sub-recurso recebe — o motor confere SÓ estes nesta porta (`onlyFields`). */
+export const IBSCBS_ASSESSMENT_CATALOG_FIELDS = Object.freeze(['valid_from', 'assessment'] as const)
+
+export type IbscbsAssessmentCreateDto = z.infer<typeof ibscbsAssessmentCreateDto>
+export type IbscbsAssessmentChangeDto = z.infer<typeof ibscbsAssessmentChangeDto>

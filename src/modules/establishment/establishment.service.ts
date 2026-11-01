@@ -8,6 +8,10 @@ import { crtGroup, clearIcmsCodesForRegime } from '@shared/tax-rule'
 import logger from '@shared/logger/logger'
 import { EstablishmentDto, EstablishmentUpdateInput } from './establishment.interface'
 import { getEstablishmentChain, saveEstablishmentChain } from './establishment.repository'
+import {
+  IbscbsAssessmentView, IbscbsAssessmentInput, readIbscbsAssessmentView,
+  createIbscbsAssessment, changeIbscbsAssessment, removeIbscbsAssessment,
+} from '@shared/ibscbs-assessment'
 
 /**
  * Regra do módulo establishment — SEM 404 de "não encontrado": o
@@ -167,4 +171,37 @@ export async function editEstablishment(
     }
   }
   return fetchEstablishment(institutionId, schemaName)
+}
+
+// ---------------------------------------------------------------------------
+// Opção de apuração do IBS/CBS (D-IB99/D-IB100): a regra e a escrita moram na peça @shared/ibscbs-assessment (dona única da
+// tabela); o módulo só liga a porta HTTP e devolve a visão atualizada depois de cada ato.
+// ---------------------------------------------------------------------------
+
+export function fetchIbscbsAssessments(institutionId: number, schemaName: string): Promise<IbscbsAssessmentView> {
+  return readIbscbsAssessmentView(schemaName, institutionId)
+}
+
+export async function registerIbscbsAssessment(
+  institutionId: number, schemaName: string, userId: number, input: IbscbsAssessmentInput,
+): Promise<IbscbsAssessmentView> {
+  await createIbscbsAssessment(schemaName, institutionId, userId, input)
+  logger.info('Opção de apuração IBS/CBS registrada', { institutionId, validFrom: input.validFrom, assessment: input.assessment, userId })
+  return readIbscbsAssessmentView(schemaName, institutionId)
+}
+
+export async function editIbscbsAssessment(
+  institutionId: number, schemaName: string, userId: number, input: IbscbsAssessmentInput,
+): Promise<IbscbsAssessmentView> {
+  await changeIbscbsAssessment(schemaName, institutionId, userId, input)
+  logger.info('Opção de apuração IBS/CBS alterada', { institutionId, validFrom: input.validFrom, assessment: input.assessment, userId })
+  return readIbscbsAssessmentView(schemaName, institutionId)
+}
+
+export async function deleteIbscbsAssessment(
+  institutionId: number, schemaName: string, userId: number, validFrom: string,
+): Promise<IbscbsAssessmentView> {
+  await removeIbscbsAssessment(schemaName, institutionId, userId, validFrom)
+  logger.info('Opção de apuração IBS/CBS excluída', { institutionId, validFrom, userId })
+  return readIbscbsAssessmentView(schemaName, institutionId)
 }

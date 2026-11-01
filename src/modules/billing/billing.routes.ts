@@ -107,7 +107,7 @@ router.post('/validate', controller.validate)
  *       403: { description: Flag billing desabilitada }
  *       404: { description: Ordem não encontrada }
  *       409: { description: Ordem já faturada }
- *       422: { description: "Pendências de validação (REQUIRES_VALIDATION), negociação ausente ou — com ramo de serviço, depois da obrigação (D-IB8/D-IB62/D-IB63) — INVOICE_SERVICE_IBSCBS_REQUIRED / INVOICE_SERVICE_MULTI_DECLARATION (fields[] por item)" }
+ *       422: { description: "Pendências de validação (REQUIRES_VALIDATION), negociação ausente ou — com ramo de serviço, depois da obrigação (D-IB8/D-IB62/D-IB63) — INVOICE_SERVICE_IBSCBS_REQUIRED / INVOICE_SERVICE_MULTI_DECLARATION (fields[] por item); em QUALQUER nota (mercadoria também — D-IB99), IBSCBS_REGULAR_REGIME_UNSUPPORTED quando a opção de apuração do IBS/CBS vigente na competência é o regime regular (2/3), ainda não suportado — nada é gravado" }
  *       500: { description: Erro interno }
  */
 // Q-P5 (cancelamento, 2026-09-08): FATURAR e CANCELAR são privilégios de

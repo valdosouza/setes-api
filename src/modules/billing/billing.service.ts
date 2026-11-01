@@ -26,6 +26,7 @@ import {
 } from '@shared/invoice'
 import { assertSchema } from '@shared/db/schema'
 import { previewServiceIbscbs } from '@shared/service-ibscbs-declaration'
+import { previewIbscbsAssessmentRefusal } from '@shared/ibscbs-assessment'
 import { CancelBody, CancelWaiverBody } from './billing.dto'
 import { resolveOrderParcels, MaterializedParcel as ResolvedParcel } from '@shared/order-installment'
 import { hasServiceOrderCycle } from '@shared/service-order'
@@ -357,6 +358,13 @@ export async function validateOrder(
   const serviceProductIds = items.filter(i => i.productKind === 'S').map(i => Number(i.productId))
   const ibscbs = await previewServiceIbscbs(pool, assertSchema(schemaName), institutionId, serviceProductIds)
   if (ibscbs?.refusal) issues.push({ scope: 'ibscbs', field: 'ibscbs', message: ibscbs.refusal.message })
+  // D-IB99: a opção de apuração do IBS/CBS vale para TODA nota (mercadoria também) — a MESMA regra do `issueInvoice`, só-pergunta,
+  // na data que o faturamento usaria; sem repetir a issue quando a prévia do serviço já a trouxe
+  const regime = await previewIbscbsAssessmentRefusal(pool, assertSchema(schemaName), institutionId,
+    ibscbs?.competenceDate ?? await invoiceEmissionDateFor(schemaName, institutionId))
+  if (regime && ibscbs?.refusal?.code !== regime.code) {
+    issues.push({ scope: 'order', field: 'ibscbsAssessment', message: regime.message })
+  }
 
   return { orderId: input.orderId, branch: branch.branch, issues, rulesResolved, rulesManual, ibscbs }
 }

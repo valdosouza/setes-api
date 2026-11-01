@@ -129,6 +129,27 @@ describe('assertClientRequired (obrigatoriedade comercial no salvar)', () => {
       })
   })
 
+  // D-IB100: o Meu Estabelecimento tem DOIS salvares sobre o mesmo catálogo (a cadeia × a opção de apuração do IBS/CBS) — cada
+  // porta confere só as colunas que recebe; sem isso o campo apertado numa seção recusaria o salvar da outra, que nem o leva
+  it('onlyFields: confere SÓ as colunas da porta (o apertado de outra seção não recusa)', async () => {
+    mockFindByKey.mockResolvedValue(4)
+    mockCatalog.mockResolvedValue([
+      { fieldName: 'cnae',       tableName: 'tb_entity_tax',                       kind: 'String', required: 'N' },
+      { fieldName: 'assessment', tableName: 'tb_establishment_ibscbs_assessment', kind: 'String', required: 'N' },
+    ])
+    mockConfig.mockResolvedValue([
+      { fieldName: 'cnae',       fieldCaption: null, required: 'S', mask: null },
+      { fieldName: 'assessment', fieldCaption: null, required: 'S', mask: null },
+    ])
+    await expect(assertClientRequired(institution, 'establishment', { assessment: '1' }, {}, ['valid_from', 'assessment']))
+      .resolves.toBeUndefined()
+    await expect(assertClientRequired(institution, 'establishment', {}, {}, ['valid_from', 'assessment']))
+      .rejects.toMatchObject({ statusCode: 400, fields: [{ field: 'assessment' }] })
+    // sem onlyFields: o catálogo inteiro (comportamento de sempre)
+    await expect(assertClientRequired(institution, 'establishment', { assessment: '1' }))
+      .rejects.toMatchObject({ statusCode: 400, fields: [{ field: 'cnae' }] })
+  })
+
   it('sem caminho declarado o comportamento segue o camelCase da coluna', async () => {
     mockFindByKey.mockResolvedValue(4)
     mockCatalog.mockResolvedValue([

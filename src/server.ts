@@ -5,6 +5,7 @@ import {
 } from '@shared/db/connection'
 import { detectLockWaitSupport } from '@shared/db/counters'
 import { assertIbscbsCatalogSchema } from '@shared/ibscbs-classification'
+import { assertIbscbsAssessmentChecks } from '@shared/ibscbs-assessment'
 import { assertJwtKeys } from '@shared/auth/product-token'
 import { assertPasswordResetReady } from '@modules/auth/auth.service'
 import { assertMailerReady, nodeEnvWarning } from '@shared/mailer/mailer'
@@ -39,6 +40,8 @@ async function bootstrap() {
     await runMigrationsForAllInstitutions()
     // D-F135 (F2a): os gatilhos de TRAVA da f2a_fiscal_passivo conferidos pelo NOME em cada schema — faltando, o setes-api NÃO sobe
     logger.info(`Gatilhos de TRAVA da F2a: ${await assertF2aFreezeTriggers()}`)
+    // D-IB100 (D-IB26): o domínio da opção de apuração do IBS/CBS tem a guarda BINÁRIA do banco em cada schema — faltando, NÃO sobe
+    logger.info(`Opção de apuração IBS/CBS (migration 076): ${await assertIbscbsAssessmentChecks()}`)
     logger.info('Migrations concluidas. Subindo servidor...')
 
     app.listen(PORT, () => {

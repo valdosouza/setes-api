@@ -356,7 +356,7 @@ router.delete('/:id/items/:itemId', controller.removeOrderItem)
  *       401: { description: Não autenticado }
  *       404: { description: OS não encontrada }
  *       409: { description: Ordem já faturada }
- *       422: { description: 'Depois da obrigação (D-IB8/D-IB62/D-IB63): INVOICE_SERVICE_IBSCBS_REQUIRED (classificação cClassTrib+cIndOp e NBS aceitas em todo serviço) ou INVOICE_SERVICE_MULTI_DECLARATION (serviços com declarações diferentes) — fields[] por serviço (product.N); a mensagem nomeia os serviços' }
+ *       422: { description: 'Depois da obrigação (D-IB8/D-IB62/D-IB63): INVOICE_SERVICE_IBSCBS_REQUIRED (classificação cClassTrib+cIndOp e NBS aceitas em todo serviço) ou INVOICE_SERVICE_MULTI_DECLARATION (serviços com declarações diferentes) — fields[] por serviço (product.N); a mensagem nomeia os serviços. D-IB99: IBSCBS_REGULAR_REGIME_UNSUPPORTED quando a opção de apuração do IBS/CBS vigente na competência é o regime regular (2/3), ainda não suportado — nada é gravado' }
  */
 // Q-G23 (Valdo 2026-09-09): FATURAR na interface do ramo (seed 53) — admin/super passam
 router.post('/:id/invoice', requirePrivilege('service-orders', PRIVILEGE_FATURAR), controller.invoice)

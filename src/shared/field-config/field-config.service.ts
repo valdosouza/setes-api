@@ -92,12 +92,17 @@ function valueAtPath(values: Record<string, unknown>, path: string): unknown {
  * (`tb_financial_plans_id` × `financialPlansId`; peça 1:1 aninhada
  * `ibscbs.classificationCode`) — o módulo declara o caminho; o erro sai
  * nesse caminho (é por ele que o fields[] ancora no campo da tela).
+ *
+ * `onlyFields` (D-IB100 — 2026-10-31): tela com MAIS DE UM salvar sobre o mesmo catálogo (o Meu Estabelecimento: o PUT da cadeia ×
+ * o sub-recurso da opção IBS/CBS) confere em cada porta SÓ as colunas que ela recebe — sem isso, o campo que o cliente apertou numa
+ * seção recusaria o salvar da outra, que nem o leva. Ausente = o catálogo inteiro (comportamento de sempre).
  */
 export async function assertClientRequired(
   institution: InstitutionPayload,
   moduleKey: string,
   values: Record<string, unknown>,
   payloadPaths: Readonly<Record<string, string>> = {},
+  onlyFields?: readonly string[],
 ): Promise<void> {
   const interfaceId = await findInterfaceIdByKeyCached(moduleKey)
   if (interfaceId === null) return
@@ -108,6 +113,7 @@ export async function assertClientRequired(
   const missing: FieldError[] = []
   for (const field of fields) {
     if (field.requiredTech === 'S' || field.required !== 'S') continue
+    if (onlyFields && !onlyFields.includes(field.fieldName)) continue
     const path = payloadPaths[field.fieldName] ?? fieldNameToCamel(field.fieldName)
     const value = valueAtPath(values, path)
     if (value === undefined || value === null || String(value).trim() === '') {

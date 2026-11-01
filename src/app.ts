@@ -90,6 +90,12 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
     res.status(400).json({ error: 'Corpo da requisição não é um JSON válido', code: 'INVALID_JSON', fields: [] })
     return
   }
+  // Gate adversarial da D-IB99 (ADV-IB99-04, transversal): `:param` com URI malformada ('%', '%E0%A4%A') — o Express 4 lança
+  // URIError ao decodificar o parâmetro, ANTES do controller; é erro do cliente, no envelope da casa
+  if (err instanceof URIError) {
+    res.status(400).json({ error: 'Parâmetro da rota malformado', code: 'VALIDATION_FAILED', fields: [] })
+    return
+  }
   if (err && err.type === 'entity.too.large') {
     res.status(413).json({ error: 'Corpo da requisição excede o limite', code: 'PAYLOAD_TOO_LARGE', fields: [] })
     return

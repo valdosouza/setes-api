@@ -7,9 +7,17 @@ import { readFrozenIbscbs } from '../shared/invoice'
 jest.mock('../shared/db/connection', () => ({ __esModule: true, default: { query: jest.fn() } }))
 
 /** Banco simulado: presunção (3 leituras) → enquadramento → catálogo (o fuso vem do mock global do `todayFor`). */
-function fakeDb(presumption: { nbs?: string | null; c?: string; p?: string }, regime: string | null = '3') {
+function fakeDb(
+  presumption: { nbs?: string | null; c?: string; p?: string }, regime: string | null = '3',
+  /** D-IB99: opção de apuração do IBS/CBS — `[início, opção]` (a peça devolve a linha de maior início ≤ data); vazio = sem linha (1) */
+  assessments: Array<[string, string]> = [],
+) {
   return {
     query: jest.fn(async (sql: string, params: any = []) => {
+      if (String(params?.[0]).endsWith('.tb_establishment_ibscbs_assessment')) {   // a tabela vai por ?? (parâmetro)
+        const line = assessments.filter(([from]) => from <= params[2]).sort().pop()
+        return [line ? [{ validFrom: line[0], assessment: line[1] }] : []]
+      }
       if (/tb_service_ibscbs si/.test(sql)) return [presumption.c ? [{ id: 40, c: presumption.c, p: presumption.p }] : []]
       if (/tb_service sv/.test(sql)) return [[{ id: 40, nbs: presumption.nbs ?? null }]]
       if (/tb_product p/.test(sql)) return [[{ productId: 40, description: 'Suporte mensal' }]]
@@ -62,6 +70,26 @@ describe('previewServiceIbscbs (D-IB76) — a prévia pela MESMA composição do
     const p = await at('2027-01-05', () => previewServiceIbscbs(fakeDb({ nbs: '115021000' }), 'setes_setes', 1, [40]))
     expect(p?.obligatory).toBe(true)
     expect(p?.refusal).toEqual({ code: 'INVOICE_SERVICE_IBSCBS_REQUIRED', message: expect.stringMatching(/obrigatória desde 2027-01-01/) })
+  })
+
+  it('D-IB99: opção 3 a partir de 2027-01-01 — em dezembro sem recusa, e o veredito NA OBRIGAÇÃO já traz a recusa do regime regular', async () => {
+    const db = fakeDb({ nbs: '115021000', c: '000001', p: '100301' }, '3', [['2027-01-01', '3']])
+    const p = await at('2026-12-20', () => previewServiceIbscbs(db, 'setes_setes', 1, [40]))
+    expect(p).toMatchObject({ declared: true, refusal: null })
+    expect(p?.atObligation).toEqual({ declared: true, omitted: [],
+      refusal: { code: 'IBSCBS_REGULAR_REGIME_UNSUPPORTED', message: expect.stringMatching(/ainda não suportado[\s\S]*a partir de 2027-01-01/) } })
+  })
+
+  it('D-IB99: em janeiro com a opção 3 vigente, a recusa é a do regime (a mesma do issueInvoice); declaração incompleta vem PRIMEIRO', async () => {
+    const ok = await at('2027-01-05', () => previewServiceIbscbs(
+      fakeDb({ nbs: '115021000', c: '000001', p: '100301' }, '3', [['2027-01-01', '3']]), 'setes_setes', 1, [40]))
+    expect(ok?.refusal).toEqual({ code: 'IBSCBS_REGULAR_REGIME_UNSUPPORTED', message: expect.stringMatching(/competência 2027-01-05/) })
+    const both = await at('2027-01-05', () => previewServiceIbscbs(
+      fakeDb({ nbs: '115021000' }, '3', [['2027-01-01', '3']]), 'setes_setes', 1, [40]))
+    expect(both?.refusal?.code).toBe('INVOICE_SERVICE_IBSCBS_REQUIRED')
+    const back = await at('2027-07-05', () => previewServiceIbscbs(
+      fakeDb({ nbs: '115021000', c: '000001', p: '100301' }, '3', [['2027-01-01', '3'], ['2027-07-01', '1']]), 'setes_setes', 1, [40]))
+    expect(back?.refusal).toBeNull()   // a linha '1' de julho fecha o período do regular
   })
 
   it('serviço classificado + NBS: declarado; a prévia NÃO trava (só-pergunta)', async () => {

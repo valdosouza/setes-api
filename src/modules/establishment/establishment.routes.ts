@@ -98,4 +98,99 @@ router.put('/', controller.update)
 // nfse-api direto (`/v1/emitter/*`; A1 cifrado no fiscal_api — D-F16). A SÉRIE da nota por modelo é leitura só no ERP
 // (`@shared/invoice-series`), sem tela até o 1º cliente de mercadoria.
 
+// ---------------------------------------------------------------------------
+// Sub-recurso OPÇÃO DE APURAÇÃO DO IBS/CBS do Simples (`regApIBSCBSSN` — D-IB99/D-IB100, prompt_fase_ibs_cbs.md §14):
+// fato DATADO do estabelecimento (tabela da migration 076), escrito SÓ por aqui pela peça
+// @shared/ibscbs-assessment. adminGuard herdado do gateway; institution SEMPRE do token; a data de início é a identidade.
+// Lista curta de um único registro (sem paginação — como a habilitação do emissor).
+// ---------------------------------------------------------------------------
+
+/**
+ * @swagger
+ * /api/establishment/ibscbs-assessments:
+ *   get:
+ *     summary: Opções de apuração do IBS/CBS do PRÓPRIO estabelecimento (histórico datado + a vigente hoje)
+ *     description: >-
+ *       Sem linha vale 1 (IBS e CBS pelo Simples — efeito legal de não optar, D-IB1). Só a opção 1 é SUPORTADA hoje: com 2/3
+ *       vigente na competência o faturamento recusa a nota (422 IBSCBS_REGULAR_REGIME_UNSUPPORTED — D-IB99). Só linha FUTURA é
+ *       editável (`editable`).
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: >-
+ *           { ok: true, data: { today: 'AAAA-MM-DD', regularStart: '2027-01-01', supported: ['1'],
+ *           current: { assessment, validFrom (null = sem linha), supported },
+ *           items: [{ validFrom, assessment, supported, inEffect, editable }] } }
+ *       401: { description: Não autenticado }
+ *       403: { description: Restrito a administradores }
+ *   post:
+ *     summary: Registra uma opção de apuração do IBS/CBS com início HOJE ou depois (2/3 só a partir de 01/01/2027)
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [validFrom, assessment]
+ *             properties:
+ *               validFrom:  { type: string, format: date, example: '2027-01-01' }
+ *               assessment:
+ *                 type: string
+ *                 enum: ['1', '2', '3']
+ *                 description: 'regApIBSCBSSN (NT 009) — 1 IBS e CBS pelo SN · 2 CBS pelo SN e IBS pelo regime regular · 3 IBS e CBS pelo regime regular'
+ *     responses:
+ *       201: { description: '{ ok: true, data: (a mesma visão do GET, atualizada) }' }
+ *       400: { description: 'Validação falhou (VALIDATION_FAILED) ou campo apertado pelo cliente vazio (REQUIRED_FIELDS)' }
+ *       409: { description: 'IBSCBS_ASSESSMENT_DUPLICATE — já existe opção viva com essa data' }
+ *       422: { description: 'IBSCBS_ASSESSMENT_DATE_PAST (início antes de hoje) · IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY (2/3 antes de 01/01/2027)' }
+ */
+router.get('/ibscbs-assessments', controller.listIbscbsAssessments)
+router.post('/ibscbs-assessments', controller.createIbscbsAssessment)
+
+/**
+ * @swagger
+ * /api/establishment/ibscbs-assessments/{validFrom}:
+ *   put:
+ *     summary: Troca a opção de uma linha FUTURA (a data é a identidade — mudar a data = excluir e registrar outra)
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - { in: path, name: validFrom, required: true, schema: { type: string, format: date } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [assessment]
+ *             properties:
+ *               assessment: { type: string, enum: ['1', '2', '3'] }
+ *     responses:
+ *       200: { description: '{ ok: true, data: (a visão atualizada) }' }
+ *       400: { description: 'Data/opção inválida (VALIDATION_FAILED)' }
+ *       404: { description: IBSCBS_ASSESSMENT_NOT_FOUND }
+ *       409: { description: 'IBSCBS_ASSESSMENT_IN_EFFECT — linha vigente ou passada é imutável' }
+ *       422: { description: IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY }
+ *   delete:
+ *     summary: Exclui (soft) uma linha FUTURA — o cancelamento da opção antes de ela valer
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - { in: path, name: validFrom, required: true, schema: { type: string, format: date } }
+ *     responses:
+ *       200: { description: '{ ok: true, data: (a visão atualizada) }' }
+ *       400: { description: 'Data inválida (VALIDATION_FAILED)' }
+ *       404: { description: IBSCBS_ASSESSMENT_NOT_FOUND }
+ *       409: { description: 'IBSCBS_ASSESSMENT_IN_EFFECT — linha vigente ou passada é imutável' }
+ */
+router.put('/ibscbs-assessments/:validFrom', controller.changeIbscbsAssessment)
+router.delete('/ibscbs-assessments/:validFrom', controller.removeIbscbsAssessment)
+
 export default router

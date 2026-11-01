@@ -1,6 +1,7 @@
 import { readServicePresumptions, PresumptionRequest, Queryable } from '@shared/service-ibscbs'
 import { invoiceEmissionDateFor } from '@shared/invoice/emission-date'
 import { emitterRegimeAt } from '@shared/entity-tax/entity-tax.repository'
+import { previewIbscbsAssessmentRefusal, IbscbsAssessmentRefusal } from '@shared/ibscbs-assessment'
 import {
   MODEL_NFSE, ibscbsObligationStart, evaluateIbscbsDeclaration, assertIbscbsDeclarable,
   IbscbsDeclaration, IbscbsEvaluation, IbscbsOmission,
@@ -80,12 +81,19 @@ export async function previewServiceIbscbs(
   const competenceDate = await invoiceEmissionDateFor(schemaName, institutionId, q)
   const items = ids.map(productId => ({ productId, field: `product.${productId}` }))
   const ev = await evaluateServiceIbscbs(q, schemaName, institutionId, { items, competenceDate }, { lock: false })
+  // D-IB99: a recusa da OPÇÃO DE APURAÇÃO (regime regular sem suporte) pela MESMA regra do `issueInvoice`, na mesma data
+  const regime = await previewIbscbsAssessmentRefusal(q, schemaName, institutionId, competenceDate)
   const atObligation = ev.obligatory ? null
-    : verdictOf(await evaluateServiceIbscbs(q, schemaName, institutionId, { items, competenceDate: ev.obligationStart }, { lock: false }))
-  return { competenceDate, obligationStart: ev.obligationStart, obligatory: ev.obligatory, ...verdictOf(ev), atObligation }
+    : verdictOf(await evaluateServiceIbscbs(q, schemaName, institutionId, { items, competenceDate: ev.obligationStart }, { lock: false }),
+        await previewIbscbsAssessmentRefusal(q, schemaName, institutionId, ev.obligationStart))
+  return { competenceDate, obligationStart: ev.obligationStart, obligatory: ev.obligatory, ...verdictOf(ev, regime), atObligation }
 }
 
-const verdictOf = (ev: IbscbsEvaluation): IbscbsVerdict => ({
+/**
+ * Uma recusa por vez, na ORDEM do faturamento: a da declaração (decidida pelos produtores antes da nota) vem primeiro; sem ela, a da
+ * opção de apuração (decidida pelo `issueInvoice` — D-IB99). O validate da venda mostra as duas (issues separadas).
+ */
+const verdictOf = (ev: IbscbsEvaluation, regime: IbscbsAssessmentRefusal | null = null): IbscbsVerdict => ({
   declared: ev.declaration.group !== null, omitted: [...ev.declaration.omitted],
-  refusal: ev.refusal ? { code: ev.refusal.code, message: ev.refusal.message } : null,
+  refusal: ev.refusal ? { code: ev.refusal.code, message: ev.refusal.message } : regime,
 })
