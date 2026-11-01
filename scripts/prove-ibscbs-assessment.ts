@@ -42,6 +42,9 @@ async function main() {
     await conn.query(`CREATE DATABASE \`${PROBE}\``)
     await conn.query(`CREATE TABLE \`${PROBE}\`.tb_institution_has_config LIKE \`${SOURCE}\`.tb_institution_has_config`)
     await conn.query(`CREATE TABLE \`${PROBE}\`.tb_invoice LIKE \`${SOURCE}\`.tb_invoice`)   // D-IB101: a última nota viva (vazia)
+    // D-IB102: o emitente é ME/EPP (opSimpNac 3) — admite a opção pelo regime regular
+    await conn.query(`CREATE TABLE \`${PROBE}\`.tb_entity_tax LIKE \`${SOURCE}\`.tb_entity_tax`)
+    await conn.query(`INSERT INTO \`${PROBE}\`.tb_entity_tax (id, tb_institution_id, simples_regime) VALUES (?, ?, '3')`, [INSTITUTION, INSTITUTION])
     await conn.query(`USE \`${PROBE}\``)
     const statements = splitStatements(fs.readFileSync(MIGRATION, 'utf8'))
     for (let run = 1; run <= 2; run++) for (const st of statements) await conn.query(st)

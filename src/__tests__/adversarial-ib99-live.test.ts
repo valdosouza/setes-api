@@ -33,10 +33,12 @@ const live = process.env.IB99_ADV_LIVE === '1'
 
   /** Recomeça as 3 tabelas por DDL (nunca DELETE de dado — PADROES §3.1), no schema descartável. */
   async function freshTables() {
-    for (const t of ['tb_institution_has_config', 'tb_invoice']) {
+    for (const t of ['tb_institution_has_config', 'tb_invoice', 'tb_entity_tax']) {
       await pool.query(`DROP TABLE IF EXISTS \`${S}\`.${t}`)
       await pool.query(`CREATE TABLE \`${S}\`.${t} LIKE setes_setes.${t}`)
     }
+    // D-IB102: o emitente é ME/EPP (opSimpNac 3) — admite a opção pelo regime regular
+    await pool.query(`INSERT INTO \`${S}\`.tb_entity_tax (id, tb_institution_id, simples_regime) VALUES (1, 1, '3')`)
     const c = await pool.getConnection()
     try {
       await c.query(`USE \`${S}\``)
@@ -86,6 +88,21 @@ const live = process.env.IB99_ADV_LIVE === '1'
     })
   })
 
+  it('D-IB101 × D-IB102: com a opção 3 (o regime é lido TRAVADO antes da trava da opção) o retrato ainda nasce depois da espera', async () => {
+    await clock(`${D}T15:00:00Z`, async () => {
+      const billing = await pool.getConnection()
+      try {
+        await billing.beginTransaction()
+        await piece.ibscbsAssessmentAt(billing, S, 1, D, { lock: true })
+        const pending = codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: D, assessment: '3' }))
+        await new Promise(r => setTimeout(r, 600))
+        await billing.query(`INSERT INTO \`${S}\`.tb_invoice (id, tb_institution_id, issuer, tb_entity_id, dt_emission, status) VALUES (10, 1, 1, 1, ?, '0')`, [D])
+        await billing.commit()
+        expect(await pending).toBe('IBSCBS_ASSESSMENT_INVOICED')
+      } finally { billing.release() }
+    })
+  })
+
   it('ADV-IB99-02: trocar o fuso (SP → Rio_Branco, opção do seed 60) não reabre a vigente nem o ontem', async () => {
     const [[itf]] = await pool.query(`SELECT id FROM setes_central.tb_interface WHERE i18n_key = 'establishment' AND deleted = 'N'`)
     await pool.query(`INSERT INTO \`${S}\`.tb_establishment_ibscbs_assessment (tb_institution_id, valid_from, assessment, tb_user_id) VALUES (1, ?, '1', 1)`, [D])
@@ -98,6 +115,35 @@ const live = process.env.IB99_ADV_LIVE === '1'
       expect(await codeOf(piece.createIbscbsAssessment(S, 1, 9, { validFrom: '2027-03-09', assessment: '3' }))).toBe('IBSCBS_ASSESSMENT_INVOICED')
       expect(await codeOf(piece.removeIbscbsAssessment(S, 1, 9, D))).toBe('IBSCBS_ASSESSMENT_INVOICED')
       expect(await piece.readIbscbsAssessmentView(S, 1)).toMatchObject({ today: '2027-03-09', lastInvoice: D, firstStart: '2027-03-11' })
+    })
+  })
+
+  it('D-IB102: quem não é ME/EPP nem pendente não registra 2/3 (lido TRAVADO depois da trava); a 1 sempre passa', async () => {
+    await pool.query(`UPDATE \`${S}\`.tb_entity_tax SET simples_regime = '1' WHERE id = 1 AND tb_institution_id = 1`)
+    expect(await codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: '2027-07-01', assessment: '3' }))).toBe('IBSCBS_ASSESSMENT_NOT_SIMPLES')
+    expect(await codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: '2027-07-01', assessment: '1' }))).toBe('ok')
+    expect(await piece.readIbscbsAssessmentView(S, 1)).toMatchObject({ simplesRegime: '1', regularAllowed: false })
+  })
+
+  it('ADV-D102-01: registro 2/3 de HOJE × faturamento × PUT do regime na fila — nenhum 1213 (a mesma ordem de travas)', async () => {
+    await clock(`${D}T15:00:00Z`, async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const et = require('@shared/entity-tax/entity-tax.repository')
+      const billing = await pool.getConnection()
+      const admin = await pool.getConnection()
+      try {
+        await billing.beginTransaction()
+        await et.emitterRegimeAt(billing, S, 1, D, { lock: true })                    // o faturamento da OS: tb_entity_tax travado
+        const put = codeOf(et.upsertEntityTax(admin, S, 1, 1, { simplesRegime: '1' }))  // o PUT do regime na fila (X)
+        await new Promise(r => setTimeout(r, 400))
+        const reg = codeOf(piece.createIbscbsAssessment(S, 1, 7, { validFrom: D, assessment: '3' }))
+        await new Promise(r => setTimeout(r, 800))
+        const bill = await codeOf(piece.assertIbscbsAssessmentSupported(billing, S, 1, D))
+        await billing.commit()
+        const out = [bill, await put, await reg]
+        expect(out).not.toContain('ER_LOCK_DEADLOCK')
+        expect(bill).toBe('ok')                                                         // o faturamento não esperou o registro
+      } finally { billing.release(); admin.release() }
     })
   })
 

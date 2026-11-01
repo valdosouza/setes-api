@@ -5,6 +5,7 @@ import { ErrorCodes } from '@shared/errors/error-codes'
 import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { todayFor } from '@shared/time-zone'
 import { lastLiveEmissionDate } from '@shared/invoice/emission-date'
+import { emitterRegimeAt } from '@shared/entity-tax/entity-tax.repository'
 
 /**
  * PEÇA @shared/ibscbs-assessment (fase IBS/CBS, D-IB99/D-IB100 — Infra-IA/prompts/prompt_fase_ibs_cbs.md §14): a OPÇÃO de
@@ -55,6 +56,17 @@ export const isIbscbsAssessment = (v: unknown): v is IbscbsAssessment =>
   typeof v === 'string' && (IBSCBS_ASSESSMENTS as readonly string[]).includes(v)
 
 export const isRegularAssessment = (a: IbscbsAssessment): boolean => a !== '1'
+
+/**
+ * D-IB102 (Valdo 2026-11-01, Q-IB105 = (a) — prompt_fase_ibs_cbs.md §14.5): só o optante do Simples ME/EPP (opSimpNac 3) ou com a opção
+ * PENDENTE (4) registra/troca para o regime regular (2/3) — o opSimpNac GRAVADO no estabelecimento (`tb_entity_tax`, convenção "sem
+ * história"). Registrar a 1 e EXCLUIR seguem sempre possíveis: uma linha 2/3 deixada por quem saiu do Simples nunca fica órfã.
+ */
+export const SIMPLES_REGIMES_WITH_REGULAR_OPTION: ReadonlySet<string> = Object.freeze(new Set(['3', '4']))
+
+const SIMPLES_REGIME_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  '1': 'não optante', '2': 'MEI', '3': 'ME/EPP', '4': 'opção pendente',
+})
 
 /** Valor fora do domínio (CHECK desligado/SQL direto) NUNCA é suportado — falha fechado. */
 export const isAssessmentSupported = (a: string): boolean => IBSCBS_ASSESSMENTS_SUPPORTED.has(a)
@@ -163,6 +175,9 @@ export interface IbscbsAssessmentView {
   lastInvoice:  string | null
   /** O 1º início que o registro aceita hoje = o maior entre hoje e o dia seguinte à última nota (a tela sugere/limita por ele). */
   firstStart:   string
+  /** D-IB102: o opSimpNac gravado (null = não informado) e se ele admite a opção pelo regime regular (2/3). */
+  simplesRegime:  string | null
+  regularAllowed: boolean
   regularStart: string
   supported:    string[]
   /** O que vale hoje — `validFrom` null = sem linha (D-IB1). */
@@ -176,6 +191,7 @@ export async function readIbscbsAssessmentView(
 ): Promise<IbscbsAssessmentView> {
   const today = await todayFor(schemaName, institutionId, q)
   const lastInvoice = await lastLiveEmissionDate(q, schemaName, institutionId)
+  const { simplesRegime } = await emitterRegimeAt(q, schemaName, institutionId, today, { lock: false })
   const [rows] = await q.query(
     `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment
        FROM ?? WHERE tb_institution_id = ? AND deleted = 'N' ORDER BY valid_from`,
@@ -189,6 +205,7 @@ export async function readIbscbsAssessmentView(
   const dayAfterInvoice = lastInvoice === null ? null : nextDay(lastInvoice)
   return {
     today, lastInvoice, firstStart: dayAfterInvoice !== null && dayAfterInvoice > today ? dayAfterInvoice : today,
+    simplesRegime, regularAllowed: simplesRegime !== null && SIMPLES_REGIMES_WITH_REGULAR_OPTION.has(simplesRegime),
     regularStart: IBSCBS_REGULAR_ASSESSMENT_START, supported: [...IBSCBS_ASSESSMENTS_SUPPORTED],
     current,
     items: lines.map(l => ({
@@ -275,6 +292,42 @@ async function frontierAfterLock(
   return { today, lastInvoice }
 }
 
+/**
+ * D-IB102: 2/3 exige opSimpNac 3/4 gravado; dentro da transação a leitura é TRAVANTE (PADROES §9 regra 2 — decide a gravação) e vem
+ * ANTES da trava da opção — a MESMA ordem do faturamento (`declareServiceIbscbs` trava `tb_entity_tax`, depois o `issueInvoice` lê a
+ * opção). Na ordem inversa, com um PUT do regime na fila, fechava ciclo de 3 e o PUT era a vítima (gate do delta, ADV-D102-01 — provado).
+ * Leitura TRAVANTE não abre o retrato da transação: a fronteira da D-IB101 continua nascendo depois da espera.
+ */
+async function assertRegularAllowed(
+  q: Queryable, schemaName: string, institutionId: number, validFrom: string, assessment: IbscbsAssessment, opts: { lock: boolean },
+): Promise<void> {
+  assertRegimeAdmits(await regimeForRegular(q, schemaName, institutionId, validFrom, assessment, opts), assessment)
+}
+
+/** O opSimpNac gravado — lido (travado, dentro da transação) só quando a opção é 2/3; `undefined` = a opção 1 não depende dele. */
+async function regimeForRegular(
+  q: Queryable, schemaName: string, institutionId: number, validFrom: string, assessment: IbscbsAssessment, opts: { lock: boolean },
+): Promise<string | null | undefined> {
+  if (!isRegularAssessment(assessment)) return undefined
+  return (await emitterRegimeAt(q, schemaName, institutionId, validFrom, opts)).simplesRegime
+}
+
+/**
+ * A DECISÃO da D-IB102 — separada da LEITURA (re-prova do gate, LOW): a trava do regime é o 1º comando (ordem do faturamento), mas a
+ * recusa por regime é a ÚLTIMA conferência — "data já registrada", "não encontrada", "vigente" e "já faturada" vêm antes (o usuário não
+ * ajusta o regime para só depois descobrir que o ato era impossível).
+ */
+function assertRegimeAdmits(simplesRegime: string | null | undefined, assessment: IbscbsAssessment): void {
+  if (simplesRegime === undefined) return
+  if (simplesRegime !== null && SIMPLES_REGIMES_WITH_REGULAR_OPTION.has(simplesRegime)) return
+  const now = simplesRegime === null ? 'não informado' : SIMPLES_REGIME_NAMES[simplesRegime]
+  throw new HttpError(422,
+    `A opção "${assessment} — ${IBSCBS_ASSESSMENT_LABELS[assessment]}" é do optante do Simples Nacional ME/EPP (ou com a opção pendente) — `
+    + `o regime do Simples gravado no estabelecimento é "${now}"; ajuste-o para ME/EPP na aba Principal ou registre a opção 1 (D-IB102)`,
+    [{ field: 'assessment', message: 'Só para optante do Simples ME/EPP ou com opção pendente' }],
+    ErrorCodes.IBSCBS_ASSESSMENT_NOT_SIMPLES)
+}
+
 /** Início ≤ a última nota viva = 409: a opção mudaria o que uma nota já emitida leu. */
 function assertNotInvoiced(validFrom: string, lastInvoice: string | null, act: string): void {
   if (lastInvoice !== null && validFrom <= lastInvoice) {
@@ -316,7 +369,12 @@ export async function createIbscbsAssessment(
   // PRÉ-CHECAGEM (gate do delta, socrático 2): o pedido inválido é recusado pelo pool, SEM trava — nunca segura o faturamento para
   // recusar; a conferência DECISIVA continua depois da trava (abaixo)
   await assertRegistrable(pool, schemaName, institutionId, validFrom)
+  const [seen] = await pool.query<any[]>(
+    `SELECT deleted FROM ?? WHERE tb_institution_id = ? AND valid_from = ?`, [tableOf(schemaName), institutionId, validFrom])
+  if ((seen as any[])[0]?.deleted === 'N') throw duplicateOf(validFrom)
+  await assertRegularAllowed(pool, schemaName, institutionId, validFrom, assessment, { lock: false })
   const created = await inTransaction('registro da opção IBS/CBS', institutionId, async conn => {
+    const regime = await regimeForRegular(conn, schemaName, institutionId, validFrom, assessment, { lock: true })   // 1º: ordem do faturamento
     try {
       await conn.query(
         `INSERT INTO ?? (tb_institution_id, valid_from, assessment, tb_user_id, created_at, updated_at, deleted)
@@ -327,14 +385,17 @@ export async function createIbscbsAssessment(
       throw err
     }
     await assertRegistrable(conn, schemaName, institutionId, validFrom)   // falhou = a transação desfaz o INSERT
+    assertRegimeAdmits(regime, assessment)                                // a recusa por regime é a ÚLTIMA
     return true
   })
   if (created) return
   await inTransaction('revive da opção IBS/CBS', institutionId, async conn => {
+    const regime = await regimeForRegular(conn, schemaName, institutionId, validFrom, assessment, { lock: true })   // 1º: ordem do faturamento
     const line = await lockLine(conn, schemaName, institutionId, validFrom)
     if (!line) throw new Error(`Opção IBS/CBS ${institutionId}/${validFrom}: chave duplicada sem linha — dado inconsistente`)
     if (line.deleted === 'N') throw duplicateOf(validFrom)
     await assertRegistrable(conn, schemaName, institutionId, validFrom)
+    assertRegimeAdmits(regime, assessment)
     await conn.query(
       `UPDATE ?? SET assessment = ?, tb_user_id = ?, created_at = NOW(), updated_at = NOW(), deleted = 'N'
         WHERE tb_institution_id = ? AND valid_from = ? AND deleted = 'S'`,
@@ -368,7 +429,9 @@ export async function changeIbscbsAssessment(
   const { validFrom, assessment } = input
   assertRegularFloor(validFrom, assessment)
   await inTransaction('alteração da opção IBS/CBS', institutionId, async conn => {
+    const regime = await regimeForRegular(conn, schemaName, institutionId, validFrom, assessment, { lock: true })   // 1º: ordem do faturamento
     await lockFutureLine(conn, schemaName, institutionId, validFrom, 'alterar')
+    assertRegimeAdmits(regime, assessment)                                // a recusa por regime é a ÚLTIMA
     await conn.query(
       `UPDATE ?? SET assessment = ?, tb_user_id = ?, updated_at = NOW()
         WHERE tb_institution_id = ? AND valid_from = ? AND deleted = 'N'`,

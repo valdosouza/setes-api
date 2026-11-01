@@ -120,7 +120,7 @@ router.put('/', controller.update)
  *     responses:
  *       200:
  *         description: >-
- *           { ok: true, data: { today: 'AAAA-MM-DD', lastInvoice: 'AAAA-MM-DD' (null = nenhuma nota), firstStart: 'AAAA-MM-DD' (1º início aceito — D-IB101), regularStart: '2027-01-01', supported: ['1'],
+ *           { ok: true, data: { today: 'AAAA-MM-DD', lastInvoice: 'AAAA-MM-DD' (null = nenhuma nota), firstStart: 'AAAA-MM-DD' (1º início aceito — D-IB101), simplesRegime (opSimpNac gravado), regularAllowed (2/3 admitidos — D-IB102), regularStart: '2027-01-01', supported: ['1'],
  *           current: { assessment, validFrom (null = sem linha), supported },
  *           items: [{ validFrom, assessment, supported, inEffect, editable }] } }
  *       401: { description: Não autenticado }
@@ -147,7 +147,7 @@ router.put('/', controller.update)
  *       201: { description: '{ ok: true, data: (a mesma visão do GET, atualizada) }' }
  *       400: { description: 'Validação falhou (VALIDATION_FAILED) ou campo apertado pelo cliente vazio (REQUIRED_FIELDS)' }
  *       409: { description: 'IBSCBS_ASSESSMENT_DUPLICATE — já existe opção viva com essa data · IBSCBS_ASSESSMENT_INVOICED — início ≤ a última nota viva (D-IB101: a opção nunca muda o que uma nota já leu)' }
- *       422: { description: 'IBSCBS_ASSESSMENT_DATE_PAST (início antes de hoje) · IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY (2/3 antes de 01/01/2027)' }
+ *       422: { description: 'IBSCBS_ASSESSMENT_DATE_PAST (início antes de hoje) · IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY (2/3 antes de 01/01/2027) · IBSCBS_ASSESSMENT_NOT_SIMPLES (2/3 sem opSimpNac 3/4 gravado — D-IB102)' }
  */
 router.get('/ibscbs-assessments', controller.listIbscbsAssessments)
 router.post('/ibscbs-assessments', controller.createIbscbsAssessment)
@@ -176,7 +176,7 @@ router.post('/ibscbs-assessments', controller.createIbscbsAssessment)
  *       400: { description: 'Data/opção inválida (VALIDATION_FAILED)' }
  *       404: { description: IBSCBS_ASSESSMENT_NOT_FOUND }
  *       409: { description: 'IBSCBS_ASSESSMENT_IN_EFFECT — linha vigente ou passada é imutável · IBSCBS_ASSESSMENT_INVOICED — início ≤ a última nota viva (D-IB101)' }
- *       422: { description: IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY }
+ *       422: { description: 'IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY · IBSCBS_ASSESSMENT_NOT_SIMPLES (2/3 sem opSimpNac 3/4 gravado — D-IB102)' }
  *   delete:
  *     summary: Exclui (soft) uma linha FUTURA — o cancelamento da opção antes de ela valer
  *     tags: [Establishment]

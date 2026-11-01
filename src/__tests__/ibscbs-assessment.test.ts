@@ -20,11 +20,14 @@ function fakeTxConn(opts: {
   insertError?: unknown; lockRow?: { assessment: string; deleted: string } | null
   /** D-IB101: a última data de emissão de nota viva do estabelecimento (null = nenhuma nota). */
   lastInvoice?: string | null
+  /** D-IB102: opSimpNac gravado (default '3' — ME/EPP; null = não informado). */
+  simplesRegime?: string | null
 } = {}) {
   const conn = {
     beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
     query: jest.fn(async (sql: string, _params?: unknown[]) => {
       if (/MAX\(dt_emission\)/.test(sql)) return [[{ last: opts.lastInvoice ?? null }]]
+      if (/simples_regime/.test(sql)) return [[{ simplesRegime: opts.simplesRegime === undefined ? '3' : opts.simplesRegime }]]
       if (/^\s*INSERT/.test(sql)) { if (opts.insertError) throw opts.insertError; return [{ affectedRows: 1 }] }
       if (/FOR UPDATE/.test(sql)) return [opts.lockRow ? [opts.lockRow] : []]
       if (/^\s*UPDATE/.test(sql)) return [{ affectedRows: 1 }]
@@ -36,10 +39,17 @@ function fakeTxConn(opts: {
 }
 const sqlOf = (conn: { query: jest.Mock }) => conn.query.mock.calls.map(c => String(c[0]))
 
+/** O pool da PRÉ-CHECAGEM (sem trava): a última nota viva e o opSimpNac gravado. */
+function poolAnswers(a: { last?: string | null; simplesRegime?: string | null } = {}) {
+  pool.query.mockImplementation(async (sql: string) => /simples_regime/.test(sql)
+    ? [[{ simplesRegime: a.simplesRegime === undefined ? '3' : a.simplesRegime }]]
+    : [[{ last: a.last ?? null }]])
+}
+
 beforeEach(() => {
   jest.clearAllMocks()
   tz.todayFor.mockResolvedValue('2026-11-01')
-  pool.query.mockResolvedValue([[{ last: null }]])   // a PRÉ-CHECAGEM (pelo pool, sem trava) — nenhuma nota
+  poolAnswers()   // a PRÉ-CHECAGEM (pelo pool, sem trava) — nenhuma nota, ME/EPP
 })
 
 describe('domínio e regra (D-IB99)', () => {
@@ -115,7 +125,8 @@ describe('readIbscbsAssessmentView — o que a tela mostra', () => {
     const q = { query: jest.fn().mockResolvedValue([[{ validFrom: '2027-01-01', assessment: '3' }]]) }
     const v = await readIbscbsAssessmentView('setes_acme', 7, q)
     expect(v).toEqual({
-      today: '2026-11-01', lastInvoice: null, firstStart: '2026-11-01', regularStart: '2027-01-01', supported: ['1'],
+      today: '2026-11-01', lastInvoice: null, firstStart: '2026-11-01', simplesRegime: null, regularAllowed: false,
+      regularStart: '2027-01-01', supported: ['1'],
       current: { assessment: '1', validFrom: null, supported: true },
       items: [{ validFrom: '2027-01-01', assessment: '3', supported: false, inEffect: false, editable: true }],
     })
@@ -196,12 +207,12 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
   })
 
   it('D-IB101: registrar com início ≤ a última nota viva = 409 INVOICED (pré-checagem e decisiva); depois dela passa', async () => {
-    pool.query.mockResolvedValue([[{ last: '2027-01-01' }]])
+    poolAnswers({ last: '2027-01-01' })
     fakeTxConn({ lastInvoice: '2027-01-01' })
     await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_INVOICED', fields: [{ field: 'validFrom' }] })
     expect(pool.getConnection).not.toHaveBeenCalled()                                   // recusada SEM trava
-    pool.query.mockResolvedValue([[{ last: null }]])                                    // a nota nasceu DURANTE a espera
+    poolAnswers()                                                                       // a nota nasceu DURANTE a espera
     const conn = fakeTxConn({ lastInvoice: '2027-01-01' })
     await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'IBSCBS_ASSESSMENT_INVOICED' })
@@ -253,7 +264,9 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
       .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_REGULAR_TOO_EARLY' })
     const conn = fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' } })
     await changeIbscbsAssessment('setes_acme', 7, 5, { validFrom: '2027-01-01', assessment: '2' })
-    expect(sqlOf(conn)[0]).toMatch(/WHERE tb_institution_id = \? AND valid_from = \? FOR UPDATE/)   // trava de REGISTRO, 1º comando
+    // para o regular, o regime travado vem 1º (a ordem do faturamento — ADV-D102-01); depois a trava de REGISTRO da linha
+    expect(sqlOf(conn)[0]).toMatch(/simples_regime[\s\S]*LOCK IN SHARE MODE/)
+    expect(sqlOf(conn)[1]).toMatch(/WHERE tb_institution_id = \? AND valid_from = \? FOR UPDATE/)
     const update = conn.query.mock.calls.find(c => /^\s*UPDATE/.test(String(c[0])))!
     expect(update[1]).toEqual([TABLE, '2', 5, 7, '2027-01-01'])
   })
@@ -272,6 +285,87 @@ describe('escrita — só pela peça (registrar, trocar, excluir)', () => {
     expect(String(update[0])).toMatch(/SET deleted = 'S', tb_user_id = \?/)
     expect(update[1]).toEqual([TABLE, 6, 7, '2027-01-01'])
     await expect(removeIbscbsAssessment('setes_acme', 7, 6, 'x')).rejects.toMatchObject({ statusCode: 400 })
+  })
+})
+
+describe('D-IB102 — só o optante do Simples ME/EPP (3) ou com opção pendente (4) registra/troca para o regime regular', () => {
+  it.each([['1', 'não optante'], ['2', 'MEI'], [null, 'não informado']])(
+    'opSimpNac %p: registrar 2/3 = 422 NOT_SIMPLES pela pré-checagem (sem transação), nomeando o regime gravado', async (regime, name) => {
+      poolAnswers({ simplesRegime: regime })
+      fakeTxConn()
+      for (const assessment of ['2', '3'] as const) {
+        await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment }))
+          .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_NOT_SIMPLES', fields: [{ field: 'assessment' }],
+            message: expect.stringContaining(`"${name}"`) })
+      }
+      expect(pool.getConnection).not.toHaveBeenCalled()
+    })
+
+  it('a opção 1 SEMPRE passa (nem lê o regime) e a pendente (4) admite o regular', async () => {
+    poolAnswers({ simplesRegime: '1' })
+    const conn = fakeTxConn({ simplesRegime: '1' })
+    await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' })
+    expect(sqlOf(conn).some(x => /simples_regime/.test(x))).toBe(false)
+    expect(conn.commit).toHaveBeenCalled()
+    poolAnswers({ simplesRegime: '4' })
+    const pending = fakeTxConn({ simplesRegime: '4' })
+    await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' })
+    expect(pending.commit).toHaveBeenCalled()
+  })
+
+  it('a conferência DECISIVA é TRAVANTE e vem ANTES da trava da opção — a ordem do faturamento (ADV-D102-01); regime mudou = 422', async () => {
+    poolAnswers({ simplesRegime: '3' })
+    const conn = fakeTxConn({ simplesRegime: '1' })
+    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_NOT_SIMPLES' })
+    const regimeRead = sqlOf(conn).find(x => /simples_regime/.test(x))!
+    expect(regimeRead).toMatch(/LOCK IN SHARE MODE/)
+    expect(sqlOf(conn).indexOf(regimeRead)).toBe(0)                             // 1º comando: tb_entity_tax antes da opção
+    expect(conn.commit).not.toHaveBeenCalled()                                  // a recusa (a ÚLTIMA conferência) desfaz o INSERT
+    expect(conn.rollback).toHaveBeenCalled()
+    // revive e troca: a mesma ordem (regime travado ANTES do FOR UPDATE da linha)
+    poolAnswers({ simplesRegime: '3' })
+    const revive = fakeTxConn({ insertError: Object.assign(new Error('dup'), { code: 'ER_DUP_ENTRY' }), lockRow: { assessment: '1', deleted: 'S' } })
+    await createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' })
+    const reg = sqlOf(revive).map((x, i) => [x, i] as const).filter(([x]) => /simples_regime/.test(x)).map(([, i]) => i)
+    expect(reg[1]).toBeLessThan(sqlOf(revive).findIndex(x => /FOR UPDATE/.test(x)))
+    const change = fakeTxConn({ lockRow: { assessment: '1', deleted: 'N' } })
+    await changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' })
+    expect(sqlOf(change).findIndex(x => /simples_regime/.test(x))).toBe(0)
+  })
+
+  it('trocar uma linha futura para 2/3 confere o regime; trocar para 1 e EXCLUIR nunca (a linha deixada por quem saiu do Simples não fica órfã)', async () => {
+    fakeTxConn({ lockRow: { assessment: '1', deleted: 'N' }, simplesRegime: '1' })
+    await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'IBSCBS_ASSESSMENT_NOT_SIMPLES' })
+    const toOne = fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' }, simplesRegime: '1' })
+    await changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '1' })
+    expect(toOne.commit).toHaveBeenCalled()
+    const remove = fakeTxConn({ lockRow: { assessment: '3', deleted: 'N' }, simplesRegime: '1' })
+    await removeIbscbsAssessment('setes_acme', 7, 3, '2027-01-01')
+    expect(remove.commit).toHaveBeenCalled()
+    expect(sqlOf(remove).some(x => /simples_regime/.test(x))).toBe(false)
+  })
+
+  it('re-prova (LOW): a recusa por regime é a ÚLTIMA — data já viva = 409 DUPLICATE, vigente = 409 IN_EFFECT, inexistente = 404', async () => {
+    poolAnswers({ simplesRegime: '1' })
+    pool.query.mockImplementation(async (sql: string) => /simples_regime/.test(sql) ? [[{ simplesRegime: '1' }]]
+      : /SELECT deleted FROM/.test(sql) ? [[{ deleted: 'N' }]] : [[{ last: null }]])
+    fakeTxConn()
+    await expect(createIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_DUPLICATE' })
+    tz.todayFor.mockResolvedValue('2027-02-01')   // a linha vigente (2/3 só existem a partir de 2027)
+    fakeTxConn({ lockRow: { assessment: '1', deleted: 'N' }, simplesRegime: '1' })
+    await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-02-01', assessment: '3' }))
+      .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_IN_EFFECT' })
+    fakeTxConn({ lockRow: null, simplesRegime: '1' })
+    await expect(changeIbscbsAssessment('setes_acme', 7, 3, { validFrom: '2027-01-01', assessment: '3' }))
+      .rejects.toMatchObject({ code: 'IBSCBS_ASSESSMENT_NOT_FOUND' })
+  })
+
+  it('a visão diz à tela se o regular é admitido', async () => {
+    const q = { query: jest.fn(async (sql: string) => /simples_regime/.test(sql) ? [[{ simplesRegime: '3' }]] : [[]]) }
+    expect(await readIbscbsAssessmentView('setes_acme', 7, q)).toMatchObject({ simplesRegime: '3', regularAllowed: true })
   })
 })
 
