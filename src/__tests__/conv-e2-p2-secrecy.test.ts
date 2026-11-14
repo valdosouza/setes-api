@@ -66,6 +66,12 @@ describe('A-UC8 / D-UC15 — o convite no PUT', () => {
     await expect(editUser(sup, 9, { ...put, active: 'S', institutionId: 7 } as any)).rejects.toMatchObject({ statusCode: 409, code: 'INVITE_PENDING' })
     expect(mockUpdate).not.toHaveBeenCalled()
   })
+  it('nem o Super ativa um convite RETIRADO (nunca aceito) pelo cadastro — achado da fixture do P6', async () => {
+    mockLinks.mockResolvedValue([link(7, false, 'withdrawn')])
+    await expect(editUser(sup, 9, { ...put, active: 'S', institutionId: 7 } as any)).rejects.toMatchObject({ statusCode: 409, code: 'INVITE_PENDING' })
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
   it('reativar um vínculo já aceito continua direto (A-UC8)', async () => {
     mockLinks.mockResolvedValue([link(5, false, 'accepted')])
     await expect(editUser(adminX, 9, { ...put, active: 'S' } as any)).resolves.toBeUndefined()

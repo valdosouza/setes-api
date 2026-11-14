@@ -230,8 +230,11 @@ async function assertInviteRules(scope: UserScope, id: number, current: UserRow,
   const links = await listActiveUserLinks(id)
   const target = input.active !== undefined ? scopeInstitution(scope, input.institutionId ?? null) : null
   const targetLink = target !== null ? links.find(l => l.institutionId === target && !l.deleted) : undefined
-  if (input.active === 'S' && targetLink?.invite === 'pending') {
-    throw new HttpError(409, 'Usuário aguardando aceite — só o login do titular ativa o vínculo', [], ErrorCodes.INVITE_PENDING)
+  // A-UC8: vínculo NUNCA aceito — pendente OU retirado — só ativa pelo aceite (o login do titular); nem o Super o ativa pelo cadastro.
+  // (Fixture do CONV.E2.P6: o retirado passava, porque o CHECK do 75 só recusa o PENDENTE ativo.)
+  if (input.active === 'S' && (targetLink?.invite === 'pending' || targetLink?.invite === 'withdrawn')) {
+    throw new HttpError(409, 'Vínculo nunca aceito — só o login do titular o ativa (depois de um novo convite, se foi retirado)', [],
+      ErrorCodes.INVITE_PENDING)
   }
   if (scope.isSuper) return
   const own = links.find(l => l.institutionId === scope.institutionId && !l.deleted)
