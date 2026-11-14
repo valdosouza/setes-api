@@ -8,7 +8,7 @@ import {
 } from './institutions.interface'
 import { hashPassword } from '@shared/auth/password'
 import { findLoginEmailOwner, insertUserCascade } from '@shared/user'
-import { inviteToInstitution } from '@shared/user/invite'
+import { inviteToInstitution, hasSuperLink } from '@shared/user/invite'
 import { notifyInvite } from '@shared/user/invite-notice'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import {
@@ -82,6 +82,11 @@ export async function createInstitution(
   }
   // lido ANTES de qualquer escrita (falhar cedo): sem login, a senha inicial é obrigatória; com login, vira convite (A-UC6)
   const owner = await findLoginEmailOwner(admin.email)
+  // D-UC22 (Valdo, 2026-11-14): conta de SUPER não vira 1º admin de cliente pelo onboarding — o mesmo 409 genérico da D-UC17
+  if (owner !== null && await hasSuperLink(owner)) {
+    throw new HttpError(409, 'E-mail já usado como login de outro usuário',
+      [{ field: 'admin.email', message: 'E-mail já usado como login de outro usuário' }])
+  }
   if (owner === null && !admin.password) {
     throw new HttpError(400, 'Informe a senha inicial do administrador — o e-mail ainda não é login',
       [{ field: 'admin.password', message: 'Obrigatória para criar a credencial' }], ErrorCodes.VALIDATION_FAILED)

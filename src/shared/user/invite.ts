@@ -157,3 +157,15 @@ export async function findInviteNoticeData(
   const r = rows[0]
   return r && r.email && r.institutionName ? { email: String(r.email), institutionName: String(r.institutionName) } : null
 }
+
+/**
+ * A credencial tem vínculo de SUPER (vivo ou adormecido)? D-UC22 (Valdo, 2026-11-14): o onboarding não convida conta de super como 1º
+ * admin de um cliente — o Super se vincula a clientes só pela tela de vínculos (como na D-UC17 para o cadastro do cliente).
+ */
+export async function hasSuperLink(userId: number): Promise<boolean> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT 1 FROM setes_central.tb_institution_has_user WHERE tb_user_id = ? AND BINARY kind = 'super' LIMIT 1`,
+    [userId]
+  )
+  return rows.length > 0
+}

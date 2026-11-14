@@ -10,6 +10,7 @@
  *   B  o login do titular o aceita: a seleção traz o estabelecimento de antes e o novo, este com perfil `admin` (vw_user_link)
  *   C  o aviso lê o e-mail de login e o nome do NOVO estabelecimento
  *   D  `setes_central` intacta
+ *   E  D-UC22: a leitura que o onboarding usa para recusar conta de super (vínculo `super` vivo ou adormecido)
  *
  * Uso: npx tsx --require tsconfig-paths/register scripts/prove-conv-e2-p4.ts   (SQL_DIR = o repositório sql)
  */
@@ -26,7 +27,7 @@ import { detectLockWaitSupport } from '@shared/db/counters'
 import { hashPassword } from '@shared/auth/password'
 import { login, setLoginRefusalFloor } from '@modules/auth/auth.service'
 import { createUser } from '@modules/users/users.service'
-import { inviteToInstitution, findInviteNoticeData } from '@shared/user/invite'
+import { inviteToInstitution, findInviteNoticeData, hasSuperLink } from '@shared/user/invite'
 import { UserScope } from '@modules/users/users.interface'
 
 const PROBE = `setes_convp4_${process.pid}`
@@ -155,6 +156,12 @@ async function main(): Promise<void> {
     const notice = await findInviteNoticeData(U, 60)
     check('C: o aviso lê o e-mail de login e o nome do NOVO estabelecimento',
       JSON.stringify(notice) === JSON.stringify({ email: EMAIL, institutionName: 'Cliente Novo' }), JSON.stringify(notice))
+
+    // E — D-UC22: a leitura que o onboarding usa para recusar conta de super
+    await rawQuery(`INSERT INTO ${T('tb_institution_has_user')} (tb_institution_id, tb_user_id, kind, active, created_at, updated_at, deleted)
+      VALUES (10, ?, 'super', 'N', NOW(), NOW(), 'N')`, [SUPER_ID])
+    const sup = await hasSuperLink(SUPER_ID), plain = await hasSuperLink(U)
+    check('E: hasSuperLink acha a conta de super (vínculo super mesmo adormecido) e não acha a conta comum (D-UC22)', sup && !plain, JSON.stringify({ sup, plain }))
   } finally {
     removeRedirect()
     for (const db of DATABASES) await rawQuery(`DROP DATABASE IF EXISTS \`${db}\``)

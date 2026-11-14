@@ -30,6 +30,7 @@ const mockFindEmailOwner     = userPiece.findLoginEmailOwner   as jest.Mock
 const mockInsertUser         = userPiece.insertUserCascade     as jest.Mock
 const mockInvite             = invitePiece.inviteToInstitution as jest.Mock
 const mockNotify             = noticePiece.notifyInvite        as jest.Mock
+const mockHasSuper           = invitePiece.hasSuperLink        as jest.Mock
 
 const input: InstitutionInput = {
   entity:      { nameCompany: 'Empresa Setes LTDA', nickTrade: 'Setes' },
@@ -59,6 +60,7 @@ describe('createInstitution (POST /api/institutions absorve o onboarding)', () =
     mockFindEmailOwner.mockResolvedValue(null)
     mockInsertUser.mockResolvedValue(77)
     mockInvite.mockResolvedValue('invited')
+    mockHasSuper.mockResolvedValue(false)
   })
 
   it('cria a cadeia, provisiona o schema, contrata as estruturais, cria o admin e ativa', async () => {
@@ -116,6 +118,15 @@ describe('createInstitution (POST /api/institutions absorve o onboarding)', () =
     await expect(createInstitution(input, 'setes_alpha', admin, 501)).rejects.toMatchObject({ statusCode: 500 })
     expect(mockSetActive).not.toHaveBeenCalled()
     expect(mockNotify).not.toHaveBeenCalled()
+  })
+
+  it('D-UC22: e-mail de conta de SUPER como 1º admin → 409 genérico ANTES de qualquer escrita (nada de convite)', async () => {
+    mockFindEmailOwner.mockResolvedValue(9)
+    mockHasSuper.mockResolvedValue(true)
+    await expect(createInstitution(input, 'setes_alpha', admin, 501))
+      .rejects.toMatchObject({ statusCode: 409, fields: [{ field: 'admin.email', message: 'E-mail já usado como login de outro usuário' }] })
+    expect(mockInsertCascade).not.toHaveBeenCalled()
+    expect(mockInvite).not.toHaveBeenCalled()
   })
 
   it('e-mail novo SEM senha → 400 no campo ANTES de qualquer escrita', async () => {
