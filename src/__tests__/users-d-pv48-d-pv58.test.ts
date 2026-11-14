@@ -111,6 +111,7 @@ describe('D-EA13 (Valdo 2026-11-01, "(b) Recusar já") — senha nova nunca só 
     const fs = jest.requireActual('fs') as typeof import('fs')
     const path = jest.requireActual('path') as typeof import('path')
     const dto = fs.readFileSync(path.resolve(__dirname, '../modules/institutions/institutions.dto.ts'), 'utf8')
-    expect(dto).toMatch(/password:\s+newPasswordSchema,/)
+    // A-UC6 (CONV.E2.P4): opcional no corpo (e-mail que já é login vira convite) — a peça é a MESMA, só com .optional()
+    expect(dto).toMatch(/password:\s+newPasswordSchema(\.optional\(\))?,/)
   })
 })
