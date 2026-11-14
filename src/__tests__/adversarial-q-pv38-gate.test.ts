@@ -136,7 +136,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
   // trava de REGISTRO da linha do usuário — aceita o `FOR UPDATE` com ou sem ` WAIT n` (novo: WAIT 5 quando suportado)
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
     const [userId] = params
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     const u = users.get(Number(userId))

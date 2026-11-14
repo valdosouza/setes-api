@@ -486,7 +486,8 @@ const hasEnv = fs.existsSync(path.join(REPO, '.env'))
     for (const t of ['tb_user', 'tb_institution_has_user', 'tb_mailing', 'tb_entity_has_mailing']) {
       await admin.query(`CREATE TABLE \`${PROBE}\`.\`${t}\` LIKE setes_central.\`${t}\``)
     }
-    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password,
+      ADD COLUMN IF NOT EXISTS password_author_role CHAR(1) NULL DEFAULT NULL AFTER password_set_at`)
     // CONV.E2.P2: o `setInstitutionLinks` lê e grava as colunas do convite (script central 75) — a cópia as recebe como o 75 as cria
     await admin.query(`ALTER TABLE \`${PROBE}\`.tb_institution_has_user
                          ADD COLUMN IF NOT EXISTS tb_user_inviter_id int(11) NULL DEFAULT NULL,

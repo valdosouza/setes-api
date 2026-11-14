@@ -27,11 +27,15 @@ function escapeHtml(s: string): string {
 export function inviteNoticeText(institutionName: string): { text: string; html: string } {
   const text = `${institutionName} adicionou você como usuário no sistema de gestão da Setes. `
     + 'Para começar a usar, entre no aplicativo com o seu e-mail e a sua senha de sempre — o seu próximo acesso confirma o convite. '
+    + 'Se você ainda usa a senha que recebeu de quem criou o seu acesso, defina antes a sua própria senha em "Esqueci minha senha" '
+    + '(ou em "Minha senha", no aplicativo) — só a senha definida por você confirma o convite. '
     + 'Se você não reconhece este estabelecimento, não entre: peça a quem o administra para retirar o convite.'
   const name = escapeHtml(institutionName)
   const html = '<div style="font-family:Arial,sans-serif">'
     + `<p><strong>${name}</strong> adicionou você como usuário no sistema de gestão da Setes.</p>`
     + '<p>Para começar a usar, entre no aplicativo com o seu e-mail e a sua senha de sempre — o seu próximo acesso confirma o convite.</p>'
+    + '<p>Se você ainda usa a senha que recebeu de quem criou o seu acesso, defina antes a sua própria senha em <strong>Esqueci minha '
+    + 'senha</strong> (ou em <strong>Minha senha</strong>, no aplicativo) — só a senha definida por você confirma o convite.</p>'
     + '<p>Se você não reconhece este estabelecimento, não entre: peça a quem o administra para retirar o convite.</p></div>'
   return { text, html }
 }

@@ -1,3 +1,4 @@
+import { PASSWORD_AUTHOR_OPERATOR } from '@shared/auth/password'
 import { randomInt } from 'crypto'
 import { PoolConnection } from 'mysql2/promise'
 import { hashPassword, storedPasswordForm } from '@shared/auth/password'
@@ -187,7 +188,7 @@ export async function resetSuperPasswordTx(conn: PoolConnection, userId: number,
     [userId])
   const loginEmail = pickLoginEmail((mail as any[]).map(r => (r?.email == null ? null : String(r.email))))
   if (!loginEmail) return { status: 'no-login-email', userId }
-  await updatePassword(conn, userId, passwordHash)
+  await updatePassword(conn, userId, passwordHash, PASSWORD_AUTHOR_OPERATOR)   // D-UC19: a senha do operador é de TERCEIRO
   return { status: 'reset', userId, loginEmail }
 }
 

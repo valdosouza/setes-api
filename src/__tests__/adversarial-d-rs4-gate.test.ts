@@ -141,7 +141,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     const u = [...users.values()].filter(x => x.deleted === 'N' && dbEq(x.email, String(email))).sort((a, b) => a.id - b.id)[0]
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
     const [userId] = params
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     const u = users.get(Number(userId))

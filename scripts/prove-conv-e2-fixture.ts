@@ -78,9 +78,15 @@ async function link(u: number, i: number): Promise<any | null> {
     FROM ${T('tb_institution_has_user')} WHERE tb_user_id = ? AND tb_institution_id = ?`, [u, i])
   return r[0] ?? null
 }
+/** D-UC19: o titular definiu a PRÓPRIA senha (o efeito da troca com código ou da "minha senha" — provadas no P5 e no P7). */
+async function ownPassword(id: number): Promise<void> {
+  await rawQuery(`UPDATE ${T('tb_user')} SET password_author_role = 'T', password_set_at = NOW() WHERE id = ?`, [id])
+}
 async function newUser(id: number, email: string, hash: string, active = 'S'): Promise<void> {
   await rawQuery(`INSERT INTO ${T('tb_entity')} (id, name_company, nick_trade, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`, [id, `Pessoa ${id}`, `P${id}`])
-  await rawQuery(`INSERT INTO ${T('tb_user')} (id, password, active, deleted, created_at) VALUES (?, ?, ?, 'N', NOW())`, [id, hash, active])
+  // D-UC19 (CONV.E2.P7): a senha destes usuários de prova foi definida pelo PRÓPRIO titular ('T') — a que aceita convite
+  await rawQuery(`INSERT INTO ${T('tb_user')} (id, password, password_set_at, password_author_role, active, deleted, created_at)
+    VALUES (?, ?, NOW(), 'T', ?, 'N', NOW())`, [id, hash, active])
   await rawQuery(`INSERT INTO ${T('tb_mailing')} (id, email, created_at, updated_at) VALUES (?, ?, NOW(), NOW())`, [id, email])
   await rawQuery(`INSERT INTO ${T('tb_entity_has_mailing')} (tb_entity_id, tb_mailing_id, tb_mailing_group_id, created_at, updated_at, deleted)
     VALUES (?, ?, 2, NOW(), NOW(), 'N')`, [id, id])
@@ -138,12 +144,13 @@ async function main(): Promise<void> {
   for (const db of DATABASES) await rawQuery(`CREATE DATABASE \`${db}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`)
   try {
     for (const t of TABLES) await rawQuery(`CREATE TABLE ${T(t)} LIKE \`setes_central\`.\`${t}\``)
-    await rawQuery(`ALTER TABLE ${T('tb_user')} ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    await rawQuery(`ALTER TABLE ${T('tb_user')} ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password,
+      ADD COLUMN IF NOT EXISTS password_author_role CHAR(1) NULL DEFAULT NULL AFTER password_set_at`)
     // o GRUPO (onda 3 — D-GE4): duas institutions no MESMO schema; o central de hoje não deixa (UNIQUE `schema_name`) — só esta cópia
     await rawQuery(`ALTER TABLE ${T('tb_institution')} DROP INDEX \`schema_name\``)
     for (const db of DATABASES.slice(1)) await rawQuery(`CREATE TABLE \`${db}\`.tb_salesman (id int NOT NULL, tb_institution_id int NOT NULL,
       deleted char(1) NOT NULL DEFAULT 'N', active char(1) NOT NULL DEFAULT 'S', PRIMARY KEY (id, tb_institution_id))`)
-    for (const file of ['70_user_access_central_views.sql', '75_institution_user_invite_ddl.sql']) {
+    for (const file of ['70_user_access_central_views.sql', '75_institution_user_invite_ddl.sql', '76_user_password_author_ddl.sql']) {
       for (const st of splitStatements(fs.readFileSync(path.join(SQL_DIR, file), 'utf8').replace(/setes_central/g, PROBE))) await rawQuery(st)
     }
     const schemaOf: Record<number, string> = { [A]: clientOf(A), [B]: clientOf(B), [MATRIZ]: GROUP, [FILIAL]: GROUP }
@@ -166,6 +173,7 @@ async function main(): Promise<void> {
     // ======================= (a) DOIS CLIENTES, SCHEMAS DIFERENTES =======================
     const P = 'pessoa.convfx@example.invalid'
     const { id: pid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Pessoa Real', nickTrade: 'Pessoa', email: P, password: PASS_ALL, active: 'S' } as any)
+    await ownPassword(pid)   // D-UC19: o titular definiu a própria senha (a do cadastro é do admin)
     const inv = await createUser(scopeOf(B, admins[B]), { nameCompany: 'Chute do B', nickTrade: 'B', email: P, active: 'S' } as any)
     check('a1: o cliente B recebe só "cadastro existente, convite pendente" — nenhum nome, nenhum estabelecimento',
       JSON.stringify(inv) === JSON.stringify({ id: pid, existingLogin: true, invite: 'pending' }), JSON.stringify(inv))
@@ -206,6 +214,7 @@ async function main(): Promise<void> {
     // retirada e reativar nunca aceito
     const R = 'retirada.convfx@example.invalid'
     const { id: rid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Ret', nickTrade: 'Ret', email: R, password: PASS_ALL, active: 'S' } as any)
+    await ownPassword(rid)   // D-UC19: o titular definiu a própria senha (a do cadastro é do admin)
     await createUser(scopeOf(B, admins[B]), { nameCompany: 'x', nickTrade: 'x', email: R, active: 'S' } as any)
     await withdrawUserInvite(scopeOf(B, admins[B]), rid, null)
     const reactW = await expectCode(editUser(scopeOf(B, admins[B]), rid, { nameCompany: 'Ret', nickTrade: 'Ret', email: R, active: 'S' } as any))
@@ -219,6 +228,7 @@ async function main(): Promise<void> {
     // a12 — privilégios no convite (D-UC12 item 2 — gate socrático do P6): valem no PENDENTE, nunca no retirado nem noutro cliente
     const K = 'priv.convfx@example.invalid'
     const { id: kid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Priv', nickTrade: 'Priv', email: K, password: PASS_ALL, active: 'S' } as any)
+    await ownPassword(kid)   // D-UC19: o titular definiu a própria senha (a do cadastro é do admin)
     await createUser(scopeOf(B, admins[B]), { nameCompany: 'x', nickTrade: 'x', email: K, active: 'S' } as any)
     const onPending = await userLinkedToInstitution(kid, B)
     const onOther = await userLinkedToInstitution(kid, MATRIZ)
@@ -232,6 +242,7 @@ async function main(): Promise<void> {
     // a13 — o aceite no MESMO segundo do convite não faz o interceptado passar por "criador" (re-gate: aceite >= convite + 1 s; A-UC7)
     const N = 'nome.convfx@example.invalid'
     const { id: nid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Nome Certo', nickTrade: 'Certo', email: N, password: PASS_ALL, active: 'S' } as any)
+    await ownPassword(nid)   // D-UC19: o titular definiu a própria senha (a do cadastro é do admin)
     await createUser(scopeOf(B, admins[B]), { nameCompany: 'x', nickTrade: 'x', email: N, active: 'S' } as any)
     await httpLogin(N)                                         // aceite imediato (mesmo segundo do convite, na maioria das execuções)
     await editUser(scopeOf(A, admins[A]), nid, { nameCompany: 'Nome Certo', nickTrade: 'Certo', email: N, active: 'N' } as any)
@@ -245,6 +256,7 @@ async function main(): Promise<void> {
     // ======================= (b) O GRUPO: MATRIZ E FILIAL NO MESMO SCHEMA =======================
     const G = 'grupo.convfx@example.invalid'
     const { id: gid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Pessoa Grupo', nickTrade: 'Grupo', email: G, password: PASS_ALL, active: 'S' } as any)
+    await ownPassword(gid)   // D-UC19: o titular definiu a própria senha (a do cadastro é do admin)
     await createUser(scopeOf(MATRIZ, admins[MATRIZ]), { nameCompany: 'x', nickTrade: 'x', email: G, active: 'S' } as any)
     const inFilial = (await listUsers(q(), FILIAL)).rows.find(r => Number(r.id) === gid)
     const inMatriz = (await listUsers(q(), MATRIZ)).rows.find(r => Number(r.id) === gid)

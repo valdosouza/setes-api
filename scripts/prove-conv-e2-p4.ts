@@ -70,9 +70,15 @@ async function link(u: number, i: number): Promise<any | null> {
     FROM ${T('tb_institution_has_user')} WHERE tb_user_id = ? AND tb_institution_id = ?`, [u, i])
   return r[0] ?? null
 }
+/** D-UC19: o titular definiu a PRÓPRIA senha (o efeito da troca com código ou da "minha senha" — provadas no P5 e no P7). */
+async function ownPassword(id: number): Promise<void> {
+  await rawQuery(`UPDATE ${T('tb_user')} SET password_author_role = 'T', password_set_at = NOW() WHERE id = ?`, [id])
+}
 async function newUser(id: number, email: string, hash: string, active = 'S'): Promise<void> {
   await rawQuery(`INSERT INTO ${T('tb_entity')} (id, name_company, nick_trade, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`, [id, `Pessoa ${id}`, `P${id}`])
-  await rawQuery(`INSERT INTO ${T('tb_user')} (id, password, active, deleted, created_at) VALUES (?, ?, ?, 'N', NOW())`, [id, hash, active])
+  // D-UC19 (CONV.E2.P7): a senha destes usuários de prova foi definida pelo PRÓPRIO titular ('T') — a que aceita convite
+  await rawQuery(`INSERT INTO ${T('tb_user')} (id, password, password_set_at, password_author_role, active, deleted, created_at)
+    VALUES (?, ?, NOW(), 'T', ?, 'N', NOW())`, [id, hash, active])
   await rawQuery(`INSERT INTO ${T('tb_mailing')} (id, email, created_at, updated_at) VALUES (?, ?, NOW(), NOW())`, [id, email])
   await rawQuery(`INSERT INTO ${T('tb_entity_has_mailing')} (tb_entity_id, tb_mailing_id, tb_mailing_group_id, created_at, updated_at, deleted)
     VALUES (?, ?, 2, NOW(), NOW(), 'N')`, [id, id])
@@ -114,10 +120,11 @@ async function main(): Promise<void> {
   for (const db of DATABASES) await rawQuery(`CREATE DATABASE \`${db}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`)
   try {
     for (const t of TABLES) await rawQuery(`CREATE TABLE ${T(t)} LIKE \`setes_central\`.\`${t}\``)
-    await rawQuery(`ALTER TABLE ${T('tb_user')} ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    await rawQuery(`ALTER TABLE ${T('tb_user')} ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password,
+      ADD COLUMN IF NOT EXISTS password_author_role CHAR(1) NULL DEFAULT NULL AFTER password_set_at`)
     for (const i of INSTITUTIONS) await rawQuery(`CREATE TABLE \`${clientOf(i)}\`.tb_salesman (id int NOT NULL, tb_institution_id int NOT NULL,
       deleted char(1) NOT NULL DEFAULT 'N', active char(1) NOT NULL DEFAULT 'S', PRIMARY KEY (id, tb_institution_id))`)
-    for (const file of ['70_user_access_central_views.sql', '75_institution_user_invite_ddl.sql']) {
+    for (const file of ['70_user_access_central_views.sql', '75_institution_user_invite_ddl.sql', '76_user_password_author_ddl.sql']) {
       for (const st of splitStatements(fs.readFileSync(path.join(SQL_DIR, file), 'utf8').replace(/setes_central/g, PROBE))) await rawQuery(st)
     }
     const names: Record<number, string> = { 10: 'Cliente Antigo', 60: 'Cliente Novo' }
@@ -132,6 +139,7 @@ async function main(): Promise<void> {
 
     const EMAIL = 'dono.convp4@example.invalid'
     const { id: U } = await createUser(ADMIN_10, { nameCompany: 'Dono Original', nickTrade: 'Dono', email: EMAIL, password: PASSWORD, active: 'S' } as any)
+    await ownPassword(U)   // D-UC19: o titular definiu a própria senha (a do cadastro é do admin)
     const c0 = await counts()
 
     // A — o ramo do convite do onboarding (o mesmo chamado de createInstitution)

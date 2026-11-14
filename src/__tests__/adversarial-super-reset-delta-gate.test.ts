@@ -568,7 +568,8 @@ const hasEnv = fs.existsSync(path.join(REPO, '.env'))
     for (const t of ['tb_user', 'tb_institution_has_user', 'tb_mailing', 'tb_entity_has_mailing']) {
       await admin.query(`CREATE TABLE \`${PROBE}\`.\`${t}\` LIKE setes_central.\`${t}\``)   // sem FK, sem dado
     }
-    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password,
+      ADD COLUMN IF NOT EXISTS password_author_role CHAR(1) NULL DEFAULT NULL AFTER password_set_at`)
     const now = new Date()
     const ids = [900301, 900302, 900303, 900304, 900306, 900307, 900308]
     await admin.query(`INSERT INTO \`${PROBE}\`.tb_user (id, password, active, activation_key, created_at, updated_at, deleted) VALUES ?`,

@@ -12,7 +12,7 @@ import {
 // Peça centralizada em @shared/db/schema (2026-08-04).
 import { assertSchema } from '@shared/db/schema'
 import { HttpError } from '@shared/errors/http-error'
-import { passwordSetAt } from '@shared/auth/password'
+import { passwordSetAt, PASSWORD_AUTHOR_ADMIN } from '@shared/auth/password'
 import { ErrorCodes } from '@shared/errors/error-codes'
 // Nascimento da credencial promovido a @shared/user em 2026-08-15 (A2 — o
 // onboarding do Estabelecimento também cria usuário). O módulo REEXPORTA
@@ -228,7 +228,7 @@ export async function updateUserCascade(
     })
     if (passwordHash !== null) {
       const [res] = await conn.query<any>(
-        `UPDATE setes_central.tb_user SET password = ?, password_set_at = ?, updated_at = NOW()
+        `UPDATE setes_central.tb_user SET password = ?, password_set_at = ?, password_author_role = '${PASSWORD_AUTHOR_ADMIN}', updated_at = NOW()
           WHERE id = ? AND (password IS NULL OR password = '')`,
         [passwordHash, passwordSetAt(), id]
       )

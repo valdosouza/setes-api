@@ -169,3 +169,28 @@ export async function hasSuperLink(userId: number): Promise<boolean> {
   )
   return rows.length > 0
 }
+
+/**
+ * Boot (D-UC19 — script central 76): sem a coluna do papel de quem definiu a senha, ou sem os dois CHECKs dela, o setes-api NÃO sobe — o
+ * login a lê na linha travada e todo escritor da senha a grava.
+ */
+export async function assertPasswordAuthorSchema(q: Pick<typeof pool, 'query'> = pool): Promise<string> {
+  try {
+    await q.query(`SELECT password_author_role FROM setes_central.tb_user LIMIT 0`)
+  } catch (err: any) {
+    if (err?.errno === 1054 || err?.code === 'ER_BAD_FIELD_ERROR') {
+      throw new Error('setes_central.tb_user sem a coluna password_author_role — aplique o script sql/76_user_password_author_ddl.sql '
+        + 'em setes_central ANTES do setes-api (D-UC19)')
+    }
+    throw err
+  }
+  const [rows] = await q.query<any[]>(
+    `SELECT CONSTRAINT_NAME AS name FROM information_schema.CHECK_CONSTRAINTS
+     WHERE CONSTRAINT_SCHEMA = 'setes_central' AND TABLE_NAME = 'tb_user'
+       AND CONSTRAINT_NAME IN ('ck_user_password_author_role', 'ck_user_password_author_has_password')`)
+  if ((rows as any[]).length !== 2) {
+    throw new Error('setes_central.tb_user sem os CHECKs do papel da senha — aplique o script sql/76_user_password_author_ddl.sql (D-UC19)')
+  }
+  return 'ok (coluna e 2 CHECKs)'
+}
+

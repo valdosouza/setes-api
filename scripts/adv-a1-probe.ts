@@ -280,7 +280,8 @@ async function raceExperiment(conn: mysql.PoolConnection): Promise<void> {
   try {
     await conn.query(`CREATE DATABASE \`${DB}\``)
     await conn.query(`CREATE TABLE \`${DB}\`.tb_user LIKE setes_central.tb_user`)
-    await conn.query(`ALTER TABLE \`${DB}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    await conn.query(`ALTER TABLE \`${DB}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password,
+      ADD COLUMN IF NOT EXISTS password_author_role CHAR(1) NULL DEFAULT NULL AFTER password_set_at`)
     await conn.query(`INSERT INTO \`${DB}\`.tb_user (id, password, active, deleted, created_at) VALUES (1, NULL, 'N', 'N', NOW())`)
     const src = fs.readFileSync(path.resolve(__dirname, '../src/modules/users/users.repository.ts'), 'utf8')
     const m = src.match(/`(UPDATE setes_central\.tb_user SET password = \?, password_set_at = \?, updated_at = NOW\(\)\s+WHERE id = \? AND \(password IS NULL OR password = ''\))`/)

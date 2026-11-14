@@ -1,7 +1,7 @@
 import { PoolConnection, ResultSetHeader } from 'mysql2/promise'
 import pool from '@shared/db/connection'
 import { isLockWaitSupported } from '@shared/db/counters'
-import { passwordSetAt } from '@shared/auth/password'
+import { passwordSetAt, PASSWORD_AUTHOR_OWNER, PASSWORD_AUTHOR_OPERATOR, PasswordAuthorRole } from '@shared/auth/password'
 
 export interface AuthUser {
   id:       number
@@ -102,6 +102,8 @@ export interface LockedUser {
   active:   string
   /** hash atual da senha (entra no HMAC do código — trocar a senha invalida o código aberto) */
   password: string | null
+  /** D-UC19: o PAPEL de quem definiu a senha vigente, lido na MESMA linha travada (NULL = desconhecido — A-UC9 — ou sem senha) */
+  passwordAuthorRole: PasswordAuthorRole | null
 }
 
 /** Espera máxima pela trava da linha do usuário: as rotas são PÚBLICAS — quem espera mais recebe 1205 (resposta neutra), nunca prende o pool. */
@@ -115,10 +117,13 @@ export const CREDENTIAL_LOCK_WAIT_SECONDS = 5
 export async function lockUserCredential(conn: PoolConnection, userId: number): Promise<LockedUser | null> {
   const wait = isLockWaitSupported() ? ` WAIT ${CREDENTIAL_LOCK_WAIT_SECONDS}` : ''
   const [rows] = await conn.query<any[]>(
-    `SELECT id, active, password FROM setes_central.tb_user WHERE id = ? AND deleted = 'N' FOR UPDATE${wait}`,
+    `SELECT id, active, password, password_author_role FROM setes_central.tb_user WHERE id = ? AND deleted = 'N' FOR UPDATE${wait}`,
     [userId]
   )
-  return rows.length ? { id: Number(rows[0].id), active: String(rows[0].active), password: rows[0].password ?? null } : null
+  return rows.length
+    ? { id: Number(rows[0].id), active: String(rows[0].active), password: rows[0].password ?? null,
+        passwordAuthorRole: (rows[0].password_author_role ?? null) as PasswordAuthorRole | null }
+    : null
 }
 
 /**
@@ -133,6 +138,18 @@ export async function lockUserCredential(conn: PoolConnection, userId: number): 
  * vínculo de CRIAÇÃO (D-UC14), que a A-UC7 usa para saber quem corrige o nome (gate adversarial do CONV.E2.P6, X1 — num login no mesmo
  * segundo do convite, o interceptado passava por criador).
  */
+/** D-UC19/D-UC23: há convite PENDENTE desta credencial? (pela conexão da transação do login, com a linha `tb_user` travada) */
+export async function hasPendingInvites(conn: PoolConnection, userId: number): Promise<boolean> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT 1 FROM setes_central.tb_institution_has_user
+      WHERE tb_user_id = ? AND deleted = 'N'
+        AND invited_at IS NOT NULL AND accepted_at IS NULL AND invite_withdrawn_at IS NULL
+      LIMIT 1`,
+    [userId]
+  )
+  return rows.length > 0
+}
+
 export async function acceptPendingInvites(conn: PoolConnection, userId: number): Promise<number[]> {
   const [rows] = await conn.query<any[]>(
     `SELECT tb_institution_id AS institutionId
@@ -292,10 +309,17 @@ export async function insertPasswordResetNotice(conn: PoolConnection, userId: nu
 // Senha já chega com hash aplicado pelo service (decisão 2 — nunca na query). O código vive no pedido de troca de senha (marcado
 // como usado na MESMA transação); `activation_key` segue LIMPA aqui como antes — nenhum leitor a aceita mais, e um código antigo
 // em texto puro não pode voltar a valer num rollback para o código anterior (que lia activation_key + updated_at).
-export async function updatePassword(conn: PoolConnection, userId: number, passwordHash: string): Promise<void> {
-  // D-EA7: definir a senha grava o instante T junto (o par hash × T) — as sessões emitidas antes caem na próxima requisição
+export async function updatePassword(
+  conn: PoolConnection, userId: number, passwordHash: string, author: typeof PASSWORD_AUTHOR_OWNER | typeof PASSWORD_AUTHOR_OPERATOR,
+): Promise<void> {
+  // D-EA7: definir a senha grava o instante T junto (o par hash × T) — as sessões emitidas antes caem na próxima requisição.
+  // D-UC19 (script 76): e o PAPEL de quem a definiu, no MESMO comando — obrigatório e sem padrão (um padrão 'T' daria ao script do Super o
+  // papel de titular por esquecimento — parecer do guardião)
+  // o papel vai como LITERAL conferido aqui (só as duas constantes — nunca texto vindo de fora; sem modo estrito um texto maior seria cortado)
+  if (author !== PASSWORD_AUTHOR_OWNER && author !== PASSWORD_AUTHOR_OPERATOR) throw new Error(`papel de senha inválido: ${String(author)}`)
   await conn.query(
-    `UPDATE setes_central.tb_user SET password = ?, password_set_at = ?, activation_key = NULL, updated_at = NOW() WHERE id = ?`,
+    `UPDATE setes_central.tb_user SET password = ?, password_set_at = ?, password_author_role = '${author}', activation_key = NULL,
+            updated_at = NOW() WHERE id = ?`,
     [passwordHash, passwordSetAt(), userId]
   )
 }

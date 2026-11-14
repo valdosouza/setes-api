@@ -403,7 +403,8 @@ const hasEnv = fs.existsSync(path.join(REPO, '.env'))
       await admin.query(`CREATE TABLE \`${PROBE}\`.\`${t}\` LIKE setes_central.\`${t}\``)   // sem FK, sem dado
     }
     // D-EA7 (script sql/70): a coluna do instante da senha — a cópia nasce no formato DEPOIS da janela, mesmo antes de o 70 ir ao banco
-    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password,
+      ADD COLUMN IF NOT EXISTS password_author_role CHAR(1) NULL DEFAULT NULL AFTER password_set_at`)
     const now = new Date()
     // 900001 Super ativo · 900002 admin · 900003 Super com USUÁRIO inativo · 900004 'super' em OUTRA institution (ignorado) ·
     // 900005 vínculo super EXCLUÍDO · 900006 Super com VÍNCULO adormecido (ihu.active = N — A-RS10) · 900007 Super ativo SEM e-mail de login

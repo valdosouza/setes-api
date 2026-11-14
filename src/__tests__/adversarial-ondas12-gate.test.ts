@@ -130,7 +130,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Undo)
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
   if (/FROM setes_central\.vw_user_link l/.test(sql)) return [links.get(Number(params[0])) ?? []]
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     lockCalls++
     const userId = Number(params[0])

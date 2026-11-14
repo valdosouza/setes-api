@@ -174,3 +174,14 @@ export { newPasswordSchema } from './password-policy'
 export function passwordSetAt(now: Date = new Date()): string {
   return now.toISOString().slice(0, 19).replace('T', ' ')
 }
+
+/**
+ * D-UC19 (script central 76 — `tb_user.password_author_role`): o PAPEL de quem definiu a senha vigente, gravado no MESMO comando do hash e
+ * do `password_set_at` (D-EA7) por quem DEFINE a senha. Só estas constantes vão ao banco (sem modo estrito um texto maior seria cortado
+ * antes do CHECK — PADROES §11 regra 11 d). NULL = desconhecido (senha anterior ao 76 — A-UC9) ou sem senha. O rehash não muda o papel.
+ */
+export const PASSWORD_AUTHOR_OWNER = 'T'      // o titular: troca com código ("Esqueci minha senha") ou "minha senha"
+export const PASSWORD_AUTHOR_ADMIN = 'A'      // um administrador: a inicial da criação (D-UC8) e a 1ª da conta do sync (A-PV23)
+export const PASSWORD_AUTHOR_OPERATOR = 'O'   // o operador da Setes: o script do Super (D-PV46/D-RS15)
+export type PasswordAuthorRole = typeof PASSWORD_AUTHOR_OWNER | typeof PASSWORD_AUTHOR_ADMIN | typeof PASSWORD_AUTHOR_OPERATOR
+

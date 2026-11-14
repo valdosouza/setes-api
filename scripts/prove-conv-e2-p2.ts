@@ -116,6 +116,8 @@ async function main(): Promise<void> {
     }
 
     // o 75 REAL no descartável
+    for (const st of splitStatements(fs.readFileSync(path.join(SQL_DIR, '76_user_password_author_ddl.sql'), 'utf8')   // D-UC19 (CONV.E2.P7)
+      .replace(/setes_central/g, PROBE))) await rawQuery(st)
     for (const st of splitStatements(fs.readFileSync(path.join(SQL_DIR, '75_institution_user_invite_ddl.sql'), 'utf8')
       .replace(/setes_central/g, PROBE))) await rawQuery(st)
     let after = ''

@@ -110,7 +110,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     const u = [...users.values()].filter(x => x.deleted === 'N' && dbEq(x.email, String(email))).sort((a, b) => a.id - b.id)[0]
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
     const [userId] = params
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     const u = users.get(Number(userId))
@@ -377,7 +377,7 @@ describe('Q-PV38 — resposta neutra (não revela se o e-mail existe)', () => {
   it('CONTENÇÃO (lock wait na trava do usuário) é carga normal: resposta neutra, só aviso — sem alarme na crashlytics', async () => {
     await recover('a10@x.com')
     const code = lastCode('a10@x.com')
-    failNext = { match: 'SELECT id, active, password FROM setes_central.tb_user', err: lockWait('ER_LOCK_WAIT_TIMEOUT', 1205) }
+    failNext = { match: 'SELECT id, active, password, password_author_role FROM setes_central.tb_user', err: lockWait('ER_LOCK_WAIT_TIMEOUT', 1205) }
     const c = await change('a10@x.com', code)
     expect([c.status, c.body]).toEqual([401, { error: INVALID_PASSWORD_RESET_CODE }])
     expect(recordCrash).not.toHaveBeenCalled()

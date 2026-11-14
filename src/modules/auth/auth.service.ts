@@ -7,7 +7,7 @@ import {
   readCurrentPasswordReset, recordFailedPasswordResetAttempt, markPasswordResetUsed, updatePassword, rehashPassword,
   assertPasswordResetSchema, hasRecentPasswordResetNotice, insertPasswordResetNotice, PasswordResetNoticeKind,
   countLoginFailuresInWindow, insertLoginFailure, hasRecentLoginBlockNotice, insertLoginBlockNotice, assertLoginLockSchema,
-  LOGIN_MAX_FAILURES, LOGIN_FAILURE_WINDOW_MINUTES, acceptPendingInvites, findAuthUserById,
+  LOGIN_MAX_FAILURES, LOGIN_FAILURE_WINDOW_MINUTES, acceptPendingInvites, findAuthUserById, hasPendingInvites,
 } from './auth.repository'
 import { recordLoginRefusal } from './login-watch'
 import pool from '@shared/db/connection'
@@ -21,7 +21,7 @@ import {
 } from '@shared/auth/product-token'
 import { SessionContext, getSessionContext } from '@shared/session-context'
 import { liveSession } from '@shared/access'
-import { hashPassword, checkPassword, PasswordCheck } from '@shared/auth/password'
+import { hashPassword, checkPassword, PasswordCheck, PASSWORD_AUTHOR_OWNER } from '@shared/auth/password'
 import { passwordProblems, PASSWORD_PROBLEM_MESSAGES } from '@shared/auth/password-policy'
 import { HttpError } from '@shared/errors/http-error'
 import { sendMail, isMailerConfigured, isProduction, maskEmail, mailErrorForLog, singleMailAddress } from '@shared/mailer/mailer'
@@ -33,6 +33,11 @@ import logger from '@shared/logger/logger'
 export interface LoginResult {
   status:        'ok' | 'select'
   token:         string
+  /**
+   * D-UC19/D-UC23: há convite esperando e a senha atual NÃO é do titular — o app diz para definir a própria senha ("Minha senha" ou
+   * "Esqueci minha senha"); o aceite vem no login seguinte à troca. Só depois da senha CERTA (não é oráculo das recusas — D-EA6).
+   */
+  pendingInvitesNeedOwnPassword?: true
   institutions?: UserInstitution[]
   /** Estado de sessão derivado (decisão 17) — só acompanha o token FINAL. */
   context?:      SessionContext
@@ -162,6 +167,8 @@ export interface LoginJudgement {
    * valor mudou entre a conferência e a trava: fica para o próximo login).
    */
   rehash?: { from: string; to: string }
+  /** só no 'right' (D-UC19): o papel de quem definiu a senha, da linha TRAVADA — o login só aceita convite com 'T' exato */
+  passwordAuthorRole?: string | null
   /** só no 'stale': o hash TRAVADO (≠ o conferido fora da trava) — o caller solta a trava e confere de novo contra ELE, fora dela */
   lockedHash?: string
   /** só no 'wrong': falhas na janela DEPOIS desta */
@@ -200,7 +207,7 @@ export async function judgeLoginAttempt(
     return { verdict: 'wrong', failuresInWindow: before + 1, notice }
   }
   const rehash = same && pre.needsRehash && rehashTo ? { from: locked.password, to: rehashTo } : undefined
-  return { verdict: 'right', active: locked.active, ...(rehash ? { rehash } : {}) }
+  return { verdict: 'right', active: locked.active, passwordAuthorRole: locked.passwordAuthorRole, ...(rehash ? { rehash } : {}) }
 }
 
 /** Passo 1-3 do fluxo: autentica e decide pela quantidade de institutions. Toda recusa = a MESMA 401, depois do piso. */
@@ -219,7 +226,7 @@ type LoginTxOutcome =
   | { kind: 'judged'; judgement: LoginJudgement }
   | { kind: 'inactive' } | { kind: 'no-link' }
   | { kind: 'admitted'; result: LoginResult }
-  | { kind: 'admitted-final'; token: string; payload: InstitutionPayload }
+  | { kind: 'admitted-final'; token: string; payload: InstitutionPayload; waitOwnPassword?: boolean }
 
 /** Teto do e-mail digitado (gate socrático, LOW: a porta pública levava até 2 MB ao banco e ao hash): acima dele, a mesma recusa de
  *  e-mail inexistente, sem tocar o banco — nenhum e-mail de login gravado passa disso (RFC 5321: 254 no caminho). */
@@ -299,9 +306,11 @@ async function judgeRound(email: string, meta: LoginMeta, user: AuthUser, passwo
 
   let outcome: LoginTxOutcome
   let acceptedNow: number[] = []
+  let invitesWaitOwnPassword = false
   try {
     outcome = await withDeadlockRetry('auth/login', { userId: user.id }, 3, async () => {
       acceptedNow = []                                                   // cada tentativa do retry começa do zero
+      invitesWaitOwnPassword = false
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
@@ -312,7 +321,10 @@ async function judgeRound(email: string, meta: LoginMeta, user: AuthUser, passwo
           else {
             // CONV.E2.P3 (D-UC12): o LOGIN é o aceite — senha certa e credencial ativa, sob a trava e pela MESMA conexão, todo convite
             // PENDENTE vira vínculo ativo ANTES da leitura dos vínculos (o aceito já conta para a escolha e para a recusa "sem vínculo")
-            acceptedNow = await acceptPendingInvites(conn, user.id)
+            // D-UC19: só com a senha definida pelo PRÓPRIO titular ('T' exato, lido na linha travada); com a de terceiro (a inicial do admin —
+            // D-UC8 —, a do sync, a do operador, ou desconhecida — A-UC9) o convite ESPERA e a resposta avisa (D-UC23)
+            if (judgement.passwordAuthorRole === PASSWORD_AUTHOR_OWNER) acceptedNow = await acceptPendingInvites(conn, user.id)
+            else invitesWaitOwnPassword = await hasPendingInvites(conn, user.id)
             // Gates das Ondas 1+2 (HIGH): sob a trava, NADA pede outra conexão ao pool — os vínculos vêm pela conexão da transação e
             // a assinatura não usa o banco; o bloco `context` (fato derivado, sem efeito de segurança) é lido DEPOIS do COMMIT
             const institutions = await getInstitutionsForUser(user.id, conn)
@@ -325,9 +337,10 @@ async function judgeRound(email: string, meta: LoginMeta, user: AuthUser, passwo
             else if (institutions.length === 1) {
               // (d) do parecer: o token é ASSINADO com a trava segura (fecha a troca de senha entre a admissão e a assinatura)
               const signed = signFinalPayload(user.id, institutions[0])
-              out = { kind: 'admitted-final', token: signed.token, payload: signed.payload }
+              out = { kind: 'admitted-final', token: signed.token, payload: signed.payload, waitOwnPassword: invitesWaitOwnPassword }
             } else {
-              out = { kind: 'admitted', result: { status: 'select', token: signSelectionToken(user.id), institutions } }
+              out = { kind: 'admitted', result: { status: 'select', token: signSelectionToken(user.id), institutions,
+                ...(invitesWaitOwnPassword ? { pendingInvitesNeedOwnPassword: true as const } : {}) } }
             }
           }
         }
@@ -367,7 +380,7 @@ async function finishLogin(email: string, meta: LoginMeta, user: AuthUser, outco
       alarmNeutral('auth/login (contexto depois do COMMIT)', user.id, err, { deadlockIsAlarm: true })
       context = { isSalesman: false }
     }
-    return { status: 'ok', token: outcome.token, context }
+    return { status: 'ok', token: outcome.token, context, ...(outcome.waitOwnPassword ? { pendingInvitesNeedOwnPassword: true as const } : {}) }
   }
   if (outcome.kind === 'inactive') throw refuseLogin(email, meta, 'inativo', user.id)
   if (outcome.kind === 'no-link') throw refuseLogin(email, meta, 'sem vínculo', user.id)
@@ -706,7 +719,7 @@ export async function judgePasswordResetCode(
       : (await checkPassword(newPasswordPlain, locked.password)).ok
     if (same) return { verdict: 'same-as-current' }
   }
-  await updatePassword(conn, user.id, newPasswordHash)
+  await updatePassword(conn, user.id, newPasswordHash, PASSWORD_AUTHOR_OWNER)   // D-UC19: a troca com código é do TITULAR
   await markPasswordResetUsed(conn, user.id, current.seq)
   return { verdict: 'changed' }
 }

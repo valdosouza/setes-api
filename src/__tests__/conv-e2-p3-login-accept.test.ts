@@ -12,7 +12,7 @@ jest.mock('../modules/auth/auth.repository', () => ({
   ...jest.requireActual('../modules/auth/auth.repository'),
   findUserByEmail: jest.fn(), getInstitutionsForUser: jest.fn(), countLoginFailuresInWindow: jest.fn(),
   lockUserCredential: jest.fn(), insertLoginFailure: jest.fn(), rehashPassword: jest.fn().mockResolvedValue(true),
-  acceptPendingInvites: jest.fn(),
+  acceptPendingInvites: jest.fn(), hasPendingInvites: jest.fn(),
 }))
 jest.mock('../shared/session-context/session-context.repository')
 jest.mock('../shared/db/connection', () => ({
@@ -26,6 +26,7 @@ const mockInst     = authRepo.getInstitutionsForUser as jest.Mock
 const mockCount    = authRepo.countLoginFailuresInWindow as jest.Mock
 const mockLock     = authRepo.lockUserCredential as jest.Mock
 const mockAccept   = authRepo.acceptPendingInvites as jest.Mock
+const mockHasPending = authRepo.hasPendingInvites as jest.Mock
 const fakeConn = { beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(), query: jest.fn() }
 const order: string[] = []
 const link7 = { institutionId: 7, schemaName: 'setes_alpha', name: 'Alpha', profile: 'user' }
@@ -39,7 +40,9 @@ beforeEach(() => {
   ;(sessionRepo.existsSalesman as jest.Mock).mockResolvedValue(false)
   mockFindUser.mockResolvedValue({ id: 9, password: MD5_12345, active: 'S' })
   mockCount.mockResolvedValue(0)
-  mockLock.mockImplementation(async () => { order.push('trava'); return { id: 9, password: MD5_12345, active: 'S' } })
+  // CONV.E2.P7 (D-UC19): a senha é do TITULAR ('T') nos casos do P3 — os de terceiro estão no describe abaixo
+  mockLock.mockImplementation(async () => { order.push('trava'); return { id: 9, password: MD5_12345, active: 'S', passwordAuthorRole: 'T' } })
+  mockHasPending.mockResolvedValue(false)
   fakeConn.commit.mockImplementation(async () => { order.push('commit') })
   ;(pool.getConnection as jest.Mock).mockResolvedValue(fakeConn)
 })
@@ -87,7 +90,7 @@ describe('CONV.E2.P3 — o login é o aceite (T1)', () => {
   })
 
   it('credencial inativa não aceita nada (a mesma 401)', async () => {
-    mockLock.mockResolvedValue({ id: 9, password: MD5_12345, active: 'N' })
+    mockLock.mockResolvedValue({ id: 9, password: MD5_12345, active: 'N', passwordAuthorRole: 'T' })
     await expect(login('pessoa@x.com', '12345')).rejects.toMatchObject({ statusCode: 401 })
     expect(mockAccept).not.toHaveBeenCalled()
   })
@@ -105,3 +108,43 @@ describe('CONV.E2.P3 — o login é o aceite (T1)', () => {
     expect(fakeConn.commit).not.toHaveBeenCalled()
   })
 })
+
+describe('CONV.E2.P7 — o aceite só com a senha do PRÓPRIO titular (D-UC19) e o aviso (D-UC23)', () => {
+  for (const role of ['A', 'O', null]) {
+    it(`senha de terceiro (${role ?? 'desconhecida — A-UC9'}): entra nos vínculos que já tem, NÃO aceita, e a resposta avisa`, async () => {
+      mockLock.mockResolvedValue({ id: 9, password: MD5_12345, active: 'S', passwordAuthorRole: role })
+      mockHasPending.mockResolvedValue(true)
+      mockInst.mockResolvedValue([link1])
+      const r: any = await login('pessoa@x.com', '12345')
+      expect(mockAccept).not.toHaveBeenCalled()
+      expect(mockHasPending).toHaveBeenCalledWith(fakeConn, 9)
+      expect(r).toMatchObject({ status: 'ok', pendingInvitesNeedOwnPassword: true })
+    })
+  }
+  it('senha de terceiro SEM convite esperando: nenhum aviso (a resposta de sempre)', async () => {
+    mockLock.mockResolvedValue({ id: 9, password: MD5_12345, active: 'S', passwordAuthorRole: 'A' })
+    mockHasPending.mockResolvedValue(false)
+    mockInst.mockResolvedValue([link1, link7])
+    const r: any = await login('pessoa@x.com', '12345')
+    expect(r.status).toBe('select')
+    expect(r.pendingInvitesNeedOwnPassword).toBeUndefined()
+  })
+  it('só o convite e a senha de terceiro: a MESMA recusa de "sem vínculo" (D-EA6 — o aviso nunca vaza numa recusa)', async () => {
+    mockLock.mockResolvedValue({ id: 9, password: MD5_12345, active: 'S', passwordAuthorRole: 'A' })
+    mockHasPending.mockResolvedValue(true)
+    mockInst.mockResolvedValue([])
+    await expect(login('pessoa@x.com', '12345')).rejects.toMatchObject({ statusCode: 401, message: 'Email ou senha inválidos' })
+    expect(mockAccept).not.toHaveBeenCalled()
+  })
+  it("'t' minúscula ou com espaço não vale como titular (comparação exata)", async () => {
+    for (const role of ['t', 'T ']) {
+      mockAccept.mockClear()
+      mockLock.mockResolvedValue({ id: 9, password: MD5_12345, active: 'S', passwordAuthorRole: role })
+      mockHasPending.mockResolvedValue(true)
+      mockInst.mockResolvedValue([link1])
+      await login('pessoa@x.com', '12345')
+      expect(mockAccept).not.toHaveBeenCalled()
+    }
+  })
+})
+

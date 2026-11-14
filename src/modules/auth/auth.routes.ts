@@ -136,10 +136,12 @@ router.post('/login', async (req: Request, res: Response) => {
     if (result.status === 'ok') {
       // context = estado de sessão derivado (decisão 17) — UX do app;
       // enforcement continua na API.
-      res.json({ ok: true, token: result.token, context: result.context })
+      res.json({ ok: true, token: result.token, context: result.context,
+        ...(result.pendingInvitesNeedOwnPassword ? { pendingInvitesNeedOwnPassword: true } : {}) })   // D-UC23
     } else {
       // N institutions: UI mostra "Escolha a empresa" e chama /auth/select-institution
-      res.json({ ok: true, select: true, selectionToken: result.token, institutions: result.institutions })
+      res.json({ ok: true, select: true, selectionToken: result.token, institutions: result.institutions,
+        ...(result.pendingInvitesNeedOwnPassword ? { pendingInvitesNeedOwnPassword: true } : {}) })   // D-UC23
     }
   } catch (err) {
     fail(res, err, 'login')

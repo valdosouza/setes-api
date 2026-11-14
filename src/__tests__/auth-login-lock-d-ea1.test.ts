@@ -136,7 +136,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Undo)
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
   if (/FROM setes_central\.vw_user_link l/.test(sql)) return [links.get(Number(params[0])) ?? []]
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     lockCalls++
     const userId = Number(params[0])
@@ -392,7 +392,7 @@ describe('L6 / L10b — trocar a senha NÃO desbloqueia (conhecimento negativo d
     await wrongTimes('super@setes.com.br', 10)
     const conn = newConn()
     await conn.beginTransaction()
-    await updatePassword(conn as any, 16, md5('Senha-Nova-Do-Super'))
+    await updatePassword(conn as any, 16, md5('Senha-Nova-Do-Super'), 'O')   // D-UC19: o script do Super grava o papel do operador
     await conn.commit()
     expect((await refused(login('super@setes.com.br', 'Senha-Nova-Do-Super'))).statusCode).toBe(401)
     expect(failuresOf(16)).toHaveLength(10)
