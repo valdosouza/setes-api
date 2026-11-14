@@ -13,6 +13,6 @@ it('a lista do cadastro de privilégios exclui users e establishment (parâmetro
   await listUserPrivileges('setes_acme', 5, 9, ADMIN_PROFILE_INTERFACE_KEYS)
   const [sql, params] = mockQuery.mock.calls[0]
   expect(String(sql)).toMatch(/AND i\.i18n_key NOT IN \(\?\)/)
-  expect(params).toEqual([9, 5, ['users', 'establishment']])
+  expect(params).toEqual([9, 5, 5, ['users', 'establishment']])
   expect(ADMIN_PROFILE_INTERFACE_KEYS).toEqual(['users', 'establishment'])
 })

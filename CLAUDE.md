@@ -154,6 +154,12 @@ toda rota (401 `SESSION_REVOKED`; o `role` do token é trocado pelo perfil vivo 
 (`assertAccessViews`). Prova da semântica: `scripts/prove-user-access-views.ts` (banco descartável). Na suíte, a leitura da sessão é
 dublada globalmente (`src/test-setup/access-session.mock.ts`) e o veredito responde por `src/test-setup/access-model.ts`.
 
+**Privilégio POR ESTABELECIMENTO (D-GE3, migration 076 — setes-api:GRUPO.E3.P1)**: `tb_user_has_privilege` tem `tb_institution_id` na
+chave (usuário, institution, interface, privilégio) e a `vw_user_access` só aceita a concessão da MESMA institution do alcance: com o
+grupo (filial no mesmo schema), o privilégio da matriz NÃO vale na filial. Todo SQL de produto que toca a tabela nomeia a institution
+(cerca `grupo-e3-privilegio-por-estabelecimento.test.ts`). A 076 preenche a concessão antiga com a ÚNICA institution viva do schema e
+PARA (erro 1242) se houver duas — escolher seria decisão do Valdo.
+
 ### Recuperação de senha, aviso ao dono e SMTP (Q-PV38 / D-RS4 / D-RS5 — 2026-10-18/21)
 
 `POST /auth/recovery-password` + `/auth/change-password` com o PEDIDO DE TROCA DE SENHA em `setes_central.tb_user_password_reset`

@@ -216,7 +216,7 @@ describe('privilégios de acesso (ACL — workflow 2026-07-12)', () => {
 
   it('PUT sincroniza somente privilégios do catálogo da interface', async () => {
     await saveUserPrivileges(adminScope, 9, 4, [6, 1], null)
-    expect(mockSetPrivs).toHaveBeenCalledWith('setes_acme', 9, 4, [6, 1])
+    expect(mockSetPrivs).toHaveBeenCalledWith('setes_acme', 5, 9, 4, [6, 1])
 
     await expect(saveUserPrivileges(adminScope, 9, 4, [5], null))
       .rejects.toMatchObject({
@@ -243,7 +243,7 @@ describe('D-PV5 — telas do perfil admin não se concedem por privilégio', () 
   it('a tela Módulos (D-GE20) e as demais seguem concedíveis', async () => {
     mockIfaceKey.mockResolvedValue({ key: 'modules', deleted: false })
     await saveUserPrivileges(adminScope, 9, 26, [6, 2], null)
-    expect(mockSetPrivs).toHaveBeenCalledWith('setes_acme', 9, 26, [6, 2])
+    expect(mockSetPrivs).toHaveBeenCalledWith('setes_acme', 5, 9, 26, [6, 2])
   })
 })
 
@@ -258,7 +258,7 @@ describe('D-PV11 — tela do Super delegável: só o Super libera, e só para us
   it('a listagem do SUPER para usuário da Setes acrescenta a tela delegável; para outro estabelecimento, não', async () => {
     mockSchema.mockResolvedValue('setes_setes')
     expect(await fetchUserPrivileges(superScope, 9, 1)).toEqual([{ interfaceId: 20 }, { interfaceId: 41 }])
-    expect(mockDelegable).toHaveBeenCalledWith('setes_setes', 9, ['institution-interfaces'])
+    expect(mockDelegable).toHaveBeenCalledWith('setes_setes', 1, 9, ['institution-interfaces'])
     mockDelegable.mockClear(); mockSchema.mockResolvedValue('setes_cliente')
     expect(await fetchUserPrivileges(superScope, 9, 7)).toEqual([{ interfaceId: 20 }])
     expect(mockDelegable).not.toHaveBeenCalled()
@@ -294,7 +294,7 @@ describe('D-PV11 — tela do Super delegável: só o Super libera, e só para us
     expect(mockSetPrivs).not.toHaveBeenCalled()
     mockSchema.mockResolvedValue('setes_setes')
     await saveUserPrivileges(superScope, 2, 41, [6, 2], 1)
-    expect(mockSetPrivs).toHaveBeenCalledWith('setes_setes', 2, 41, [6, 2])
+    expect(mockSetPrivs).toHaveBeenCalledWith('setes_setes', 1, 2, 41, [6, 2])
   })
 })
 

@@ -271,7 +271,7 @@ export async function fetchUserPrivileges(
     [...ADMIN_PROFILE_INTERFACE_KEYS, ...DELEGABLE_SUPER_INTERFACES])
   // D-PV11 (b): a tela do Super delegável só aparece quando quem edita é o SUPER e o usuário é da Setes (D-PV37: predicado único)
   if (!scope.isSuper || !isOwnVendorInstitution(target.institutionId)) return rows
-  return rows.concat(await listDelegableSuperPrivileges(target.schemaName, userId, DELEGABLE_SUPER_INTERFACES))
+  return rows.concat(await listDelegableSuperPrivileges(target.schemaName, target.institutionId, userId, DELEGABLE_SUPER_INTERFACES))
 }
 
 export async function saveUserPrivileges(
@@ -315,7 +315,7 @@ export async function saveUserPrivileges(
   // inclusive o CONFIGURAR. A lista gravada é a autoridade (D-PV59: lista vazia = sem a tela). D-PV60: só na ESCRITA — nenhuma concessão
   // antiga é corrigida por script; corrige quando o admin salvar de novo esta tela deste usuário.
   const granted = withVisualizar(privilegeIds, catalog)
-  await setUserPrivileges(target.schemaName, userId, interfaceId, granted)
+  await setUserPrivileges(target.schemaName, target.institutionId, userId, interfaceId, granted)
 }
 
 /** D-PV58: lista com qualquer verbo e sem o VISUALIZAR → o VISUALIZAR entra (quando o catálogo da interface o tem — D-PV51). */

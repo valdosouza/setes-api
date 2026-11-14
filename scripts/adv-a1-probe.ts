@@ -109,7 +109,8 @@ function statementsOf(sql: string): string[] {
   return sql.replace(/--[^\n]*\n/g, '\n').split(';').map(s => s.trim()).filter(s => s.length > 0)
 }
 const centralSql = () => fs.readFileSync(path.join(SQL_DIR, '70_user_access_central_views.sql'), 'utf8').replace(/`setes_central`/g, `\`${V_CENTRAL}\``)
-const clientSql = () => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql/075_user_access_views.sql'), 'utf8')
+const clientSql = () => ['075_user_access_views.sql', '076_user_privilege_by_institution.sql']
+  .map(f => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql', f), 'utf8')).join('\n')
   .replace(/`setes_central`/g, `\`${V_CENTRAL}\``)
 
 async function dropViews(conn: mysql.PoolConnection): Promise<void> {
@@ -166,7 +167,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     }
     // concessão: regular 3 → orders V + FATURAR (dada pelo admin do cliente 2)
     for (const [u, i, p] of [[3, 10, 6], [3, 10, 5]]) {
-      await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (?, ?, ?, 'S', 'N')`, [u, i, p])
+      await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (?, 2, ?, ?, 'S', 'N')`, [u, i, p])
     }
     const who = (u: number, i: number, s = V_CLIENT) => ({ userId: u, institutionId: i, schemaName: s })
 
@@ -227,7 +228,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     await conn.query(`UPDATE \`${V_CENTRAL}\`.tb_institution_has_user SET kind = 'user' WHERE tb_user_id = 7`)
     await conn.query(`INSERT INTO \`${V_CENTRAL}\`.tb_privilege (id, description, deleted) VALUES (13, 'FATURAR ', 'N')`)
     await conn.query(`INSERT INTO \`${V_CENTRAL}\`.tb_interface_has_privilege (tb_interface_id, tb_privilege_id, active, deleted) VALUES (10, 13, 'S', 'N')`)
-    await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (7, 10, 13, 'S', 'N')`)
+    await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (7, 2, 10, 13, 'S', 'N')`)
     const vDup = await accessVerdict(pool, who(7, 2), ['orders'], 'FATURAR')
     const menuDup = (await accessRows(pool, who(7, 2))).map(r => `${r.interfaceKey}:${r.privilege}`)
     note("(g) concessão do privilégio 'FATURAR ' (outro id) → veredito FATURAR / menu", { vDup, menuDup })
@@ -248,7 +249,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
 
     // (i) a tela do Super DELEGÁVEL por um admin de cliente que TEM a linha no contrato e até uma concessão gravada no próprio schema
     await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_institution_has_interface (tb_institution_id, tb_interface_id, active, deleted) VALUES (2, 12, 'S', 'N')`)
-    await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (2, 12, 6, 'S', 'N'), (2, 12, 2, 'S', 'N')`)
+    await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (2, 2, 12, 6, 'S', 'N'), (2, 2, 12, 2, 'S', 'N')`)
     const vDelegV = await accessVerdict(pool, who(2, 2), ['institution-interfaces'], 'VISUALIZAR')
     const vDelegA = await accessVerdict(pool, who(2, 2), ['institution-interfaces'], 'ALTERAR')
     const rDeleg = await reachableKeys(pool, who(2, 2), ['institution-interfaces'])

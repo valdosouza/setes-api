@@ -11,6 +11,9 @@
  *  3. FUNDÍVEL (D-AU8 / PADROES §11.3): EXPLAIN das leituras da biblioteca sem DERIVED/MATERIALIZED.
  *  4. Colação: as leituras em duas colações de conexão (unicode_ci e general_ci) — nunca erro 1267.
  *  5. Re-executável: o SQL das views aplicado DUAS vezes.
+ *  7. D-GE3 (migration 076, setes-api:GRUPO.E3.P1): a concessão é POR ESTABELECIMENTO — com a filial no MESMO schema, o privilégio
+ *     da matriz não vale nela; e o preenchimento da 076 em schema descartável com a tabela ANTIGA: uma institution viva = todas as
+ *     linhas vão para ela (re-executável); duas vivas = erro 1242 e nada preenchido; nenhuma = erro (a coluna nunca fica 0/NULL).
  *  6. GRANT (D-AU12, achado HIGH do guardião): um usuário DESCARTÁVEL com `SELECT ON prova\_ua\_%.*` (o curinga casa o central, como
  *     o `setes\_%` casa o `setes_central`) + a linha ESPECÍFICA do central (`SHOW VIEW`) + SELECT só na vw_user_link e na tb_interface:
  *     `SELECT password FROM <central>.tb_user` tem de ser NEGADO; a vw_user_link e as views do cliente (DEFINER) seguem legíveis.
@@ -29,6 +32,7 @@ import { accessVerdict, reachableKeys, accessRows } from 'fiscal-api/access'
 
 const CENTRAL = 'prova_ua_central'
 const CLIENT = 'setes_zprova_ua'
+const BACKFILL = 'setes_zprova_uabf'
 const PROBE_USER = 'prova_ua_fiscal'
 const PROBE_HOSTS = ['%', 'localhost', '127.0.0.1', '::1']
 const SQL_DIR = process.env.SQL_DIR ?? path.resolve(__dirname, '../../sql')
@@ -46,12 +50,15 @@ function statementsOf(sql: string): string[] {
 
 const centralSql = () => fs.readFileSync(path.join(SQL_DIR, '70_user_access_central_views.sql'), 'utf8')
   .replace(/`setes_central`/g, `\`${CENTRAL}\``)
-const clientSql = () => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql/075_user_access_views.sql'), 'utf8')
+const migrationSql = (file: string) => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql', file), 'utf8')
   .replace(/`setes_central`/g, `\`${CENTRAL}\``)
+/** As migrations do veredito no schema do cliente, na ordem do runner: as views (075) e a concessão por estabelecimento (076). */
+const clientSql = () => migrationSql('075_user_access_views.sql') + '\n' + migrationSql('076_user_privilege_by_institution.sql')
 
 async function dropAll(conn: mysql.PoolConnection): Promise<void> {
   for (const h of PROBE_HOSTS) await conn.query(`DROP USER IF EXISTS ?@?`, [PROBE_USER, h])
   await conn.query(`DROP DATABASE IF EXISTS \`${CLIENT}\``)
+  await conn.query(`DROP DATABASE IF EXISTS \`${BACKFILL}\``)
   await conn.query(`DROP DATABASE IF EXISTS \`${CENTRAL}\``)
 }
 
@@ -102,13 +109,72 @@ async function seed(conn: mysql.PoolConnection): Promise<void> {
     await conn.query(`INSERT INTO \`${CLIENT}\`.tb_institution_has_interface (tb_institution_id, tb_interface_id, active, deleted)
       VALUES (?, ?, 'S', 'N')`, [inst, i])
   }
-  // concessões: regular 3 → orders V + FATURAR + par NÃO registrado (orders × 7) + customers ALTERAR (par inativo);
-  // admin da Setes 5 → institution-interfaces V (delegada pelo Super)
-  const grants: [number, number, number][] = [[3, 10, 6], [3, 10, 5], [3, 10, 7], [3, 11, 2], [5, 12, 6]]
-  for (const [u, i, p] of grants) {
-    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted)
-      VALUES (?, ?, ?, 'S', 'N')`, [u, i, p])
+  // concessões (D-GE3: cada uma NUM estabelecimento): regular 3 no cliente 2 → orders V + FATURAR + par NÃO registrado (orders × 7) +
+  // customers ALTERAR (par inativo); admin da Setes 5 na Setes (1) → institution-interfaces V (delegada pelo Super)
+  const grants: [number, number, number, number][] = [[3, 2, 10, 6], [3, 2, 10, 5], [3, 2, 10, 7], [3, 2, 11, 2], [5, 1, 12, 6]]
+  for (const [u, inst, i, p] of grants) {
+    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id,
+      active, deleted) VALUES (?, ?, ?, ?, 'S', 'N')`, [u, inst, i, p])
   }
+}
+
+/** A tabela como a 003 a criou (sem a institution; as fks centrais ficam de fora — o descartável não tem o central de verdade). */
+const OLD_TABLE = (schema: string) => `CREATE TABLE \`${schema}\`.tb_user_has_privilege (
+  tb_user_id INT NOT NULL, tb_interface_id INT NOT NULL, tb_privilege_id INT NOT NULL, active CHAR(1) DEFAULT NULL,
+  created_at DATETIME DEFAULT NULL, updated_at DATETIME DEFAULT NULL, deleted CHAR(1) NOT NULL DEFAULT 'N',
+  PRIMARY KEY (tb_user_id, tb_interface_id, tb_privilege_id)) ENGINE=InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci`
+
+/** Aplica SÓ a 076 no schema descartável; devolve o código do erro (null = passou). */
+async function apply076(conn: mysql.PoolConnection, schema: string): Promise<string | null> {
+  await conn.query(`USE \`${schema}\``)
+  try {
+    for (const st of statementsOf(migrationSql('076_user_privilege_by_institution.sql'))) await conn.query(st)
+    return null
+  } catch (e: any) {
+    return `${e.errno ?? ''} ${e.code ?? ''}`.trim()
+  }
+}
+
+async function resetOld(conn: mysql.PoolConnection): Promise<void> {
+  await conn.query(`DROP DATABASE IF EXISTS \`${BACKFILL}\``)
+  await conn.query(`CREATE DATABASE \`${BACKFILL}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
+  await conn.query(OLD_TABLE(BACKFILL))
+  await conn.query(`INSERT INTO \`${BACKFILL}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted)
+    VALUES (3, 10, 6, 'S', 'N'), (3, 10, 9, 'S', 'N'), (4, 11, 2, 'N', 'N')`)
+}
+
+async function proveBackfill(conn: mysql.PoolConnection): Promise<void> {
+  const rowsOf = async () => (await conn.query<any[]>(`SELECT tb_institution_id i FROM \`${BACKFILL}\`.tb_user_has_privilege ORDER BY 1`))[0]
+    .map((r: any) => r.i)
+  // uma institution viva no schema: todas as linhas vão para ela; a 076 roda DUAS vezes
+  await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_institution (id, schema_name, active, deleted) VALUES (20, ?, 'S', 'N'), (22, ?, 'S', 'S')`,
+    [BACKFILL, BACKFILL])
+  await resetOld(conn)
+  const first = await apply076(conn, BACKFILL)
+  const second = await apply076(conn, BACKFILL)
+  check('076 (uma institution viva; a excluída não conta): as 3 concessões vão para ela, inclusive a inativa',
+    first === null && eq(await rowsOf(), [20, 20, 20]), `${first} · ${JSON.stringify(await rowsOf())}`)
+  check('076 re-executável (2ª aplicação sem erro e sem mudar nada)', second === null && eq(await rowsOf(), [20, 20, 20]), String(second))
+  const [nn] = await conn.query<any[]>(`SELECT IS_NULLABLE n FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tb_user_has_privilege' AND COLUMN_NAME = 'tb_institution_id'`, [BACKFILL])
+  check('076: tb_institution_id NOT NULL', nn[0]?.n === 'NO', JSON.stringify(nn))
+  // duas institutions vivas no schema: a 076 PARA (erro 1242) e nada é preenchido
+  await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_institution (id, schema_name, active, deleted) VALUES (21, ?, 'S', 'N')`, [BACKFILL])
+  await resetOld(conn)
+  const two = await apply076(conn, BACKFILL)
+  check('076 com DUAS institutions vivas no schema: para com o erro 1242 e não preenche nenhuma linha',
+    /^1242\b/.test(String(two)) && eq(await rowsOf(), [null, null, null]), `${two} · ${JSON.stringify(await rowsOf())}`)
+  // nenhuma institution viva com concessão: a 076 também PARA (a coluna nunca fica NULL nem 0)
+  await conn.query(`UPDATE \`${CENTRAL}\`.tb_institution SET deleted = 'S' WHERE id IN (20, 21)`)
+  await resetOld(conn)
+  const none = await apply076(conn, BACKFILL)
+  const [after] = await conn.query<any[]>(`SELECT COUNT(*) n FROM \`${BACKFILL}\`.tb_user_has_privilege
+    WHERE tb_institution_id IS NOT NULL`)
+  check('076 sem institution viva: para com erro e nenhuma linha ganha institution (nem 0)', none !== null && Number(after[0].n) === 0,
+    `${none} · ${JSON.stringify(after)}`)
+  await conn.query(`DROP DATABASE IF EXISTS \`${BACKFILL}\``)
+  await conn.query(`DELETE FROM \`${CENTRAL}\`.tb_institution WHERE id IN (20, 21, 22)`)
+  await conn.query(`USE \`${CLIENT}\``)
 }
 
 const who = (userId: number, institutionId: number) => ({ userId, institutionId, schemaName: CLIENT })
@@ -178,6 +244,37 @@ async function main(): Promise<void> {
     check('alcance do admin da Setes: a delegável SIM (vendor), cfop não',
       eq(await reachableKeys(pool, who(5, 1), ['orders', 'institution-interfaces', 'cfop']), ['orders', 'institution-interfaces']))
 
+    // ── 7. D-GE3: a filial 4 no MESMO schema do cliente 2 (o grupo); o regular 3 e o admin 2 também têm vínculo nela ─────────────
+    await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_institution (id, schema_name, active, deleted) VALUES (4, ?, 'S', 'N')`, [CLIENT])
+    await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_institution_has_user (tb_institution_id, tb_user_id, kind, active, deleted)
+      VALUES (4, 3, 'user', 'S', 'N'), (4, 2, 'user', 'S', 'N')`)
+    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_institution_has_interface (tb_institution_id, tb_interface_id, active, deleted)
+      VALUES (4, 10, 'S', 'N'), (4, 11, 'S', 'N')`)
+    check('D-GE3: o privilégio da matriz (cliente 2: orders V + FATURAR) NÃO vale na filial do mesmo schema', eq(await verbsOf(3, 4), []),
+      JSON.stringify(await verbsOf(3, 4)))
+    check('D-GE3: FATURAR na filial negado pela biblioteca (o fisco lê o mesmo veredito)',
+      (await accessVerdict(pool, who(3, 4), ['orders'], 'FATURAR')) === 'no-privilege')
+    check('D-GE3: o admin da matriz é só usuário na filial — sem concessão lá, nada', eq(await verbsOf(2, 4), []))
+    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id,
+      active, deleted) VALUES (3, 4, 10, 6, 'S', 'N')`)
+    check('D-GE3: a concessão dada NA filial vale só nela (VISUALIZAR) e a da matriz segue a dela',
+      eq(await verbsOf(3, 4), ['orders:VISUALIZAR']) && eq(await verbsOf(3, 2), ['orders:FATURAR', 'orders:VISUALIZAR']),
+      `${JSON.stringify(await verbsOf(3, 4))} / ${JSON.stringify(await verbsOf(3, 2))}`)
+    await conn.query(`UPDATE \`${CLIENT}\`.tb_user_has_privilege SET active = 'N' WHERE tb_user_id = 3 AND tb_institution_id = 4`)
+    check('D-GE3: revogar na filial não toca a matriz',
+      eq(await verbsOf(3, 4), []) && eq(await verbsOf(3, 2), ['orders:FATURAR', 'orders:VISUALIZAR']))
+    const [pk] = await conn.query<any[]>(`SELECT COLUMN_NAME c FROM information_schema.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tb_user_has_privilege' AND CONSTRAINT_NAME = 'PRIMARY' ORDER BY ORDINAL_POSITION`, [CLIENT])
+    check('D-GE3: chave primária (usuário, institution, interface, privilégio)',
+      eq(pk.map((r: any) => r.c), ['tb_user_id', 'tb_institution_id', 'tb_interface_id', 'tb_privilege_id']), JSON.stringify(pk))
+    await conn.query(`DELETE FROM \`${CLIENT}\`.tb_user_has_privilege WHERE tb_institution_id = 4`)
+    await conn.query(`DELETE FROM \`${CLIENT}\`.tb_institution_has_interface WHERE tb_institution_id = 4`)
+    await conn.query(`DELETE FROM \`${CENTRAL}\`.tb_institution_has_user WHERE tb_institution_id = 4`)
+    await conn.query(`DELETE FROM \`${CENTRAL}\`.tb_institution WHERE id = 4`)
+
+    // ── 7b. preenchimento da 076 sobre a tabela ANTIGA (a da 003, sem a institution) ─────────────────────────────────────────
+    await proveBackfill(conn)
+
     // revogação NA HORA (sem cache): inativar a concessão e reler
     await conn.query(`UPDATE \`${CLIENT}\`.tb_user_has_privilege SET active = 'N' WHERE tb_user_id = 3 AND tb_privilege_id = 5`)
     check('revogação na hora: a concessão inativada some na leitura seguinte',
@@ -198,11 +295,11 @@ async function main(): Promise<void> {
       VALUES (14, 'orders ', 'orders torta', 'T', 'Comercial', 'N')`)
     await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_interface_has_privilege (tb_interface_id, tb_privilege_id, active, deleted) VALUES (14, 5, 'S', 'N')`)
     await conn.query(`INSERT INTO \`${CLIENT}\`.tb_institution_has_interface (tb_institution_id, tb_interface_id, active, deleted) VALUES (2, 14, 'S', 'N')`)
-    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (11, 14, 5, 'S', 'N')`)
+    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (11, 2, 14, 5, 'S', 'N')`)
     // o 2º verbo 'FATURAR ' (outro id) registrado em orders e concedido NUNCA vale como o FATURAR
     await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_privilege (id, description, deleted) VALUES (15, 'FATURAR ', 'N')`)
     await conn.query(`INSERT INTO \`${CENTRAL}\`.tb_interface_has_privilege (tb_interface_id, tb_privilege_id, active, deleted) VALUES (10, 15, 'S', 'N')`)
-    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (11, 10, 15, 'S', 'N')`)
+    await conn.query(`INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (11, 2, 10, 15, 'S', 'N')`)
     const [padRaw] = await conn.query<any[]>(`SELECT COUNT(*) n FROM \`${CLIENT}\`.vw_user_access
       WHERE tb_user_id = 11 AND tb_institution_id = 2 AND interface_key = 'orders' AND privilege = 'FATURAR'`)
     check("PAD SPACE: a interface 'orders ' e o verbo 'FATURAR ' não dão FATURAR em 'orders' (SQL cru na view)", Number(padRaw[0].n) === 0,

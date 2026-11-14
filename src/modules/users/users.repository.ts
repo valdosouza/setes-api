@@ -265,7 +265,9 @@ export async function findInstitutionSchema(institutionId: number): Promise<stri
 // ---------------------------------------------------------------------
 // Privilégios de acesso (workflow ACL 2026-07-12): interfaces CONTRATADAS
 // pelo institution alvo × catálogo de privilégios da interface × concessão
-// ao usuário (tb_user_has_privilege no schema do cliente).
+// ao usuário (tb_user_has_privilege no schema do cliente). D-GE3 (migration
+// 076): a concessão é POR ESTABELECIMENTO — toda leitura e escrita leva a
+// institution alvo (a da matriz nunca vale na filial do mesmo schema).
 // ---------------------------------------------------------------------
 
 /** `excludedKeys` (D-PV5): interfaces que o cadastro de privilégios não oferece — a lista é do service. */
@@ -296,13 +298,14 @@ export async function listUserPrivileges(
          ON p.id = ihp.tb_privilege_id AND p.deleted = 'N'
        LEFT JOIN \`${s}\`.tb_user_has_privilege uhp
          ON uhp.tb_user_id = ?
+        AND uhp.tb_institution_id = ?
         AND uhp.tb_interface_id = i.id
         AND uhp.tb_privilege_id = p.id
         AND uhp.active = 'S' AND uhp.deleted = 'N'
       WHERE ihi.tb_institution_id = ? AND ihi.active = 'S' AND ihi.deleted = 'N'
         AND i.i18n_key NOT IN (?)
       ORDER BY i.description, p.id`,
-    [userId, institutionId, excludedKeys.length > 0 ? excludedKeys : ['']]
+    [userId, institutionId, institutionId, excludedKeys.length > 0 ? excludedKeys : ['']]
   )
 
   return groupByInterface(rows)
@@ -338,7 +341,7 @@ function groupByInterface(rows: any[]): UserInterfacePrivileges[] {
  * de privilégios delas e o que o usuário já tem. Só o SUPER vê e marca (o service decide quem chama).
  */
 export async function listDelegableSuperPrivileges(
-  schemaName: string, userId: number, keys: readonly string[]
+  schemaName: string, institutionId: number, userId: number, keys: readonly string[]
 ): Promise<UserInterfacePrivileges[]> {
   if (keys.length === 0) return []
   const s = assertSchema(schemaName)
@@ -357,11 +360,11 @@ export async function listDelegableSuperPrivileges(
        INNER JOIN setes_central.tb_privilege p
          ON p.id = ihp.tb_privilege_id AND p.deleted = 'N'
        LEFT JOIN \`${s}\`.tb_user_has_privilege uhp
-         ON uhp.tb_user_id = ? AND uhp.tb_interface_id = i.id AND uhp.tb_privilege_id = p.id
+         ON uhp.tb_user_id = ? AND uhp.tb_institution_id = ? AND uhp.tb_interface_id = i.id AND uhp.tb_privilege_id = p.id
         AND uhp.active = 'S' AND uhp.deleted = 'N'
       WHERE i.deleted = 'N' AND i.i18n_key IN (?)
       ORDER BY i.description, p.id`,
-    [userId, keys]
+    [userId, institutionId, keys]
   )
   return groupByInterface(rows)
 }
@@ -392,9 +395,9 @@ export async function listInterfaceCatalogPrivilegeIds(
   return rows.map(r => Number(r.id))
 }
 
-/** Sincroniza a concessão de UMA interface: concede a lista, revoga (soft) o resto. */
+/** Sincroniza a concessão de UMA interface NUM estabelecimento (D-GE3): concede a lista, revoga (soft) o resto — só daquela institution. */
 export async function setUserPrivileges(
-  schemaName: string, userId: number, interfaceId: number, privilegeIds: number[]
+  schemaName: string, institutionId: number, userId: number, interfaceId: number, privilegeIds: number[]
 ): Promise<void> {
   const s = assertSchema(schemaName)
   const conn = await pool.getConnection()
@@ -404,23 +407,23 @@ export async function setUserPrivileges(
     if (privilegeIds.length > 0) {
       await conn.query(
         `INSERT INTO \`${s}\`.tb_user_has_privilege
-           (tb_user_id, tb_interface_id, tb_privilege_id, active, created_at, updated_at, deleted)
-         VALUES ${privilegeIds.map(() => "(?, ?, ?, 'S', NOW(), NOW(), 'N')").join(', ')}
+           (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, created_at, updated_at, deleted)
+         VALUES ${privilegeIds.map(() => "(?, ?, ?, ?, 'S', NOW(), NOW(), 'N')").join(', ')}
          ON DUPLICATE KEY UPDATE active = 'S', deleted = 'N', updated_at = NOW()`,
-        privilegeIds.flatMap(privilegeId => [userId, interfaceId, privilegeId])
+        privilegeIds.flatMap(privilegeId => [userId, institutionId, interfaceId, privilegeId])
       )
       await conn.query(
         `UPDATE \`${s}\`.tb_user_has_privilege
          SET active = 'N', updated_at = NOW()
-         WHERE tb_user_id = ? AND tb_interface_id = ? AND tb_privilege_id NOT IN (?)`,
-        [userId, interfaceId, privilegeIds]
+         WHERE tb_user_id = ? AND tb_institution_id = ? AND tb_interface_id = ? AND tb_privilege_id NOT IN (?)`,
+        [userId, institutionId, interfaceId, privilegeIds]
       )
     } else {
       await conn.query(
         `UPDATE \`${s}\`.tb_user_has_privilege
          SET active = 'N', updated_at = NOW()
-         WHERE tb_user_id = ? AND tb_interface_id = ?`,
-        [userId, interfaceId]
+         WHERE tb_user_id = ? AND tb_institution_id = ? AND tb_interface_id = ?`,
+        [userId, institutionId, interfaceId]
       )
     }
 

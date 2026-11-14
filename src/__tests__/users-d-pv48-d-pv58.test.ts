@@ -88,7 +88,7 @@ describe('D-PV58 — todo verbo leva o VISUALIZAR (regra ÚNICA da escrita da co
     jest.spyOn(repo, 'listInterfaceCatalogPrivilegeIds').mockResolvedValue([1, 2, 3, 6])
     const set = jest.spyOn(repo, 'setUserPrivileges').mockResolvedValue()
     await saveUserPrivileges(adminScope, 9, 30, [3], null)
-    expect(set).toHaveBeenCalledWith('setes_acme', 9, 30, [3, 6])
+    expect(set).toHaveBeenCalledWith('setes_acme', 5, 9, 30, [3, 6])
   })
 })
 

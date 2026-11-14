@@ -460,7 +460,7 @@ describe('(5) corpo da marca', () => {
     nothingWritten()
     // [RESISTIU] o cadastro de privilégios do admin do cliente NÃO lista a tela delegável mesmo que ela estivesse no contrato dele
     await request(app).get('/api/users/30/privileges').set('Authorization', OTHER_ADMIN)
-    expect(userPrivilegesListParams?.[2]).toEqual(expect.arrayContaining(['users', 'establishment', 'institution-interfaces']))
+    expect(userPrivilegesListParams?.[3]).toEqual(expect.arrayContaining(['users', 'establishment', 'institution-interfaces']))
   })
 
   it('[RESISTIU] D-PV35: revogar ESTRUTURAL pela porta delegada → 409 INTERFACE_STRUCTURAL_LOCKED; conceder pode', async () => {

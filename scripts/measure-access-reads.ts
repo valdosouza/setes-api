@@ -28,7 +28,8 @@ const statementsOf = (sql: string): string[] =>
   sql.replace(/--[^\n]*\n/g, '\n').split(';').map(s => s.trim()).filter(s => s.length > 0)
 const centralSql = () => fs.readFileSync(path.join(SQL_DIR, '70_user_access_central_views.sql'), 'utf8')
   .replace(/`setes_central`/g, `\`${CENTRAL}\``)
-const clientSql = () => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql/075_user_access_views.sql'), 'utf8')
+const clientSql = () => ['075_user_access_views.sql', '076_user_privilege_by_institution.sql']
+  .map(f => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql', f), 'utf8')).join('\n')
   .replace(/`setes_central`/g, `\`${CENTRAL}\``)
 
 const SESSION_SQL = `SELECT profile, vendor FROM \`${CENTRAL}\`.vw_user_link
@@ -93,9 +94,9 @@ async function main(): Promise<void> {
       ifaces.map((r: any) => [2, r.id, 'S', 'N']))
     const grants: unknown[][] = []
     for (let u = 21; u <= 1000; u++) {
-      for (const pr of pairs as any[]) if ((u + pr.i * 7 + pr.p * 13) % 5 < 3) grants.push([u, pr.i, pr.p, 'S', 'N'])
+      for (const pr of pairs as any[]) if ((u + pr.i * 7 + pr.p * 13) % 5 < 3) grants.push([u, 2, pr.i, pr.p, 'S', 'N'])
     }
-    await bulk(conn, `INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted)`, grants)
+    await bulk(conn, `INSERT INTO \`${CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted)`, grants)
     await conn.query(`ANALYZE TABLE \`${CENTRAL}\`.tb_institution_has_user, \`${CENTRAL}\`.tb_interface_has_privilege,
       \`${CLIENT}\`.tb_user_has_privilege, \`${CLIENT}\`.tb_institution_has_interface`)
     console.log(`Volume: ${ifaces.length} interfaces · ${pairs.length} pares · ${insts.length} estabelecimentos · ${links.length} vínculos · `

@@ -56,7 +56,8 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     const central = fs.readFileSync(path.join(SQL_DIR, '70_user_access_central_views.sql'), 'utf8').replace(/`setes_central`/g, `\`${V_CENTRAL}\``)
     for (const st of statementsOf(central)) await conn.query(st)
     await conn.query(`USE \`${V_CLIENT}\``)
-    const client = fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql/075_user_access_views.sql'), 'utf8')
+    const client = ['075_user_access_views.sql', '076_user_privilege_by_institution.sql']
+      .map(f => fs.readFileSync(path.resolve(__dirname, '../src/migrations/sql', f), 'utf8')).join('\n')
       .replace(/`setes_central`/g, `\`${V_CENTRAL}\``)
     for (const st of statementsOf(client)) await conn.query(st)
 
@@ -127,7 +128,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     // sem par registrado em orders) e o FATURAR verdadeiro em 'orders ' (20) — nunca em orders
     for (const [u, i, p] of [[40, 10, 13], [40, 10, 14], [40, 10, 15], [40, 10, 16], [40, 10, 17], [40, 10, 19], [40, 10, 6],
       [41, 10, 18], [41, 20, 5], [41, 10, 6]]) {
-      await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (?, ?, ?, 'S', 'N')`, [u, i, p])
+      await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (?, 2, ?, ?, 'S', 'N')`, [u, i, p])
     }
 
     // (p) o verbo com espaço/Unicode/caixa NÃO vale como FATURAR
@@ -176,7 +177,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     // (g) delegável: admin da Setes (25) sem concessão → não alcança/não exerce; o super sim
     const vDelegAdmin = await accessVerdict(q, who(25, 1, V_CLIENT), ['institution-interfaces'], 'VISUALIZAR')
     check('(g) admin da Setes na delegável sem concessão → no-privilege (D-PV11 (b))', vDelegAdmin === 'no-privilege', vDelegAdmin)
-    await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (25, 51, 6, 'S', 'N')`)
+    await conn.query(`INSERT INTO \`${V_CLIENT}\`.tb_user_has_privilege (tb_user_id, tb_institution_id, tb_interface_id, tb_privilege_id, active, deleted) VALUES (25, 1, 51, 6, 'S', 'N')`)
     check("(g) concessão na 'institution-interfaces ' (espaço) não vale na delegável",
       (await accessVerdict(q, who(25, 1, V_CLIENT), ['institution-interfaces'], 'VISUALIZAR')) === 'no-privilege')
   } finally {
