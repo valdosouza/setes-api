@@ -52,7 +52,7 @@ describe('D-PV46 — a peça do reset do Super (dublê)', () => {
       if (/FROM setes_central\.tb_entity_has_mailing/.test(q) && /tb_mailing_group_id = 2/.test(q)) {   // D-EA20/D-EA23
         return [world.noLoginEmail ? [] : (world.emails ?? ['super7@probe.test']).map(email => ({ email }))]
       }
-      if (/UPDATE setes_central\.tb_user SET password = \?, password_set_at = \?, activation_key = NULL/.test(q)) {
+      if (/UPDATE setes_central\.tb_user SET password = \?, password_set_at = \?, password_author_role = 'O', activation_key = NULL/.test(q)) {
         world.user!.password = params[0]
         return [{ affectedRows: 1 }]
       }
@@ -71,7 +71,8 @@ describe('D-PV46 — a peça do reset do Super (dublê)', () => {
     expect(sql[1]).toMatch(/kind = 'super'/)
     expect(sql[2]).toMatch(/tb_entity_has_mailing/)                        // D-EA20: o e-mail de login conferido SOB a trava
     // D-EA7: o script define a senha pela MESMA peça — o instante T vai junto (as sessões anteriores do Super caem)
-    expect(sql[3]).toMatch(/UPDATE setes_central\.tb_user SET password = \?, password_set_at = \?, activation_key = NULL, updated_at = NOW\(\)/)
+    // D-UC19 (CONV.E2.P7): a senha do script do Super é de TERCEIRO — o papel do operador ('O') vai no MESMO comando
+    expect(sql[3]).toMatch(/UPDATE setes_central\.tb_user SET password = \?, password_set_at = \?, password_author_role = 'O', activation_key = NULL,\s+updated_at = NOW\(\)/)
   })
 
   it('D-EA23: o ato escolhe SOB a trava o 1º e-mail de login VÁLIDO (aparado) e o devolve; sem nenhum válido, recusa sem escrita', async () => {
