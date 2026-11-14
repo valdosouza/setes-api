@@ -107,7 +107,10 @@ export interface UserInstitutionGrant {
   schemaName:    string
   /** Perfil do usuário NESTA institution (vira o role do JWT). */
   kind:          string | null
+  /** 'S' = vínculo ativo OU convite aguardando aceite (D-UC16: o Super vê e mantém o convite ao salvar a lista). */
   granted:       'S' | 'N'
+  /** 'pending' = convite aguardando o login do titular (D-UC14/D-UC15); null nos demais. */
+  invite:        'pending' | null
 }
 
 /** Entrada do PUT de vínculos (sincroniza: concede a lista, revoga as demais). */

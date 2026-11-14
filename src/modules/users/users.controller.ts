@@ -6,13 +6,14 @@ import { assertClientRequired } from '@shared/field-config'
 import { isSuper } from '@shared/auth/roles'
 import { UserScope } from './users.interface'
 import {
-  userCreateDto, userUpdateDto, userInstitutionsDto, userPrivilegesDto,
+  userCreateDto, userUpdateDto, userInstitutionsDto, userPrivilegesDto, userInviteWithdrawDto,
 } from './users.dto'
 import {
   fetchUsers, fetchUser, createUser, editUser,
   fetchInstitutionLinks, saveInstitutionLinks,
   fetchUserPrivileges, saveUserPrivileges,
   userSearchCriteriaFor, fetchUserSearchCriteria, fetchInstitutionLookup,
+  withdrawUserInvite,
 } from './users.service'
 
 /** Escopo derivado do JWT: super opera qualquer institution; admin, a sua. */
@@ -159,5 +160,21 @@ export async function putInstitutions(req: Request, res: Response): Promise<void
     res.json({ ok: true })
   } catch (err) {
     handleError(res, err, 'users/:id/institutions PUT')
+  }
+}
+
+/** POST /api/users/:id/invite/withdraw — D-UC15 (CONV.E2.P2.T4): retira o convite ainda não aceito. */
+export async function withdrawInvite(req: Request, res: Response): Promise<void> {
+  const id = parseId(req, res)
+  if (id === null) return
+  const body = parseBody(userInviteWithdrawDto, req, res)
+  if (body === null) return
+  try {
+    const scope = scopeOf(req)
+    await withdrawUserInvite(scope, id, body.institutionId ?? null)
+    logger.info('Convite retirado', { userId: id, institutionId: body.institutionId ?? scope.institutionId, byUserId: scope.userId })
+    res.json({ ok: true })
+  } catch (err) {
+    handleError(res, err, 'users/:id/invite/withdraw POST')
   }
 }

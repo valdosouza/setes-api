@@ -301,9 +301,10 @@ describe('D-PV11 — tela do Super delegável: só o Super libera, e só para us
 describe('saveInstitutionLinks (exclusivo do super)', () => {
   it('super sincroniza vínculos com kind', async () => {
     const links = [{ institutionId: 1, kind: 'super' }]
+    mockSetLinks.mockResolvedValue([])
     await saveInstitutionLinks(superScope, 9, links)
 
-    expect(mockSetLinks).toHaveBeenCalledWith(9, links)
+    expect(mockSetLinks).toHaveBeenCalledWith(9, links, 900)   // D-UC16: o Super é o convidante
   })
 
   it('admin do cliente recebe 403 (vínculo dele é implícito no POST)', async () => {

@@ -127,6 +127,25 @@ router.put('/:id/institutions', controller.putInstitutions)
 
 /**
  * @swagger
+ * /api/users/{id}/invite/withdraw:
+ *   post:
+ *     summary: Retira o convite ainda não aceito (D-UC15) — admin no próprio estabelecimento; super informa institutionId
+ *     tags: [Users]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               institutionId: { type: integer, nullable: true }
+ *     responses:
+ *       200: { description: Convite retirado — o login do titular não o aceita mais }
+ *       409: { description: "INVITE_NOT_PENDING: não há convite aguardando aceite" }
+ */
+router.post('/:id/invite/withdraw', controller.withdrawInvite)
+
+/**
+ * @swagger
  * /api/users/{id}/privileges:
  *   get:
  *     summary: Interfaces contratadas do institution alvo × privilégios do catálogo × concessão ao usuário (ACL — workflow 2026-07-12)

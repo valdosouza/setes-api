@@ -14,7 +14,7 @@ import {
 import {
   listUsers, getUser, findLoginEmailOwner, insertUserCascade,
   updateUserCascade, userExists, userLinkedToInstitution,
-  listInstitutionLinks, setInstitutionLinks, inviteToInstitution,
+  listInstitutionLinks, setInstitutionLinks, inviteToInstitution, withdrawInvite,
   findInstitutionSchema, listUserPrivileges, setUserPrivileges,
   listInterfaceCatalogPrivilegeIds, findInterfaceKey, listDelegableSuperPrivileges, listActiveUserLinks,
   USER_SEARCH_CRITERIA, listInstitutionLookup,
@@ -248,7 +248,24 @@ export async function saveInstitutionLinks(
 ): Promise<void> {
   assertSuper(scope)
   if (!(await userExists(userId))) throw new HttpError(404, 'Usuário não encontrado')
-  await setInstitutionLinks(userId, links)
+  const invited = await setInstitutionLinks(userId, links, scope.userId)
+  for (const institutionId of invited) notifyInvite(userId, institutionId)
+}
+
+/**
+ * Retirar o convite ainda não aceito (D-UC15 — `CONV.E2.P2.T4`): o admin retira no PRÓPRIO estabelecimento (alvo forçado ao JWT);
+ * o Super informa o estabelecimento. Só convite pendente; senão 409 INVITE_NOT_PENDING (a mesma resposta para usuário de outro
+ * cliente — nada se revela).
+ */
+export async function withdrawUserInvite(
+  scope: UserScope, userId: number, institutionId: number | null
+): Promise<void> {
+  const target = scopeInstitution(scope, institutionId)
+  if (target === null) {
+    throw new HttpError(400, 'Informe o estabelecimento (institutionId) do convite',
+      [{ field: 'institutionId', message: 'Obrigatório para o super' }], ErrorCodes.VALIDATION_FAILED)
+  }
+  await withdrawInvite(userId, target)
 }
 
 // ---------------------------------------------------------------------

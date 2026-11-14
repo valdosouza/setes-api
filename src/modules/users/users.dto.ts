@@ -44,6 +44,11 @@ export const userUpdateDto = z.object({
   institutionId: z.number().int().positive().nullable().optional(),
 }).superRefine(refinePassword('password', 'email'))   // D-EA5/D-EA16 (o e-mail do PUT é o atual — D-UC1)
 
+// POST /:id/invite/withdraw — D-UC15: o alvo é o estabelecimento (só o super informa; o admin tem o alvo forçado ao JWT).
+export const userInviteWithdrawDto = z.object({
+  institutionId: z.number().int().positive().nullable().optional(),
+})
+
 // PUT /:id/institutions — vínculos com kind (perfil por institution).
 export const userInstitutionsDto = z.object({
   links: z.array(z.object({

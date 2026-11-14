@@ -245,13 +245,15 @@ export async function listInstitutionLinks(
             e.nick_trade AS name,
             i.schema_name AS schemaName,
             ihu.kind,
-            CASE WHEN ihu.tb_user_id IS NOT NULL THEN 'S' ELSE 'N' END AS granted
+            CASE WHEN ihu.tb_user_id IS NOT NULL THEN 'S' ELSE 'N' END AS granted,
+            CASE WHEN ihu.tb_user_id IS NOT NULL AND ${pendingInviteSql('ihu.')} THEN 'pending' END AS invite
      FROM setes_central.tb_institution i
        INNER JOIN setes_central.tb_entity e ON e.id = i.id
        LEFT JOIN setes_central.tb_institution_has_user ihu
          ON ihu.tb_institution_id = i.id
         AND ihu.tb_user_id = ?
-        AND ihu.active = 'S' AND ihu.deleted = 'N'
+        AND ihu.deleted = 'N'
+        AND (ihu.active = 'S' OR ${pendingInviteSql('ihu.')})
      WHERE i.deleted = 'N'
      ORDER BY name`,
     [userId]
@@ -443,39 +445,89 @@ export async function setUserPrivileges(
   }
 }
 
-/** Sincroniza vínculos: concede a lista (com kind), revoga (soft) as demais. */
+/**
+ * Sincroniza vínculos (ferramenta do Super para a credencial inteira): concede a lista (com kind), revoga (soft) as demais.
+ * D-UC16 (CONV.E2.P2): o vínculo NOVO de uma credencial que já existe nasce CONVITE pendente (inativo, Super como convidante) e só
+ * vale depois do login do titular — nunca ativo direto. Por par, com as linhas do usuário travadas:
+ *   na lista, sem vínculo                         → convite pendente
+ *   na lista, convite pendente                    → só o perfil muda (continua pendente — o CHECK recusa ativá-lo, A-UC8)
+ *   na lista, convite retirado ou excluído nunca aceito → convite renovado (D-UC15)
+ *   na lista, aceito ou sem convite (anterior/sync) → como antes: perfil, ativo (consentimento já dado — A-UC8)
+ *   fora da lista, convite pendente               → RETIRADO (senão o login do titular o aceitaria depois)
+ *   fora da lista, os demais                      → inativo, como antes
+ * Devolve os estabelecimentos que receberam convite NOVO ou renovado (o aviso por e-mail sai depois do commit).
+ */
 export async function setInstitutionLinks(
-  userId: number, links: UserInstitutionLink[]
-): Promise<void> {
+  userId: number, links: UserInstitutionLink[], inviterId: number | null
+): Promise<number[]> {
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
+    const [rows] = await conn.query<any[]>(
+      `SELECT tb_institution_id AS institutionId, deleted, ${INVITE_STATE_SQL('')} AS invite
+         FROM setes_central.tb_institution_has_user
+        WHERE tb_user_id = ?
+        FOR UPDATE`,
+      [userId]
+    )
+    const current = new Map<number, { deleted: boolean; invite: LinkInviteState }>(
+      rows.map((r: any) => [Number(r.institutionId), { deleted: r.deleted === 'S', invite: (r.invite ?? null) as LinkInviteState }]))
+    const invited: number[] = []
 
-    if (links.length > 0) {
-      const values = links.map(l => [l.institutionId, userId, l.kind])
-      await conn.query(
-        `INSERT INTO setes_central.tb_institution_has_user
-           (tb_institution_id, tb_user_id, kind, active, created_at, updated_at, deleted)
-         VALUES ${links.map(() => "(?, ?, ?, 'S', NOW(), NOW(), 'N')").join(', ')}
-         ON DUPLICATE KEY UPDATE
-           kind = VALUES(kind), active = 'S', deleted = 'N', updated_at = NOW()`,
-        values.flat()
-      )
-      await conn.query(
-        `UPDATE setes_central.tb_institution_has_user
-         SET active = 'N', updated_at = NOW()
-         WHERE tb_user_id = ? AND tb_institution_id NOT IN (?)`,
-        [userId, links.map(l => l.institutionId)]
-      )
-    } else {
-      await conn.query(
-        `UPDATE setes_central.tb_institution_has_user
-         SET active = 'N', updated_at = NOW() WHERE tb_user_id = ?`,
-        [userId]
-      )
+    for (const l of links) {
+      const row = current.get(l.institutionId)
+      if (!row) {
+        await conn.query(
+          `INSERT INTO setes_central.tb_institution_has_user
+             (tb_institution_id, tb_user_id, kind, active, created_at, updated_at, deleted, tb_user_inviter_id, invited_at)
+           VALUES (?, ?, ?, 'N', NOW(), NOW(), 'N', ?, NOW())`,
+          [l.institutionId, userId, l.kind, inviterId]
+        )
+        invited.push(l.institutionId)
+      } else if (row.invite === 'pending' && !row.deleted) {
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user SET kind = ?, updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ?`,
+          [l.kind, l.institutionId, userId]
+        )
+      } else if (row.invite === 'withdrawn' || (row.deleted && row.invite !== 'accepted')) {
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user
+              SET kind = ?, active = 'N', deleted = 'N', tb_user_inviter_id = ?, invited_at = NOW(),
+                  accepted_at = NULL, invite_withdrawn_at = NULL, updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ?`,
+          [l.kind, inviterId, l.institutionId, userId]
+        )
+        invited.push(l.institutionId)
+      } else {
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user SET kind = ?, active = 'S', deleted = 'N', updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ?`,
+          [l.kind, l.institutionId, userId]
+        )
+      }
+    }
+
+    const kept = new Set(links.map(l => l.institutionId))
+    for (const [institutionId, row] of current) {
+      if (kept.has(institutionId)) continue
+      if (row.invite === 'pending' && !row.deleted) {
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user SET invite_withdrawn_at = NOW(), updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ?`,
+          [institutionId, userId]
+        )
+      } else {
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user SET active = 'N', updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ?`,
+          [institutionId, userId]
+        )
+      }
     }
 
     await conn.commit()
+    return invited
   } catch (err) {
     await conn.rollback()
     throw err

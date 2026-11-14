@@ -460,13 +460,13 @@ const hasEnv = fs.existsSync(path.join(REPO, '.env'))
     await c2.query('SET SESSION innodb_lock_wait_timeout = 20')
     mockPool.getConnection.mockReset().mockImplementationOnce(async () => probeConn(c2))
     const hash = await hashInitialPassword(generateInitialPassword())
-    let concurrent: Promise<void> | undefined
+    let concurrent: Promise<unknown> | undefined
     let finishedWhileOpen = false
     try {
       await c1.beginTransaction()
       const verdict = await resetSuperPasswordTx(probeConn(c1, async () => {
         let done = false
-        concurrent = setInstitutionLinks(userId, links as any).finally(() => { done = true })
+        concurrent = setInstitutionLinks(userId, links as any, null).finally(() => { done = true })
         await sleep(800)
         finishedWhileOpen = done                                              // o Super concorrente gravou com o ato ainda aberto?
       }), userId, hash)
@@ -487,6 +487,12 @@ const hasEnv = fs.existsSync(path.join(REPO, '.env'))
       await admin.query(`CREATE TABLE \`${PROBE}\`.\`${t}\` LIKE setes_central.\`${t}\``)
     }
     await admin.query(`ALTER TABLE \`${PROBE}\`.tb_user ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
+    // CONV.E2.P2: o `setInstitutionLinks` lê e grava as colunas do convite (script central 75) — a cópia as recebe como o 75 as cria
+    await admin.query(`ALTER TABLE \`${PROBE}\`.tb_institution_has_user
+                         ADD COLUMN IF NOT EXISTS tb_user_inviter_id int(11) NULL DEFAULT NULL,
+                         ADD COLUMN IF NOT EXISTS invited_at datetime NULL DEFAULT NULL,
+                         ADD COLUMN IF NOT EXISTS accepted_at datetime NULL DEFAULT NULL,
+                         ADD COLUMN IF NOT EXISTS invite_withdrawn_at datetime NULL DEFAULT NULL`)
     // a FK REAL de setes_central (fk_ihu_to_user) — o CREATE TABLE … LIKE não a copia, e é ELA que serializa o INSERT do vínculo
     await admin.query(`ALTER TABLE \`${PROBE}\`.tb_institution_has_user
                          ADD CONSTRAINT fk_probe_ihu_user FOREIGN KEY (tb_user_id) REFERENCES \`${PROBE}\`.tb_user (id)`)
