@@ -37,6 +37,27 @@ export async function findUserByEmail(email: string): Promise<AuthUser | null> {
   return { id: Number(rows[0].id), password: rows[0].password, active: rows[0].active, loginEmail: String(rows[0].loginEmail ?? '') }
 }
 
+/**
+ * A conta do titular pelo ID (CONV.E2.P5 — "minha senha"): o titular vem do TOKEN, nunca do corpo. A mesma forma do `findUserByEmail`
+ * (o e-mail é o de LOGIN gravado — é para ele que o código vai).
+ */
+export async function findAuthUserById(userId: number): Promise<AuthUser | null> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT u.id, u.password, u.active, m.email AS loginEmail
+     FROM setes_central.tb_user u
+       INNER JOIN setes_central.tb_entity_has_mailing ehm ON (ehm.tb_entity_id = u.id)
+       INNER JOIN setes_central.tb_mailing m ON (m.id = ehm.tb_mailing_id)
+     WHERE u.id = ?
+       AND ehm.tb_mailing_group_id = 2
+       AND ehm.deleted = 'N' AND m.deleted = 'N' AND u.deleted = 'N'
+     ORDER BY m.id
+     LIMIT 1`,
+    [userId]
+  )
+  if (!rows.length) return null
+  return { id: Number(rows[0].id), password: rows[0].password, active: rows[0].active, loginEmail: String(rows[0].loginEmail ?? '') }
+}
+
 // Institutions ativas do usuário (Passo 2 do fluxo de login). Costura A1 da auth-api (D-AU3/D-AU6, 2026-10-31): o vínculo VIVO e o
 // PERFIL saem da `setes_central.vw_user_link` — o ÚNICO intérprete de `tb_institution_has_user.kind` ('super' só na Setes; qualquer
 // outro valor que não admin = 'user'), o MESMO que a sessão de cada requisição relê (D-UC9). O `resolveRole` do login morreu.

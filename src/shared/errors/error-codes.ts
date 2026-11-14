@@ -167,6 +167,10 @@ export const ErrorCodes = {
   INVITE_PENDING: 'INVITE_PENDING',
   INVITE_NOT_PENDING: 'INVITE_NOT_PENDING',
   USER_NAME_MANAGED_BY_SUPER: 'USER_NAME_MANAGED_BY_SUPER',
+  // CONV.E2.P5 ("minha senha" — D-UC7/D-UC8/D-UC18): rota LOGADA — nunca 401 (o app leria "sessão caiu")
+  MY_PASSWORD_REFUSED: 'MY_PASSWORD_REFUSED',
+  MY_PASSWORD_CODE_INVALID: 'MY_PASSWORD_CODE_INVALID',
+  MY_PASSWORD_CODE_CAPPED: 'MY_PASSWORD_CODE_CAPPED',
   // D-PV48 (2026-10-27): depois de criada a credencial, só o titular troca a senha (recuperação)
   PASSWORD_OWNER_ONLY: 'PASSWORD_OWNER_ONLY',
   // D-EA5 (Onda 3 do endurecer): a troca pelo código recusa a senha igual à atual — julgada SÓ depois do código certo (o código não é gasto)
@@ -372,6 +376,9 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   INVITE_PENDING: 'Usuário aguardando aceite — só o login do titular ativa o vínculo; enquanto isso, só retirar o convite (A-UC8/D-UC15)',
   INVITE_NOT_PENDING: 'Não há convite aguardando aceite neste estabelecimento — só convite nunca aceito é retirado (D-UC15)',
   USER_NAME_MANAGED_BY_SUPER: 'O nome é da pessoa — com vínculo ativo em outro estabelecimento, só o Super o altera (A-UC7)',
+  MY_PASSWORD_REFUSED: 'Minha senha: senha atual incorreta ou conta temporariamente bloqueada — conta como falha de login (D-UC18)',
+  MY_PASSWORD_CODE_INVALID: 'Minha senha: código inválido, vencido ou esgotado (a mesma peça da recuperação — D-UC7)',
+  MY_PASSWORD_CODE_CAPPED: 'Minha senha: limite de códigos por conta atingido — peça de novo mais tarde (o mesmo teto da recuperação)',
   PASSWORD_SAME_AS_CURRENT: 'A nova senha é igual à atual — escolha outra (D-EA5); o código de recuperação segue valendo',
   PASSWORD_OWNER_ONLY: 'Depois de criada a credencial, só o próprio usuário troca a senha — pelo "Esqueci minha senha" (D-PV48); o cadastro define a senha uma vez só, na criação',
   OWN_ESTABLISHMENT_READ_ONLY: 'A entidade é o próprio estabelecimento: a cadeia (razão social, IE/IM, endereços, contatos) e a tributação só se editam em Meu Estabelecimento (D-PV32) — os campos do papel seguem editáveis',

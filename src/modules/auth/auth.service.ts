@@ -7,7 +7,7 @@ import {
   readCurrentPasswordReset, recordFailedPasswordResetAttempt, markPasswordResetUsed, updatePassword, rehashPassword,
   assertPasswordResetSchema, hasRecentPasswordResetNotice, insertPasswordResetNotice, PasswordResetNoticeKind,
   countLoginFailuresInWindow, insertLoginFailure, hasRecentLoginBlockNotice, insertLoginBlockNotice, assertLoginLockSchema,
-  LOGIN_MAX_FAILURES, LOGIN_FAILURE_WINDOW_MINUTES, acceptPendingInvites,
+  LOGIN_MAX_FAILURES, LOGIN_FAILURE_WINDOW_MINUTES, acceptPendingInvites, findAuthUserById,
 } from './auth.repository'
 import { recordLoginRefusal } from './login-watch'
 import pool from '@shared/db/connection'
@@ -851,7 +851,17 @@ export async function changePassword(email: string, code: string, newPassword: s
 async function changePasswordByCode(email: string, code: string, newPassword: string): Promise<void> {
   const user = await findUserByEmail(email)
   if (!user || user.active !== 'S') throw new HttpError(401, INVALID_PASSWORD_RESET_CODE)
+  return changePasswordWithCode(user, code, newPassword, 'auth/change-password', () => new HttpError(401, INVALID_PASSWORD_RESET_CODE))
+}
 
+/**
+ * O núcleo da troca por código (a peça endurecida — D-PV13/Q-PV38, D-EA5, D-EA9, D-EA37, D-RS4), o MESMO para a recuperação pública e
+ * para a "minha senha" do titular logado (D-UC7: "a MESMA peça de código por e-mail também confirma a troca pelo titular LOGADO").
+ * `refuse` dá a recusa de cada porta: a pública responde a 401 neutra; a logada, um 422 (401 ali diria ao app "a sessão caiu").
+ */
+async function changePasswordWithCode(
+  user: AuthUser, code: string, newPassword: string, where: string, refuse: () => HttpError,
+): Promise<void> {
   // D-EA46 (Valdo 2026-11-07, "(a) conferir"): sem código ABERTO, no prazo e não esgotado, a recusa sai SEM calcular — leitura sem trava
   // (autocommit), só para decidir se vale o custo; o julgamento de verdade segue sob a trava. Nada é gravado aqui (none/used/expired/
   // exhausted nunca contam erro — a mesma regra do julgamento). O piso de 700 ms (D-EA43) esconde a diferença de tempo. Fecha o ADV-O4-03.
@@ -859,12 +869,12 @@ async function changePasswordByCode(email: string, code: string, newPassword: st
   try {
     open = await readCurrentPasswordReset(pool as unknown as PoolConnection, user.id, PASSWORD_RESET_TTL_MINUTES)
   } catch (err) {
-    alarmNeutral('auth/change-password', user.id, err)
-    throw new HttpError(401, INVALID_PASSWORD_RESET_CODE)
+    alarmNeutral(where, user.id, err)
+    throw refuse()
   }
   if (!open || !open.open || !open.fresh || open.failedAttempts >= PASSWORD_RESET_MAX_FAILED_ATTEMPTS) {
     if (open?.open && open.fresh) logger.warn('Troca de senha por código recusada', { userId: user.id, verdict: 'exhausted' })
-    throw new HttpError(401, INVALID_PASSWORD_RESET_CODE)
+    throw refuse()
   }
 
   // D-EA9: os DOIS scrypt (o hash da nova e o "igual à atual") FORA da trava e em paralelo — custo de 2 cálculos por tentativa com código
@@ -877,17 +887,17 @@ async function changePasswordByCode(email: string, code: string, newPassword: st
     ])
   } catch (err) {
     // gate socrático da Onda 4 (MEDIUM): falha do scrypt só na conta existente — a MESMA 401 neutra, com alarme (nunca 500)
-    alarmNeutral('auth/change-password (hash da senha)', user.id, err)
-    throw new HttpError(401, INVALID_PASSWORD_RESET_CODE)
+    alarmNeutral(`${where} (hash da senha)`, user.id, err)
+    throw refuse()
   }
   const preSame: SameAsCurrentPrecheck = { checkedHash: user.password, same: sameNow.ok }
   let outcome: ConsumeOutcome
   try {
-    outcome = await inPasswordResetTx('auth/change-password', user.id,
+    outcome = await inPasswordResetTx(where, user.id,
       conn => judgePasswordResetCode(conn, user, code, newHash, newPassword, preSame))
   } catch (err) {
-    alarmNeutral('auth/change-password', user.id, err)
-    throw new HttpError(401, INVALID_PASSWORD_RESET_CODE)
+    alarmNeutral(where, user.id, err)
+    throw refuse()
   }
   if (outcome.verdict === 'changed') return
   if (outcome.verdict === 'same-as-current') {
@@ -903,6 +913,141 @@ async function changePasswordByCode(email: string, code: string, newPassword: st
   }
   // D-RS4: esta errada ESGOTOU o código e a vaga do aviso foi tomada (COMMIT feito) — o e-mail ao dono sai em SEGUNDO PLANO: a
   // resposta (a mesma 401, dentro do piso) não espera o SMTP, senão o tempo diria que a conta existe
-  if (outcome.notice) runInBackground('auth/change-password', user.id, () => sendOwnerNotice(user, outcome.notice!))
-  throw new HttpError(401, INVALID_PASSWORD_RESET_CODE)
+  if (outcome.notice) runInBackground(where, user.id, () => sendOwnerNotice(user, outcome.notice!))
+  throw refuse()
+}
+
+// ---------------------------------------------------------------------
+// "MINHA SENHA" — o titular LOGADO troca a própria senha (setes-api:CONV.E2.P5 — D-UC7, D-UC8, D-UC18, D-EA5, D-EA7).
+// Dois passos, o titular SEMPRE do token: (1) a senha ATUAL confere sob a trava da credencial pela MESMA conferência do login
+// (`judgeLoginAttempt`) — errada CONTA como falha de login na janela da D-EA2 (D-UC18), com o aviso de bloqueio da D-EA3 — e, certa, a
+// MESMA peça da recuperação emite o código (teto por conta, aviso ao dono no teto) na MESMA transação; (2) o código e a senha nova pelo
+// MESMO núcleo da troca por código; `updatePassword` grava `password_set_at` e derruba as sessões abertas antes (D-EA7), a do próprio
+// titular inclusive. Rota logada: as recusas são 422/429 com `code` próprio, nunca 401 (o app leria "a sessão caiu").
+// ---------------------------------------------------------------------
+
+export const MY_PASSWORD_CODE_SUBJECT = 'Setes — código para trocar a sua senha'
+const MY_PASSWORD_REFUSED_MESSAGE = 'Senha atual incorreta. Depois de várias tentativas a conta fica bloqueada por alguns minutos.'
+const MY_PASSWORD_CODE_INVALID_MESSAGE = 'Código inválido ou expirado'
+
+function myPasswordRefused(userId: number, reason: string): HttpError {
+  logger.warn('Minha senha: pedido do código recusado (D-UC18)', { userId, reason, at: new Date().toISOString() })
+  return new HttpError(422, MY_PASSWORD_REFUSED_MESSAGE, [{ field: 'currentPassword', message: MY_PASSWORD_REFUSED_MESSAGE }],
+    ErrorCodes.MY_PASSWORD_REFUSED)
+}
+
+type MyCodeTx =
+  | { kind: 'judged'; judgement: LoginJudgement }
+  | { kind: 'inactive' }
+  | { kind: 'issued' } | { kind: 'capped'; notice?: PasswordResetNoticeKind }
+
+/** Passo 1 da "minha senha": confere a senha atual (conta como login — D-UC18) e emite o código ao e-mail de login gravado. */
+export async function requestMyPasswordCode(userId: number, currentPassword: string): Promise<void> {
+  const user = await findAuthUserById(userId)
+  if (!user || user.active !== 'S' || !user.password) throw myPasswordRefused(userId, 'conta sem credencial ativa')
+  // o mesmo pré-filtro do login: conta bloqueada nem confere a senha (o scrypt não amplifica o ataque)
+  let failures: number
+  try {
+    failures = await countLoginFailuresInWindow(user.id)
+  } catch (err) {
+    alarmNeutral('auth/my-password/code', user.id, err)
+    throw myPasswordRefused(user.id, 'falha interna')
+  }
+  if (failures >= LOGIN_MAX_FAILURES) throw myPasswordRefused(user.id, 'bloqueado')
+
+  const code = String(randomInt(100000, 1000000))
+  let current: AuthUser = user
+  let outcome: MyCodeTx | undefined
+  for (let round = 1; round <= LOGIN_STALE_ROUNDS && !outcome; round++) {
+    let pre: PasswordCheck
+    try {
+      pre = await checkStoredPassword('auth/my-password/code', current.id, currentPassword, current.password)
+    } catch (err) {
+      alarmNeutral('auth/my-password/code (hash da senha)', current.id, err)
+      throw myPasswordRefused(current.id, 'falha interna')
+    }
+    let tx: MyCodeTx
+    try {
+      tx = await inPasswordResetTx('auth/my-password/code', current.id, async conn => {
+        const judgement = await judgeLoginAttempt(conn, current, currentPassword, pre, null, { staleIsRetry: true })
+        if (judgement.verdict !== 'right') return { kind: 'judged', judgement } as MyCodeTx
+        if (judgement.active !== 'S') return { kind: 'inactive' } as MyCodeTx
+        const issued = await issuePasswordResetCode(conn, current, code)
+        if (issued.verdict === 'issued') return { kind: 'issued' } as MyCodeTx
+        if (issued.verdict === 'capped') return { kind: 'capped', notice: issued.notice } as MyCodeTx
+        return { kind: 'inactive' } as MyCodeTx
+      })
+    } catch (err) {
+      alarmNeutral('auth/my-password/code', current.id, err)
+      throw myPasswordRefused(current.id, isLockWaitTimeout(err) ? 'contenção' : 'falha interna')
+    }
+    if (tx.kind === 'judged' && tx.judgement.verdict === 'stale') {
+      current = { ...current, password: tx.judgement.lockedHash ?? null }
+      continue
+    }
+    outcome = tx
+  }
+  if (!outcome) throw myPasswordRefused(user.id, 'contenção')
+
+  if (outcome.kind === 'issued') {
+    runInBackground('auth/my-password/code', user.id, () => sendMyPasswordCodeMail(user.loginEmail, code, user.id))
+    return
+  }
+  if (outcome.kind === 'capped') {
+    logger.warn('Minha senha: pedido do código no teto', { userId: user.id, ownerNotice: outcome.notice ?? 'já avisado nesta hora' })
+    if (outcome.notice) runInBackground('auth/my-password/code', user.id, () => sendOwnerNotice(user, outcome!.notice as PasswordResetNoticeKind))
+    throw new HttpError(429, 'Muitos códigos pedidos para esta conta — peça de novo mais tarde', [], ErrorCodes.MY_PASSWORD_CODE_CAPPED)
+  }
+  if (outcome.kind === 'inactive') throw myPasswordRefused(user.id, 'inativo')
+  const { judgement } = outcome
+  if (judgement.verdict === 'wrong') {
+    recordLoginRefusal(user.loginEmail)                                  // D-UC18: entra também na conta do alarme global (D-EA4)
+    if (judgement.notice) runInBackground('auth/my-password/code', user.id, () => sendLoginBlockNotice(user))
+    throw myPasswordRefused(user.id, 'senha errada')
+  }
+  throw myPasswordRefused(user.id, judgement.verdict === 'blocked' ? 'bloqueado' : judgement.verdict)
+}
+
+/** Passo 2 da "minha senha": o código e a senha nova, pelo MESMO núcleo da troca por código; derruba as sessões de antes (D-EA7). */
+export async function changeMyPassword(userId: number, code: string, newPassword: string): Promise<void> {
+  const user = await findAuthUserById(userId)
+  const invalid = () => new HttpError(422, MY_PASSWORD_CODE_INVALID_MESSAGE, [{ field: 'code', message: MY_PASSWORD_CODE_INVALID_MESSAGE }],
+    ErrorCodes.MY_PASSWORD_CODE_INVALID)
+  if (!user || user.active !== 'S') throw invalid()
+  // D-EA5/D-EA16: a política antes do código, com o e-mail de LOGIN gravado (a "igual à atual" fica no julgamento, depois do código certo)
+  const problem = passwordProblems(newPassword, user.loginEmail)[0]
+  if (problem) {
+    throw new HttpError(400, PASSWORD_PROBLEM_MESSAGES[problem], [{ field: 'newPassword', message: PASSWORD_PROBLEM_MESSAGES[problem] }],
+      ErrorCodes.VALIDATION_FAILED)
+  }
+  await changePasswordWithCode(user, code, newPassword, 'auth/my-password', invalid)
+  logger.info('Minha senha: senha trocada pelo titular — sessões anteriores derrubadas (D-EA7)', { userId })
+}
+
+async function sendMyPasswordCodeMail(email: string, code: string, userId: number): Promise<void> {
+  const configured = isMailerConfigured()
+  let delivered = false
+  try {
+    await sendMail({
+      to: email,
+      subject: MY_PASSWORD_CODE_SUBJECT,
+      text: `Seu código para trocar a senha é ${code} (válido por 15 minutos). Digite-o na tela "Minha senha" do aplicativo. `
+        + 'Se não foi você que pediu, alguém está usando a sua sessão: troque a sua senha pelo "Esqueci minha senha".',
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto">
+          <h2 style="color:#1B3A5F">Trocar a sua senha</h2>
+          <p>Use o código abaixo na tela <strong>Minha senha</strong> do aplicativo. Ele é válido por <strong>15 minutos</strong>.</p>
+          <p style="font-size:32px;font-weight:bold;letter-spacing:8px;color:#2E6DA4;text-align:center">${code}</p>
+          <p style="color:#8793B2;font-size:12px">Se não foi você que pediu, alguém está usando a sua sessão: troque a sua senha pelo
+             "Esqueci minha senha".</p>
+        </div>`,
+    })
+    delivered = configured
+  } catch (err) {
+    logger.error('Falha no envio do código da minha senha', { userId, email: maskEmail(email), ...mailErrorForLog(err) })
+  }
+  // D-RS5: em dev sem SMTP (ou com falha) o código vai ao LOG; em produção NUNCA
+  if (!delivered && !isProduction()) {
+    logger.info('Código da minha senha (modo dev, SMTP ausente ou com falha)', { userId, email: maskEmail(email), code })
+  }
 }

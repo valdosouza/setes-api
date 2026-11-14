@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express'
-import { login, selectInstitution, switchInstitution, recoveryPassword, changePassword } from './auth.service'
+import {
+  login, selectInstitution, switchInstitution, recoveryPassword, changePassword, requestMyPasswordCode, changeMyPassword,
+} from './auth.service'
 import { authMiddleware } from '@gateway/auth.middleware'
 import { perEmailRateLimit } from '@gateway/rate-limit.middleware'
 import { bodyText } from '@shared/auth/login-email'
@@ -382,6 +384,81 @@ router.post('/switch-institution', authMiddleware, async (req: Request, res: Res
     res.json({ ok: true, token: issued.token, context: issued.context })
   } catch (err) {
     fail(res, err, 'switch-institution')
+  }
+})
+
+/**
+ * @swagger
+ * /auth/my-password/code:
+ *   post:
+ *     summary: Minha senha — passo 1 — confere a senha atual e envia o código ao e-mail de login (D-UC7/D-UC8/D-UC18)
+ *     description: O titular vem do token. A senha atual errada conta como falha de login (10 em 15 min bloqueiam — D-EA2).
+ *     tags: [Auth]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               currentPassword: { type: string }
+ *     responses:
+ *       202: { description: Código enviado ao e-mail de login }
+ *       400: { description: currentPassword ausente }
+ *       422: { description: "MY_PASSWORD_REFUSED: senha atual incorreta ou conta temporariamente bloqueada" }
+ *       429: { description: "MY_PASSWORD_CODE_CAPPED: teto de códigos da conta (o mesmo da recuperação)" }
+ */
+router.post('/my-password/code', authMiddleware, async (req: Request, res: Response) => {
+  const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : ''
+  if (!currentPassword) {
+    res.status(400).json({ error: 'O campo "currentPassword" é obrigatório' })
+    return
+  }
+  try {
+    await requestMyPasswordCode(req.institution!.userId, currentPassword)
+    res.status(202).json({ ok: true })
+  } catch (err) {
+    fail(res, err, 'my-password/code')
+  }
+})
+
+/**
+ * @swagger
+ * /auth/my-password:
+ *   post:
+ *     summary: Minha senha — passo 2 — troca a senha pelo código (a mesma peça da recuperação); derruba as sessões abertas (D-EA7)
+ *     tags: [Auth]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               code: { type: string }
+ *               newPassword: { type: string }
+ *     responses:
+ *       200: { description: "Senha trocada; reauth = true: as sessões abertas, esta inclusive, caíram — entrar de novo" }
+ *       400: { description: Campos ausentes ou a nova senha fora da política (D-EA5) }
+ *       422: { description: "MY_PASSWORD_CODE_INVALID (código inválido, vencido ou esgotado) ou PASSWORD_SAME_AS_CURRENT" }
+ */
+router.post('/my-password', authMiddleware, async (req: Request, res: Response) => {
+  const body = req.body ?? {}
+  const code = bodyText(body.code)
+  const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
+  if (!code || !newPassword) {
+    res.status(400).json({ error: 'Os campos "code" e "newPassword" são obrigatórios' })
+    return
+  }
+  try {
+    await changeMyPassword(req.institution!.userId, code, newPassword)
+    res.json({ ok: true, reauth: true })
+  } catch (err) {
+    fail(res, err, 'my-password')
   }
 })
 
