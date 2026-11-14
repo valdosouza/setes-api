@@ -26,7 +26,9 @@ const base = {
 // alvo FORÇADO para a institution do JWT no service).
 export const userCreateDto = z.object({
   ...base,
-  password:      newPasswordSchema,                  // D-EA5: mínimo 8, nunca só espaços (D-EA13)
+  // D-EA5: mínimo 8, nunca só espaços (D-EA13). Opcional no corpo (D-UC12): com e-mail que já é login a senha não se define — o
+  // service a exige só quando cria a credencial
+  password:      newPasswordSchema.optional(),
   institutionId: z.number().int().positive().nullable().optional(),
   kind:          z.enum(USER_KINDS).nullable().optional(),
 }).superRefine(refinePassword('password', 'email'))   // D-EA5/D-EA16: lista de comuns e parte local do e-mail

@@ -14,7 +14,7 @@ import {
 import {
   listUsers, getUser, findLoginEmailOwner, insertUserCascade,
   updateUserCascade, userExists, userLinkedToInstitution,
-  listInstitutionLinks, setInstitutionLinks,
+  listInstitutionLinks, setInstitutionLinks, inviteToInstitution,
   findInstitutionSchema, listUserPrivileges, setUserPrivileges,
   listInterfaceCatalogPrivilegeIds, findInterfaceKey, listDelegableSuperPrivileges, listActiveUserLinks,
   USER_SEARCH_CRITERIA, listInstitutionLookup,
@@ -116,31 +116,61 @@ export async function fetchUser(scope: UserScope, id: number, institutionId: num
   return user
 }
 
-async function assertLoginEmailFree(email: string, ignoreId: number | null): Promise<void> {
-  const owner = await findLoginEmailOwner(email)
-  if (owner !== null && owner !== ignoreId) {
-    throw new HttpError(409, 'E-mail já usado como login de outro usuário',
-      [{ field: 'email', message: 'E-mail já usado como login de outro usuário' }])
-  }
+/**
+ * Resultado do POST do cadastro. `existingLogin` = o e-mail já era login (D-UC12: a tela diz "utilizando cadastro já existente" e o
+ * admin segue no mesmo formulário com os privilégios deste `id`); nada diz ONDE a pessoa tem vínculo nem o NOME dela (A-UC4).
+ */
+export interface CreateUserResult {
+  id: number
+  existingLogin?: true
+  invite?: 'pending'
 }
 
+/**
+ * Cadastro (D-UC4 — "o convite é a CRIAÇÃO interceptada"): e-mail sem login = criação de hoje (credencial + vínculo nascido
+ * convidado e aceito — D-UC14); e-mail que JÁ é login = nenhuma credencial nova e NADA da credencial muda (nome, senha e ativo do
+ * corpo são descartados — A-UC7), só o vínculo PENDENTE no estabelecimento do escopo (`inviteToInstitution`). Quem intercepta
+ * vincula como `user` (A-UC3: só quem CRIA escolhe `admin`); o Super, que também passa pelo convite (D-UC16), escolhe o perfil.
+ * O Super SEM estabelecimento não tem vínculo a interceptar: e-mail que já é login segue 409 (ficha do CONV.E2.P2, ponto 2).
+ */
 export async function createUser(
   scope: UserScope, input: UserCreateInput
-): Promise<{ id: number }> {
+): Promise<CreateUserResult> {
   const kind = input.kind ?? 'user'
   if (!scope.isSuper && kind === 'super') {
     throw new HttpError(400, 'Perfil não permitido',
       [{ field: 'kind', message: "Perfil 'super' é exclusivo da equipe Setes" }])
   }
   const institutionId = scopeInstitution(scope, input.institutionId ?? null)
+
+  const owner = await findLoginEmailOwner(input.email)
+  if (owner !== null) {
+    if (institutionId === null) {
+      throw new HttpError(409, 'E-mail já usado como login — escolha o estabelecimento para vincular o cadastro existente',
+        [{ field: 'email', message: 'E-mail já usado como login' }])
+    }
+    if (!scope.isSuper && kind !== 'user') {
+      throw new HttpError(400, 'Com cadastro já existente o perfil é Usuário',
+        [{ field: 'kind', message: 'Só quem cria a credencial escolhe Administrador (A-UC3)' }], ErrorCodes.INVITE_PROFILE_USER_ONLY)
+    }
+    const outcome = await inviteToInstitution(owner, institutionId, kind, scope.userId)
+    if (outcome !== 'already-pending') notifyInvite(owner, institutionId)
+    return { id: owner, existingLogin: true, invite: 'pending' }
+  }
+
+  if (!input.password) {
+    throw new HttpError(400, 'Informe a senha inicial — o e-mail ainda não é login',
+      [{ field: 'password', message: 'Obrigatória para criar a credencial' }], ErrorCodes.VALIDATION_FAILED)
+  }
   const link: CascadeLink | null =
     institutionId !== null ? { institutionId, kind, inviterId: scope.userId } : null
-
-  await assertLoginEmailFree(input.email, null)
   // D-EA9: o hash (scrypt, assíncrono) é calculado ANTES da transação da cascata — nunca com conexão do pool presa
-  const id = await insertUserCascade(input, await hashPassword(input.password!), link)
+  const id = await insertUserCascade(input, await hashPassword(input.password), link)
   return { id }
 }
+
+/** Aviso ao titular (D-UC12) — passo 5 da ficha; até lá, nada. */
+function notifyInvite(_userId: number, _institutionId: number): void { /* passo 5 */ }
 
 /**
  * D-PV19 (Valdo 2026-10-20; D-UC1…D-UC3 da frente do usuário convidado): o e-mail de LOGIN é imutável (a credencial é do

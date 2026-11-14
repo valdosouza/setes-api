@@ -17,6 +17,7 @@ import { ErrorCodes } from '@shared/errors/error-codes'
 // onboarding do Estabelecimento também cria usuário). O módulo REEXPORTA
 // para manter estável o contrato do cadastro (service e testes).
 import { LOGIN_GROUP_ID, syncLoginEmail, findLoginEmailOwner, insertUserCascade } from '@shared/user'
+import { pendingInviteSql } from '@shared/user/invite'
 
 export { findLoginEmailOwner, insertUserCascade }
 
@@ -119,14 +120,20 @@ export async function listInstitutionLookup(filter: string): Promise<Institution
  * (`setes_central.tb_user`). Re-prova do gate adversarial da D-PV11: contar só os vivos deixava o admin de um cliente trocar a senha
  * de quem tinha um vínculo SUPER revogado — e o Super, ao reativá-lo, entregava a conta (o `setInstitutionLinks` revive a linha).
  */
-export async function listActiveUserLinks(userId: number): Promise<Array<{ institutionId: number; kind: string; alive: boolean; deleted: boolean }>> {
+export async function listActiveUserLinks(userId: number): Promise<Array<{
+  institutionId: number; kind: string; alive: boolean; deleted: boolean; invite: LinkInviteState
+}>> {
   const [rows] = await pool.query<any[]>(
-    `SELECT tb_institution_id AS institutionId, kind, (active = 'S' AND deleted = 'N') AS alive, (deleted = 'S') AS deleted
+    `SELECT tb_institution_id AS institutionId, kind, (active = 'S' AND deleted = 'N') AS alive, (deleted = 'S') AS deleted,
+            ${INVITE_STATE_SQL('')} AS invite
        FROM setes_central.tb_institution_has_user
       WHERE tb_user_id = ?`,
     [userId]
   )
-  return rows.map(r => ({ institutionId: Number(r.institutionId), kind: String(r.kind ?? ''), alive: Boolean(Number(r.alive)), deleted: Boolean(Number(r.deleted ?? 0)) }))
+  return rows.map(r => ({
+    institutionId: Number(r.institutionId), kind: String(r.kind ?? ''), alive: Boolean(Number(r.alive)),
+    deleted: Boolean(Number(r.deleted ?? 0)), invite: (r.invite ?? null) as LinkInviteState,
+  }))
 }
 
 /** Usuário tem vínculo ATIVO com a institution? (escopo do admin) */
@@ -474,5 +481,99 @@ export async function setInstitutionLinks(
     throw err
   } finally {
     conn.release()
+  }
+}
+
+// ---------------------------------------------------------------------
+// CONVITE no vínculo (setes-api:CONV.E2.P2 — D-UC4, D-UC12, D-UC14, D-UC15, D-UC16; script central 75).
+// O estado é derivado das colunas (`@shared/user/invite`); o banco recusa convite pendente ativo (CHECK — A-UC8).
+// ---------------------------------------------------------------------
+
+/** Situação do convite de um vínculo: `null` = sem convite (anterior ao 75, do setes-sync). */
+export type LinkInviteState = 'pending' | 'withdrawn' | 'accepted' | null
+
+const INVITE_STATE_SQL = (a: string) =>
+  `CASE WHEN ${a}invited_at IS NULL THEN NULL
+        WHEN ${a}accepted_at IS NOT NULL THEN 'accepted'
+        WHEN ${a}invite_withdrawn_at IS NOT NULL THEN 'withdrawn'
+        ELSE 'pending' END`
+
+/** Resultado do convite: novo vínculo, convite renovado (retirado antes, ou vínculo excluído) ou já pendente (nada muda). */
+export type InviteOutcome = 'invited' | 'reinvited' | 'already-pending'
+
+/**
+ * Grava o CONVITE do usuário (credencial que JÁ existe) no estabelecimento, numa transação com a linha do par travada:
+ *   sem vínculo                       → INSERT pendente (inativo, `kind`, convidante, `invited_at` = agora)
+ *   convite retirado ou vínculo excluído (nunca aceito) → regrava o convite e limpa a retirada (D-UC15)
+ *   convite pendente                  → nada muda ('already-pending': sem novo aviso)
+ *   vínculo aceito, ativo ou sem convite → 409 USER_ALREADY_LINKED (o admin já vê esse usuário na própria lista)
+ */
+export async function inviteToInstitution(
+  userId: number, institutionId: number, kind: string, inviterId: number | null
+): Promise<InviteOutcome> {
+  const conn = await pool.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [rows] = await conn.query<any[]>(
+      `SELECT deleted, ${INVITE_STATE_SQL('')} AS invite
+         FROM setes_central.tb_institution_has_user
+        WHERE tb_institution_id = ? AND tb_user_id = ?
+        FOR UPDATE`,
+      [institutionId, userId]
+    )
+    let outcome: InviteOutcome
+    if (rows.length === 0) {
+      await conn.query(
+        `INSERT INTO setes_central.tb_institution_has_user
+           (tb_institution_id, tb_user_id, kind, active, created_at, updated_at, deleted, tb_user_inviter_id, invited_at)
+         VALUES (?, ?, ?, 'N', NOW(), NOW(), 'N', ?, NOW())`,
+        [institutionId, userId, kind, inviterId]
+      )
+      outcome = 'invited'
+    } else {
+      const row = rows[0]
+      const invite = (row.invite ?? null) as LinkInviteState
+      if (invite === 'pending' && row.deleted !== 'S') {
+        outcome = 'already-pending'
+      } else if (invite === 'withdrawn' || (row.deleted === 'S' && invite !== 'accepted')) {
+        // o novo convite regrava os campos do convite e limpa a retirada; o histórico fica no log (D-UC15)
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user
+              SET kind = ?, active = 'N', deleted = 'N', tb_user_inviter_id = ?, invited_at = NOW(),
+                  accepted_at = NULL, invite_withdrawn_at = NULL, updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ?`,
+          [kind, inviterId, institutionId, userId]
+        )
+        outcome = 'reinvited'
+      } else {
+        const msg = 'Este e-mail já é de um usuário deste estabelecimento — edite-o na lista'
+        throw new HttpError(409, msg, [{ field: 'email', message: msg }], ErrorCodes.USER_ALREADY_LINKED)
+      }
+    }
+    await conn.commit()
+    return outcome
+  } catch (err) {
+    await conn.rollback()
+    throw err
+  } finally {
+    conn.release()
+  }
+}
+
+/**
+ * Retira o convite AINDA NÃO ACEITO do par (D-UC15): grava `invite_withdrawn_at` só se o convite está pendente; senão 409
+ * INVITE_NOT_PENDING. O vínculo continua inativo e o login do titular não o aceita mais.
+ */
+export async function withdrawInvite(userId: number, institutionId: number): Promise<void> {
+  const [res] = await pool.query<any>(
+    `UPDATE setes_central.tb_institution_has_user
+        SET invite_withdrawn_at = NOW(), updated_at = NOW()
+      WHERE tb_institution_id = ? AND tb_user_id = ? AND deleted = 'N'
+        AND ${pendingInviteSql()}`,
+    [institutionId, userId]
+  )
+  if (Number(res?.affectedRows ?? 0) !== 1) {
+    throw new HttpError(409, 'Não há convite aguardando aceite deste usuário neste estabelecimento', [],
+      ErrorCodes.INVITE_NOT_PENDING)
   }
 }

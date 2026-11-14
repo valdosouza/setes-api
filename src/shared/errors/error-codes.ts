@@ -161,6 +161,11 @@ export const ErrorCodes = {
   USER_MANAGED_BY_SUPER: 'USER_MANAGED_BY_SUPER',
   // Rodada 2026-10-20 (D-PV19/D-PV32/D-PV35 — prompt_privilegios_interfaces.md §11.10)
   LOGIN_EMAIL_IMMUTABLE: 'LOGIN_EMAIL_IMMUTABLE',
+  // CONV.E2.P2 (D-UC4/D-UC12/D-UC15/A-UC3/A-UC8): a criação interceptada vira convite no vínculo
+  USER_ALREADY_LINKED: 'USER_ALREADY_LINKED',
+  INVITE_PROFILE_USER_ONLY: 'INVITE_PROFILE_USER_ONLY',
+  INVITE_PENDING: 'INVITE_PENDING',
+  INVITE_NOT_PENDING: 'INVITE_NOT_PENDING',
   // D-PV48 (2026-10-27): depois de criada a credencial, só o titular troca a senha (recuperação)
   PASSWORD_OWNER_ONLY: 'PASSWORD_OWNER_ONLY',
   // D-EA5 (Onda 3 do endurecer): a troca pelo código recusa a senha igual à atual — julgada SÓ depois do código certo (o código não é gasto)
@@ -361,6 +366,10 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   MODULE_NOT_ENABLED: 'Módulo não habilitado para este estabelecimento (flag técnica)',
   USER_MANAGED_BY_SUPER: 'Conta com vínculo de super — só o Super altera (D-PV12; a A-PV13 morreu com a D-PV19)',
   LOGIN_EMAIL_IMMUTABLE: 'O e-mail de login nunca muda (D-UC1/D-PV19) — a credencial é do titular; inative o vínculo e crie outro usuário',
+  USER_ALREADY_LINKED: 'Este e-mail já é de um usuário deste estabelecimento — edite-o na lista (D-UC4)',
+  INVITE_PROFILE_USER_ONLY: 'Com cadastro já existente o perfil é Usuário — só quem cria a credencial escolhe Administrador (A-UC3)',
+  INVITE_PENDING: 'Usuário aguardando aceite — só o login do titular ativa o vínculo; enquanto isso, só retirar o convite (A-UC8/D-UC15)',
+  INVITE_NOT_PENDING: 'Não há convite aguardando aceite neste estabelecimento — só convite nunca aceito é retirado (D-UC15)',
   PASSWORD_SAME_AS_CURRENT: 'A nova senha é igual à atual — escolha outra (D-EA5); o código de recuperação segue valendo',
   PASSWORD_OWNER_ONLY: 'Depois de criada a credencial, só o próprio usuário troca a senha — pelo "Esqueci minha senha" (D-PV48); o cadastro define a senha uma vez só, na criação',
   OWN_ESTABLISHMENT_READ_ONLY: 'A entidade é o próprio estabelecimento: a cadeia (razão social, IE/IM, endereços, contatos) e a tributação só se editam em Meu Estabelecimento (D-PV32) — os campos do papel seguem editáveis',

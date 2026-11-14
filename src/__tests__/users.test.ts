@@ -88,7 +88,7 @@ describe('createUser', () => {
       })
   })
 
-  it('409 com erro por campo quando o email já é login de outro usuário', async () => {
+  it('CONV.E2.P2 (ponto 2 da ficha): o Super SEM estabelecimento com e-mail que já é login segue no 409 — não há vínculo a interceptar', async () => {
     mockFindOwner.mockResolvedValue(3)
 
     await expect(createUser(superScope, input)).rejects.toMatchObject({
