@@ -37,7 +37,8 @@ export interface InstitutionAdminInput {
   nameCompany: string
   nickTrade:   string
   email:       string
-  password:    string
+  /** A-UC6 (CONV.E2.P4): ausente quando o e-mail já é login (vira convite); exigida só para criar a credencial. */
+  password?:   string
 }
 
 /**

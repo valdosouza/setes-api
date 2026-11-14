@@ -8,6 +8,9 @@ import {
 } from './institutions.interface'
 import { hashPassword } from '@shared/auth/password'
 import { findLoginEmailOwner, insertUserCascade } from '@shared/user'
+import { inviteToInstitution } from '@shared/user/invite'
+import { notifyInvite } from '@shared/user/invite-notice'
+import { ErrorCodes } from '@shared/errors/error-codes'
 import {
   InstitutionAdminInput,
 } from './institutions.interface'
@@ -62,17 +65,26 @@ function dupEntryTo409(err: any): never {
  * O admin é OBRIGATÓRIO (decisão do Valdo, 2026-08-15 — A2): cliente nunca
  * existe sem dono. Antes disso o Super tinha de lembrar de criá-lo na aba
  * Usuários, e um cliente ativo sem nenhum usuário era estado alcançável.
+ *
+ * A-UC6 (CONV.E2.P4 — D-UC4/D-UC12/D-UC16): o e-mail do 1º admin que JÁ é
+ * login não recebe mais 409 — nenhuma credencial nova, nada da credencial
+ * muda (nome e senha do corpo são descartados), e o vínculo `admin` nasce
+ * CONVITE pendente (inativo, o Super como convidante); o login do titular é
+ * o aceite. A decisão 23 segue: o cliente nasce com o seu admin, aguardando
+ * o aceite. O aviso por e-mail sai depois da ativação.
  */
 export async function createInstitution(
   input: InstitutionInput, schemaName: string, admin: InstitutionAdminInput,
   updatedBy: number | null = null
-): Promise<{ id: number; schemaName: string; active: 'S' | 'N'; adminUserId: number }> {
+): Promise<{ id: number; schemaName: string; active: 'S' | 'N'; adminUserId: number; adminInvite?: 'pending' }> {
   if (await schemaNameExists(schemaName)) {
     throw new HttpError(409, `Schema "${schemaName}" já está em uso`)
   }
-  if (await findLoginEmailOwner(admin.email) !== null) {
-    throw new HttpError(409, 'E-mail já usado como login de outro usuário',
-      [{ field: 'admin.email', message: 'E-mail já usado como login de outro usuário' }])
+  // lido ANTES de qualquer escrita (falhar cedo): sem login, a senha inicial é obrigatória; com login, vira convite (A-UC6)
+  const owner = await findLoginEmailOwner(admin.email)
+  if (owner === null && !admin.password) {
+    throw new HttpError(400, 'Informe a senha inicial do administrador — o e-mail ainda não é login',
+      [{ field: 'admin.password', message: 'Obrigatória para criar a credencial' }], ErrorCodes.VALIDATION_FAILED)
   }
 
   let id: number
@@ -96,16 +108,21 @@ export async function createInstitution(
   }
 
   // D-EA9: o hash (scrypt, assíncrono) do admin inicial calculado ANTES da cascata — nunca com conexão do pool presa
-  const adminHash = await hashPassword(admin.password)
+  const adminHash = owner === null ? await hashPassword(admin.password!) : null
   let adminUserId: number
   try {
     await grantStructuralInterfaces(schemaName, id)
-    adminUserId = await insertUserCascade(
-      { nameCompany: admin.nameCompany, nickTrade: admin.nickTrade,
-        email: admin.email, active: 'S' },
-      adminHash,
-      { institutionId: id, kind: 'admin' }
-    )
+    if (owner === null) {
+      adminUserId = await insertUserCascade(
+        { nameCompany: admin.nameCompany, nickTrade: admin.nickTrade,
+          email: admin.email, active: 'S' },
+        adminHash!,
+        { institutionId: id, kind: 'admin', inviterId: updatedBy }
+      )
+    } else {
+      await inviteToInstitution(owner, id, 'admin', updatedBy)
+      adminUserId = owner
+    }
   } catch (err) {
     logger.error('Onboarding do admin falhou — institution permanece inativa', {
       id, schemaName, err,
@@ -116,6 +133,10 @@ export async function createInstitution(
   }
 
   await setInstitutionActive(id, 'S')
+  if (owner !== null) {
+    notifyInvite(owner, id)
+    return { id, schemaName, active: 'S', adminUserId, adminInvite: 'pending' }
+  }
   return { id, schemaName, active: 'S', adminUserId }
 }
 

@@ -23,7 +23,9 @@ const institutionAdminDto = z.object({
   nameCompany: z.string().min(1).max(100),
   nickTrade:   z.string().min(1).max(100),
   email:       z.string().min(1).max(100).email('E-mail inválido'),
-  password:    newPasswordSchema,
+  // A-UC6 (CONV.E2.P4): opcional no corpo — com e-mail que já é login a senha não se define (vira convite); o service a exige só para
+  // criar a credencial
+  password:    newPasswordSchema.optional(),
 }).superRefine(refinePassword('password', 'email'))   // D-EA5/D-EA16
 
 // schema_name: padrão setes_<nome>, informado na inclusão e IMUTÁVEL na
