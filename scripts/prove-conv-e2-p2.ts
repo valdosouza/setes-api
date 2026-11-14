@@ -20,6 +20,7 @@
  *       vínculo antigo sem convite segue o regime de antes (ativa na lista, inativa fora dela, nunca vira convite)
  *   P11 a lista de vínculos do Super mostra o pendente como concedido, com `invite = 'pending'`
  *   P12 `setes_central` intacta
+ *   P13 os dados do aviso (T2) saem do banco: o e-mail de LOGIN do titular e o nome do estabelecimento que convidou — nada mais
  *
  * Uso: npx tsx --require tsconfig-paths/register scripts/prove-conv-e2-p2.ts   (SQL_DIR = o repositório sql)
  */
@@ -30,7 +31,7 @@ import pool from '@shared/db/connection'
 import { splitStatements } from '../src/migrations/runner'
 import { assertInviteSchema, pendingInviteSql } from '@shared/user/invite'
 import { createUser, saveInstitutionLinks, withdrawUserInvite } from '@modules/users/users.service'
-import { listInstitutionLinks } from '@modules/users/users.repository'
+import { listInstitutionLinks, findInviteNoticeData } from '@modules/users/users.repository'
 import { UserScope } from '@modules/users/users.interface'
 
 const PROBE = `setes_convp2_${process.pid}`
@@ -210,6 +211,11 @@ async function main(): Promise<void> {
     check('P11: a lista do Super mostra o pendente como concedido, com invite=pending; o aceito sem marca; o retirado não concedido',
       g(30)?.granted === 'S' && g(30)?.invite === 'pending' && g(10)?.granted === 'S' && g(10)?.invite === null && g(20)?.granted === 'N',
       JSON.stringify(grants.map(x => [x.institutionId, x.granted, x.invite])))
+
+    // P13 — os dados do aviso por e-mail
+    const notice = await findInviteNoticeData(uid, 30)
+    check('P13: o aviso lê só o e-mail de login e o nome do estabelecimento',
+      JSON.stringify(notice) === JSON.stringify({ email: EMAIL, institutionName: 'E30' }), JSON.stringify(notice))
   } finally {
     removeRedirect()
     await rawQuery(`DROP DATABASE IF EXISTS \`${PROBE}\``)

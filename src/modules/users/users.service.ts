@@ -1,3 +1,4 @@
+import { notifyInvite } from './invite-notice'
 import type { UserInstitutionLink as CascadeLink } from '@shared/user'
 import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
@@ -169,8 +170,6 @@ export async function createUser(
   return { id }
 }
 
-/** Aviso ao titular (D-UC12) — passo 5 da ficha; até lá, nada. */
-function notifyInvite(_userId: number, _institutionId: number): void { /* passo 5 */ }
 
 /**
  * D-PV19 (Valdo 2026-10-20; D-UC1…D-UC3 da frente do usuário convidado): o e-mail de LOGIN é imutável (a credencial é do

@@ -629,3 +629,21 @@ export async function withdrawInvite(userId: number, institutionId: number): Pro
       ErrorCodes.INVITE_NOT_PENDING)
   }
 }
+
+/** Dados do aviso de convite (D-UC12): o e-mail de LOGIN do titular e o nome do estabelecimento que convidou — nada mais. */
+export async function findInviteNoticeData(
+  userId: number, institutionId: number
+): Promise<{ email: string; institutionName: string } | null> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT m.email,
+            COALESCE(NULLIF(ie.nick_trade, ''), ie.name_company) AS institutionName
+       FROM setes_central.tb_entity_has_mailing ehm
+       INNER JOIN setes_central.tb_mailing m ON m.id = ehm.tb_mailing_id AND m.deleted = 'N'
+       INNER JOIN setes_central.tb_entity ie ON ie.id = ?
+      WHERE ehm.tb_entity_id = ? AND ehm.tb_mailing_group_id = ${LOGIN_GROUP_ID} AND ehm.deleted = 'N'
+      LIMIT 1`,
+    [institutionId, userId]
+  )
+  const r = rows[0]
+  return r && r.email && r.institutionName ? { email: String(r.email), institutionName: String(r.institutionName) } : null
+}
