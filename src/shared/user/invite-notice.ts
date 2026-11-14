@@ -1,6 +1,6 @@
 import logger from '@shared/logger/logger'
 import { sendMail, maskEmail, mailErrorForLog } from '@shared/mailer/mailer'
-import { findInviteNoticeData } from './users.repository'
+import { findInviteNoticeData } from './invite'
 
 /**
  * Aviso ao TITULAR de que um estabelecimento o convidou (D-UC4/D-UC12 — setes-api:CONV.E2.P2.T2). Sai no FIM do fluxo, DEPOIS do
@@ -36,12 +36,15 @@ export function inviteNoticeText(institutionName: string): { text: string; html:
   return { text, html }
 }
 
+/** Leitura dos dados do aviso — injetável (o cadastro passa a do próprio módulo, que os testes dublam). */
+export type InviteNoticeLoader = (userId: number, institutionId: number) => Promise<{ email: string; institutionName: string } | null>
+
 /** Dispara o aviso (nunca lança): chamado depois do commit do convite. */
-export function notifyInvite(userId: number, institutionId: number): void {
+export function notifyInvite(userId: number, institutionId: number, load: InviteNoticeLoader = findInviteNoticeData): void {
   const job: Promise<void> = (async () => {
     let to: string | null = null
     try {
-      const data = await findInviteNoticeData(userId, institutionId)
+      const data = await load(userId, institutionId)
       if (!data) {
         logger.warn('Aviso de convite NÃO enviado — credencial sem e-mail de login ou estabelecimento sem nome', { userId, institutionId })
         return

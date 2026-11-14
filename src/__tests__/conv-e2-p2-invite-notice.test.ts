@@ -12,7 +12,7 @@ import * as repo from '../modules/users/users.repository'
 import logger from '../shared/logger/logger'
 import { sendMail } from '../shared/mailer/mailer'
 import { createUser, saveInstitutionLinks } from '../modules/users/users.service'
-import { waitForPendingInviteNotices, INVITE_NOTICE_SUBJECT, inviteNoticeText } from '../modules/users/invite-notice'
+import { waitForPendingInviteNotices, INVITE_NOTICE_SUBJECT, inviteNoticeText } from '../shared/user/invite-notice'
 import { UserScope } from '../modules/users/users.interface'
 
 const mail = sendMail as jest.Mock

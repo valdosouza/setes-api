@@ -1,4 +1,4 @@
-import { notifyInvite } from './invite-notice'
+import { notifyInvite } from '@shared/user/invite-notice'
 import type { UserInstitutionLink as CascadeLink } from '@shared/user'
 import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
@@ -15,7 +15,7 @@ import {
 import {
   listUsers, getUser, findLoginEmailOwner, insertUserCascade,
   updateUserCascade, userExists, userLinkedToInstitution,
-  listInstitutionLinks, setInstitutionLinks, inviteToInstitution, withdrawInvite,
+  listInstitutionLinks, setInstitutionLinks, inviteToInstitution, withdrawInvite, findInviteNoticeData,
   findInstitutionSchema, listUserPrivileges, setUserPrivileges,
   listInterfaceCatalogPrivilegeIds, findInterfaceKey, listDelegableSuperPrivileges, listActiveUserLinks,
   USER_SEARCH_CRITERIA, listInstitutionLookup,
@@ -161,7 +161,7 @@ export async function createUser(
         [{ field: 'kind', message: 'Só quem cria a credencial escolhe Administrador (A-UC3)' }], ErrorCodes.INVITE_PROFILE_USER_ONLY)
     }
     const outcome = await inviteToInstitution(owner, institutionId, kind, scope.userId)
-    if (outcome !== 'already-pending') notifyInvite(owner, institutionId)
+    if (outcome !== 'already-pending') notifyInvite(owner, institutionId, findInviteNoticeData)
     return { id: owner, existingLogin: true, invite: 'pending' }
   }
 
@@ -281,7 +281,7 @@ export async function saveInstitutionLinks(
   assertSuper(scope)
   if (!(await userExists(userId))) throw new HttpError(404, 'Usuário não encontrado')
   const invited = await setInstitutionLinks(userId, links, scope.userId)
-  for (const institutionId of invited) notifyInvite(userId, institutionId)
+  for (const institutionId of invited) notifyInvite(userId, institutionId, findInviteNoticeData)
 }
 
 /**
