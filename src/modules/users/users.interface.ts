@@ -73,6 +73,8 @@ export interface UserScope {
   isSuper:       boolean
   institutionId: number
   schemaName:    string
+  /** Quem opera (do JWT) — o convidante do vínculo (D-UC14, `tb_user_inviter_id`). */
+  userId:        number
 }
 
 /** Um privilégio do catálogo da interface + situação da concessão ao usuário. */

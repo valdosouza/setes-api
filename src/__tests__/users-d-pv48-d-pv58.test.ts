@@ -10,8 +10,8 @@ import { UserScope } from '../modules/users/users.interface'
 
 jest.mock('../shared/db/connection', () => ({ __esModule: true, default: { query: jest.fn(), getConnection: jest.fn() } }))
 
-const adminScope: UserScope = { isSuper: false, institutionId: 5, schemaName: 'setes_acme' }
-const superScope: UserScope = { isSuper: true, institutionId: 1, schemaName: 'setes_setes' }
+const adminScope: UserScope = { isSuper: false, institutionId: 5, schemaName: 'setes_acme', userId: 900 }
+const superScope: UserScope = { isSuper: true, institutionId: 1, schemaName: 'setes_setes', userId: 900 }
 const body = { nameCompany: 'Fulano', nickTrade: 'Ful', email: 'ful@x.com', password: 'novaSenha1' } as any
 
 describe('D-PV48 — senha só na criação da credencial', () => {

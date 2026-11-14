@@ -21,6 +21,7 @@ function scopeOf(req: Request): UserScope {
     isSuper:       isSuper(req.institution),
     institutionId: req.institution!.institutionId,
     schemaName:    req.institution!.schemaName,
+    userId:        req.institution!.userId,
   }
 }
 

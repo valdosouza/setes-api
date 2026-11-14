@@ -278,8 +278,8 @@ describe("peça — shape 'set' (parecer do guardião, Onda 2): pertinência a u
 })
 
 describe('users — critérios de VÍNCULO só com vínculo (parecer do guardião) e "instituição" só Super (D-BA24)', () => {
-  const admin = { isSuper: false, institutionId: 7, schemaName: SCHEMA }
-  const sup   = { isSuper: true,  institutionId: 1, schemaName: 'setes_setes' }
+  const admin = { isSuper: false, institutionId: 7, schemaName: SCHEMA, userId: 900 }
+  const sup   = { isSuper: true,  institutionId: 1, schemaName: 'setes_setes', userId: 900 }
 
   it('admin: kind servido (foco = a própria institution), institution NÃO', async () => {
     const keys = (await fetchUserSearchCriteria(admin, null)).map(c => c.key)

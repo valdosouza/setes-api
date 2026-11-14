@@ -31,9 +31,9 @@ const mockLinks      = repo.listActiveUserLinks              as jest.Mock
 const mockGetUser    = repo.getUser                          as jest.Mock
 
 const superScope: UserScope =
-  { isSuper: true,  institutionId: 1, schemaName: 'setes_setes' }
+  { isSuper: true,  institutionId: 1, schemaName: 'setes_setes', userId: 900 }
 const adminScope: UserScope =
-  { isSuper: false, institutionId: 5, schemaName: 'setes_acme' }
+  { isSuper: false, institutionId: 5, schemaName: 'setes_acme', userId: 900 }
 
 const input: UserCreateInput = {
   nameCompany: 'Valdo de Souza',
@@ -71,13 +71,13 @@ describe('createUser', () => {
   it('super com institutionId cria o vínculo junto (aba Usuários do Estabelecimento)', async () => {
     await createUser(superScope, { ...input, institutionId: 7, kind: 'admin' })
 
-    expect(mockInsert.mock.calls[0][2]).toEqual({ institutionId: 7, kind: 'admin' })
+    expect(mockInsert.mock.calls[0][2]).toEqual({ institutionId: 7, kind: 'admin', inviterId: 900 })
   })
 
   it('admin do cliente tem o alvo FORÇADO à institution do JWT', async () => {
     await createUser(adminScope, { ...input, institutionId: 999, kind: 'admin' })
 
-    expect(mockInsert.mock.calls[0][2]).toEqual({ institutionId: 5, kind: 'admin' })
+    expect(mockInsert.mock.calls[0][2]).toEqual({ institutionId: 5, kind: 'admin', inviterId: 900 })
   })
 
   it("admin não cria perfil 'super' (400 por campo)", async () => {
@@ -248,7 +248,7 @@ describe('D-PV5 — telas do perfil admin não se concedem por privilégio', () 
 })
 
 describe('D-PV11 — tela do Super delegável: só o Super libera, e só para usuário da Setes', () => {
-  const setesAdmin: UserScope = { isSuper: false, institutionId: 1, schemaName: 'setes_setes' }
+  const setesAdmin: UserScope = { isSuper: false, institutionId: 1, schemaName: 'setes_setes', userId: 900 }
   beforeEach(() => {
     mockCatalogIds.mockResolvedValue([2, 6])
     mockListPrivs.mockResolvedValue([{ interfaceId: 20 }])

@@ -1,3 +1,4 @@
+import type { UserInstitutionLink as CascadeLink } from '@shared/user'
 import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import { isOwnVendorInstitution } from '@shared/institution-interfaces'
@@ -132,8 +133,8 @@ export async function createUser(
       [{ field: 'kind', message: "Perfil 'super' é exclusivo da equipe Setes" }])
   }
   const institutionId = scopeInstitution(scope, input.institutionId ?? null)
-  const link: UserInstitutionLink | null =
-    institutionId !== null ? { institutionId, kind } : null
+  const link: CascadeLink | null =
+    institutionId !== null ? { institutionId, kind, inviterId: scope.userId } : null
 
   await assertLoginEmailFree(input.email, null)
   // D-EA9: o hash (scrypt, assíncrono) é calculado ANTES da transação da cascata — nunca com conexão do pool presa
