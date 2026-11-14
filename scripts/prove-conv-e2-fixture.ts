@@ -9,6 +9,8 @@
  *       não retira nem ativa; quem convida não toma a conta nem ativa sem o aceite; o login de outra pessoa não aceita; o login do titular
  *       aceita; inativar no cliente B derruba só a sessão do B; o já aceito reativa sem novo aceite; o nunca aceito (retirado) não
  *       reativa pelo admin nem pelo Super e o login não o aceita
+ *       a12 privilégios valem no convite pendente, nunca no retirado nem noutro cliente; a13 o aceite no mesmo segundo do convite não
+ *       faz o interceptado passar por criador (A-UC7)
  *   (b) o grupo: o convite da matriz não aparece na filial; a filial não retira nem ativa o da matriz; o login aceita só a matriz; a
  *       filial não derruba a sessão da matriz
  *
@@ -30,7 +32,7 @@ import request from 'supertest'
 import logger from '@shared/logger/logger'
 import app from '../src/app'
 import { createUser, editUser, withdrawUserInvite } from '@modules/users/users.service'
-import { listUsers } from '@modules/users/users.repository'
+import { listUsers, userLinkedToInstitution } from '@modules/users/users.repository'
 import { UserScope } from '@modules/users/users.interface'
 import { NO_CRITERIA } from '@shared/list'
 
@@ -213,6 +215,32 @@ async function main(): Promise<void> {
     check('a11: vínculo nunca aceito (retirado) não reativa pelo admin nem pelo Super, e o login não o aceita (A-UC8)',
       reactW === '409 INVITE_PENDING' && supW === '409 INVITE_PENDING' && lr?.active === 'N' && lr?.accepted_at === null,
       JSON.stringify({ reactW, supW, lr }))
+
+    // a12 — privilégios no convite (D-UC12 item 2 — gate socrático do P6): valem no PENDENTE, nunca no retirado nem noutro cliente
+    const K = 'priv.convfx@example.invalid'
+    const { id: kid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Priv', nickTrade: 'Priv', email: K, password: PASS_ALL, active: 'S' } as any)
+    await createUser(scopeOf(B, admins[B]), { nameCompany: 'x', nickTrade: 'x', email: K, active: 'S' } as any)
+    const onPending = await userLinkedToInstitution(kid, B)
+    const onOther = await userLinkedToInstitution(kid, MATRIZ)
+    await withdrawUserInvite(scopeOf(B, admins[B]), kid, null)
+    const onWithdrawn = await userLinkedToInstitution(kid, B)
+    const kLogin = await httpLogin(K)
+    check('a12: os privilégios valem no convite PENDENTE (o admin segue no formulário), nunca no retirado nem noutro cliente; o retirado não entra no login',
+      onPending && !onOther && !onWithdrawn && !!kLogin?.token && (jwt.decode(kLogin.token) as any)?.institutionId === A,
+      JSON.stringify({ onPending, onOther, onWithdrawn, login: kLogin?.token ? 'direto em A' : kLogin }))
+
+    // a13 — o aceite no MESMO segundo do convite não faz o interceptado passar por "criador" (re-gate: aceite >= convite + 1 s; A-UC7)
+    const N = 'nome.convfx@example.invalid'
+    const { id: nid } = await createUser(scopeOf(A, admins[A]), { nameCompany: 'Nome Certo', nickTrade: 'Certo', email: N, password: PASS_ALL, active: 'S' } as any)
+    await createUser(scopeOf(B, admins[B]), { nameCompany: 'x', nickTrade: 'x', email: N, active: 'S' } as any)
+    await httpLogin(N)                                         // aceite imediato (mesmo segundo do convite, na maioria das execuções)
+    await editUser(scopeOf(A, admins[A]), nid, { nameCompany: 'Nome Certo', nickTrade: 'Certo', email: N, active: 'N' } as any)
+    const ren = await expectCode(editUser(scopeOf(B, admins[B]), nid, { nameCompany: 'Trocado Pelo B', nickTrade: 'Trocado', email: N } as any))
+    const [nn] = await rawQuery<any[]>(`SELECT nick_trade n FROM ${T('tb_entity')} WHERE id = ?`, [nid])
+    const nl = await link(nid, B)
+    check('a13: o interceptado (aceito no login) não renomeia, nem com o criador inativo; aceite gravado depois do convite',
+      ren === '409 USER_NAME_MANAGED_BY_SUPER' && nn[0]?.n === 'Certo' && new Date(nl.accepted_at).getTime() > new Date(nl.invited_at).getTime(),
+      JSON.stringify({ ren, nome: nn[0]?.n, invited: nl?.invited_at, accepted: nl?.accepted_at }))
 
     // ======================= (b) O GRUPO: MATRIZ E FILIAL NO MESMO SCHEMA =======================
     const G = 'grupo.convfx@example.invalid'

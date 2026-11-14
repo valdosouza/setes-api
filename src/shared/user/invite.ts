@@ -44,9 +44,16 @@ export async function assertInviteSchema(q: Pick<typeof pool, 'query'> = pool): 
     throw err
   }
   const [rows] = await q.query<any[]>(
-    `SELECT CONSTRAINT_NAME AS name FROM information_schema.CHECK_CONSTRAINTS
+    `SELECT CONSTRAINT_NAME AS name, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS
      WHERE CONSTRAINT_SCHEMA = 'setes_central' AND TABLE_NAME = 'tb_institution_has_user'`)
   const present = new Set((rows as any[]).map(r => String(r.name)))
+  // re-gate adversarial do CONV.E2.P6 (D3a): a versão antiga do 75 recusava só o PENDENTE ativo; a nova recusa todo convite NUNCA aceito
+  // (pendente OU retirado). O corpo antigo cita `invite_withdrawn_at` — com ele o boot não sobe
+  const pending = (rows as any[]).find(r => String(r.name) === 'ck_ihu_pending_inactive')
+  if (pending && /invite_withdrawn_at/i.test(String(pending.clause ?? ''))) {
+    throw new Error(`setes_central.tb_institution_has_user com a versão ANTIGA do CHECK ck_ihu_pending_inactive — reaplique o script ${SCRIPT} `
+      + '(ele troca o CHECK) ANTES do setes-api (A-UC8: convite nunca aceito nunca ativo)')
+  }
   const missing = INVITE_CHECKS.filter(name => !present.has(name))
   if (missing.length > 0) {
     throw new Error(`setes_central.tb_institution_has_user sem o(s) CHECK(s) ${missing.join(', ')} — aplique o script ${SCRIPT} `

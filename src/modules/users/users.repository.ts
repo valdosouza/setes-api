@@ -144,7 +144,7 @@ export async function listActiveUserLinks(userId: number): Promise<Array<{
   const [rows] = await pool.query<any[]>(
     `SELECT tb_institution_id AS institutionId, kind, (active = 'S' AND deleted = 'N') AS alive, (deleted = 'S') AS deleted,
             ${INVITE_STATE_SQL('')} AS invite,
-            (invited_at IS NULL OR invited_at = accepted_at) AS creator
+            ((invited_at IS NULL AND BINARY kind <> 'SYNC') OR invited_at = accepted_at) AS creator
        FROM setes_central.tb_institution_has_user
       WHERE tb_user_id = ?`,
     [userId]
@@ -154,6 +154,7 @@ export async function listActiveUserLinks(userId: number): Promise<Array<{
     deleted: Boolean(Number(r.deleted ?? 0)), invite: (r.invite ?? null) as LinkInviteState,
     // A-UC7: o vínculo de CRIAÇÃO grava convite e aceite no MESMO instante (D-UC14); os de antes do 75 não têm convite. O interceptado é
     // aceito depois, no login — e o aceite grava no mínimo 1 s depois do convite (`acceptPendingInvites`), então só a criação tem os dois iguais.
+    // O vínculo `SYNC` (o setes-sync o grava sem convite, até ativo, pelo CPF — anterior à onda) nunca é criador (re-gate adversarial, D2b).
     creator: Boolean(Number(r.creator ?? 0)),
   }))
 }
@@ -187,7 +188,7 @@ export async function getUser(id: number, institutionId: number | null = null): 
             ${NAME_IN_FOCUS('e.nick_trade')}   AS nickTrade,
             m.email,
             CASE WHEN ihu.tb_user_id IS NULL THEN NULL ELSE ${INVITE_STATE_SQL('ihu.')} END AS invite,
-            CASE WHEN ${NEVER_ACCEPTED_IN_FOCUS} THEN 0
+            CASE WHEN ${NEVER_ACCEPTED_IN_FOCUS} THEN NULL
                  ELSE (u.password IS NOT NULL AND u.password <> '') END AS hasCredential,   -- A-UC4 (gate P6): não diz se há senha
             CASE WHEN ? IS NULL THEN NULL
                  WHEN ihu.tb_user_id IS NULL THEN 'N'
@@ -206,7 +207,7 @@ export async function getUser(id: number, institutionId: number | null = null): 
     [institutionId, institutionId, id]
   )
   const row = rows[0]
-  return row ? ({ ...row, hasCredential: Boolean(Number(row.hasCredential)) } as UserRow) : null
+  return row ? ({ ...row, hasCredential: row.hasCredential === null ? null : Boolean(Number(row.hasCredential)) } as UserRow) : null
 }
 
 

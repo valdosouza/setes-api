@@ -206,6 +206,14 @@ export async function editUser(
         [{ field: 'institutionId', message: 'Sem vínculo' }], ErrorCodes.VALIDATION_FAILED)
     }
   }
+  // re-gate socrático do P6 (LOW): o admin cujo vínculo é convite NUNCA aceito recebe INVITE_PENDING antes de qualquer outra regra — a
+  // recusa da senha, logo abaixo, diria se a credencial tem senha (A-UC4)
+  if (!scope.isSuper) {
+    const own = (await listActiveUserLinks(id)).find(l => l.institutionId === scope.institutionId && !l.deleted)
+    if (own && (own.invite === 'pending' || own.invite === 'withdrawn')) {
+      throw new HttpError(409, 'Usuário aguardando aceite — enquanto isso, só retirar o convite', [], ErrorCodes.INVITE_PENDING)
+    }
+  }
   // D-PV48 (Valdo 2026-10-27): depois de criada a credencial, NINGUÉM troca a senha pelo cadastro — nem o admin, nem o Super — só o
   // titular, pela recuperação (D-PV47). A-PV23 (ratificada 2026-10-31): conta SEM senha (vinda do setes-sync) recebe a 1ª UMA vez — é a
   // criação da credencial. Recusa explícita, nunca ignora em silêncio.

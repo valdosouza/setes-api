@@ -33,7 +33,8 @@ export interface UserRow {
    * D-PV48/A-PV23 (2026-10-27/31): a credencial já foi CRIADA (há senha)? Sem senha (usuário vindo do setes-sync) o cadastro define a 1ª,
    * uma vez só; com senha, só o titular troca, pela recuperação. Nunca o hash.
    */
-  hasCredential: boolean
+  /** null no foco do convite nunca aceito (A-UC4: quem convida não sabe se a credencial tem senha). */
+  hasCredential: boolean | null
   /** Convite do vínculo em foco (D-UC14/D-UC15); nunca aceito = nome nulo (A-UC4). Null sem foco ou sem convite. */
   invite?:       'pending' | 'withdrawn' | 'accepted' | null
 }
