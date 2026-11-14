@@ -236,8 +236,8 @@ async function main(): Promise<void> {
     for (const db of DATABASES) await rawQuery(`DROP DATABASE IF EXISTS \`${db}\``)
     fs.rmSync(keyFile, { force: true })
     const centralAfter = await centralColumns()
-    check('G: setes_central intacta (mesmas colunas antes e depois; sem as do 75)',
-      JSON.stringify(centralAfter) === JSON.stringify(centralBefore) && !centralAfter.includes('accepted_at'), JSON.stringify(centralAfter))
+    check('G: setes_central intacta (mesmas colunas antes e depois)',
+      JSON.stringify(centralAfter) === JSON.stringify(centralBefore), JSON.stringify(centralAfter))
     await pool.end()
   }
   console.log(failures === 0 ? '\nPROVA OK' : `\nPROVA FALHOU (${failures})`)

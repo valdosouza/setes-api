@@ -101,6 +101,12 @@ export async function inviteToInstitution(
       const row = rows[0]
       const invite = (row.invite ?? null) as LinkInviteState
       if (invite === 'pending' && row.deleted !== 'S') {
+        // o convite repetido não reenvia o aviso, mas o perfil escolhido agora vale (gate socrático do P6, LOW)
+        await conn.query(
+          `UPDATE setes_central.tb_institution_has_user SET kind = ?, updated_at = NOW()
+            WHERE tb_institution_id = ? AND tb_user_id = ? AND kind <> ?`,
+          [kind, institutionId, userId, kind]
+        )
         outcome = 'already-pending'
       } else if (invite === 'withdrawn' || (row.deleted === 'S' && invite !== 'accepted')) {
         // o novo convite regrava os campos do convite e limpa a retirada; o histórico fica no log (D-UC15)

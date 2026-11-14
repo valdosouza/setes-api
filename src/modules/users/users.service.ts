@@ -1,3 +1,4 @@
+import logger from '@shared/logger/logger'
 import { notifyInvite } from '@shared/user/invite-notice'
 import type { UserInstitutionLink as CascadeLink } from '@shared/user'
 import { HttpError } from '@shared/errors/http-error'
@@ -243,8 +244,11 @@ async function assertInviteRules(scope: UserScope, id: number, current: UserRow,
   }
   const sameName = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim() === (b ?? '').trim()
   const renaming = !sameName(input.nameCompany, current.nameCompany) || !sameName(input.nickTrade, current.nickTrade)
-  if (renaming && links.some(l => l.alive && l.institutionId !== scope.institutionId)) {
-    throw new HttpError(409, 'O nome é da pessoa — com vínculo ativo em outro estabelecimento, só o Super o altera',
+  // A-UC7: quem INTERCEPTA nunca altera o nome; quem CRIOU o corrige enquanto não houver vínculo ativo em outro estabelecimento; depois,
+  // só o Super. (Gates do CONV.E2.P6, X1: sem olhar quem criou, o estabelecimento convidado renomeava a pessoa depois que o criador
+  // inativava o próprio vínculo.)
+  if (renaming && (!own?.creator || links.some(l => l.alive && l.institutionId !== scope.institutionId))) {
+    throw new HttpError(409, 'O nome é da pessoa — só quem criou o cadastro o corrige, e só enquanto ele não estiver ativo em outro estabelecimento',
       [{ field: 'nameCompany', message: 'Nome da credencial (A-UC7)' }], ErrorCodes.USER_NAME_MANAGED_BY_SUPER)
   }
 }
@@ -301,6 +305,7 @@ export async function withdrawUserInvite(
       [{ field: 'institutionId', message: 'Obrigatório para o super' }], ErrorCodes.VALIDATION_FAILED)
   }
   await withdrawInvite(userId, target)
+  logger.info('Convite retirado', { userId, institutionId: target, byUserId: scope.userId })
 }
 
 // ---------------------------------------------------------------------

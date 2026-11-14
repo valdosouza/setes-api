@@ -170,9 +170,7 @@ export async function withdrawInvite(req: Request, res: Response): Promise<void>
   const body = parseBody(userInviteWithdrawDto, req, res)
   if (body === null) return
   try {
-    const scope = scopeOf(req)
-    await withdrawUserInvite(scope, id, body.institutionId ?? null)
-    logger.info('Convite retirado', { userId: id, institutionId: body.institutionId ?? scope.institutionId, byUserId: scope.userId })
+    await withdrawUserInvite(scopeOf(req), id, body.institutionId ?? null)   // o service registra o alvo RESOLVIDO (gate P6)
     res.json({ ok: true })
   } catch (err) {
     handleError(res, err, 'users/:id/invite/withdraw POST')

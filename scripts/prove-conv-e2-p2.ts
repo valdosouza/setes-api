@@ -248,8 +248,8 @@ async function main(): Promise<void> {
     removeRedirect()
     await rawQuery(`DROP DATABASE IF EXISTS \`${PROBE}\``)
     const centralAfter = await centralColumns()
-    check('P12: setes_central intacta (mesmas colunas antes e depois; sem as do 75)',
-      JSON.stringify(centralAfter) === JSON.stringify(centralBefore) && !centralAfter.includes('invited_at'), JSON.stringify(centralAfter))
+    check('P12: setes_central intacta (mesmas colunas antes e depois)',
+      JSON.stringify(centralAfter) === JSON.stringify(centralBefore), JSON.stringify(centralAfter))
     await pool.end()
   }
   console.log(failures === 0 ? '\nPROVA OK' : `\nPROVA FALHOU (${failures})`)

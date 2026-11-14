@@ -18,7 +18,7 @@ describe('D-PV48 — senha só na criação da credencial', () => {
   let getUser: jest.SpyInstance, update: jest.SpyInstance
   beforeEach(() => {
     jest.restoreAllMocks()
-    jest.spyOn(repo, 'listActiveUserLinks').mockResolvedValue([{ institutionId: 5, kind: 'user', alive: true, deleted: false }] as any)
+    jest.spyOn(repo, 'listActiveUserLinks').mockResolvedValue([{ institutionId: 5, kind: 'user', alive: true, deleted: false, invite: null, creator: true }] as any)   // vínculo de antes do 75 = de criação (A-UC7)
     update = jest.spyOn(repo, 'updateUserCascade').mockResolvedValue()
     getUser = jest.spyOn(repo, 'getUser')
   })

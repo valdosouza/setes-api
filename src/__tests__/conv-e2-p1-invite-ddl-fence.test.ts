@@ -59,9 +59,9 @@ describe('CONV.E2.P1 — script central 75 × canônico 01', () => {
     expect(body).not.toMatch(/\bINSERT\s+INTO/i)
   })
 
-  it('pendente = convite, sem aceite e sem retirada — e nunca ativo (o CHECK), nunca "inativo e não aceito" (a leitura revista da D-UC10)', () => {
+  it('convite NUNCA aceito (pendente ou retirado) nunca ativo (o CHECK — gate adversarial do CONV.E2.P6, X3: cobria só o pendente); nunca "inativo e não aceito" (a leitura revista da D-UC10)', () => {
     const s75 = read('75_institution_user_invite_ddl.sql')
     expect(checkBodies(s75).ck_ihu_pending_inactive).toBe(
-      "(NOT(`invited_at`ISNOTNULLAND`accepted_at`ISNULLAND`invite_withdrawn_at`ISNULLAND`active`='S'))")
+      "(NOT(`invited_at`ISNOTNULLAND`accepted_at`ISNULLAND`active`='S'))")
   })
 })

@@ -22,8 +22,8 @@ const adminX: UserScope = { isSuper: false, institutionId: 5, schemaName: 'setes
 const sup:    UserScope = { isSuper: true,  institutionId: 1, schemaName: 'setes_setes', userId: 2 }
 const current = { id: 9, nameCompany: 'Nome Da Pessoa', nickTrade: 'Pessoa', email: 'p@x.com', active: 'S', hasCredential: true }
 const put = { nameCompany: 'Nome Da Pessoa', nickTrade: 'Pessoa', email: 'p@x.com' }
-const link = (institutionId: number, alive: boolean, invite: string | null = null) =>
-  ({ institutionId, kind: 'user', alive, deleted: false, invite })
+const link = (institutionId: number, alive: boolean, invite: string | null = null, creator = true) =>
+  ({ institutionId, kind: 'user', alive, deleted: false, invite, creator })
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -47,6 +47,13 @@ describe('A-UC7 — o nome é da pessoa', () => {
     mockLinks.mockResolvedValue([link(5, true, 'accepted'), link(7, true, null)])
     await expect(editUser(adminX, 9, { ...put, nickTrade: ' Pessoa ', active: 'N' } as any)).resolves.toBeUndefined()
   })
+  it('quem INTERCEPTOU (vínculo aceito pelo login, não o de criação) nunca altera o nome — nem com o criador inativo (gate P6, X1)', async () => {
+    mockLinks.mockResolvedValue([link(5, true, 'accepted', false), link(7, false, 'accepted', true)])
+    await expect(editUser(adminX, 9, { ...put, nickTrade: 'Trocado' } as any)).rejects.toMatchObject({
+      statusCode: 409, code: 'USER_NAME_MANAGED_BY_SUPER' })
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
   it('o Super altera o nome em qualquer caso', async () => {
     mockLinks.mockResolvedValue([link(5, true, 'accepted'), link(7, true, 'accepted')])
     await expect(editUser(sup, 9, { ...put, nameCompany: 'Outro Nome' } as any)).resolves.toBeUndefined()

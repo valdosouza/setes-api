@@ -129,6 +129,9 @@ export async function lockUserCredential(conn: PoolConnection, userId: number): 
  * é um UPDATE pela PK com o filtro do PENDENTE — o UPDATE lê a versão confirmada mais nova da linha, então um convite retirado por outra
  * transação no meio do caminho não é aceito (o filtro falha) e o write-once de `accepted_at` fica no próprio filtro. Vínculo sem convite
  * (anterior ao 75, do setes-sync) e convite retirado nunca entram. Devolve os estabelecimentos aceitos agora.
+ * O aceite fica SEMPRE depois do convite (no mínimo 1 s — o instante é em segundos): `invited_at = accepted_at` passa a marcar só o
+ * vínculo de CRIAÇÃO (D-UC14), que a A-UC7 usa para saber quem corrige o nome (gate adversarial do CONV.E2.P6, X1 — num login no mesmo
+ * segundo do convite, o interceptado passava por criador).
  */
 export async function acceptPendingInvites(conn: PoolConnection, userId: number): Promise<number[]> {
   const [rows] = await conn.query<any[]>(
@@ -143,7 +146,7 @@ export async function acceptPendingInvites(conn: PoolConnection, userId: number)
     const institutionId = Number(r.institutionId)
     const [res] = await conn.query<ResultSetHeader>(
       `UPDATE setes_central.tb_institution_has_user
-          SET active = 'S', accepted_at = NOW(), updated_at = NOW()
+          SET active = 'S', accepted_at = GREATEST(NOW(), invited_at + INTERVAL 1 SECOND), updated_at = NOW()
         WHERE tb_institution_id = ? AND tb_user_id = ? AND deleted = 'N'
           AND invited_at IS NOT NULL AND accepted_at IS NULL AND invite_withdrawn_at IS NULL`,
       [institutionId, userId]

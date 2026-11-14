@@ -1,5 +1,6 @@
 import { PoolConnection } from 'mysql2/promise'
 import pool from '@shared/db/connection'
+import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { ListQuery, PagedRows, SearchCriterion, escapeLike } from '@shared/list'
 import { USER_KINDS } from './users.dto'
 import { updateEntity } from '@shared/entity/entity.repository'
@@ -62,7 +63,8 @@ export const USER_SEARCH_CRITERIA: readonly SearchCriterion[] = [
     expr: USER_INSTITUTION_IDS, lookup: '/api/users/institution-lookup' },
   // D-PV19/D-UC2: "ativo" é do VÍNCULO em foco (alias ihu da query base); sem foco (Super global) cai na credencial
   { key: 'active', kind: 'bool', labelKey: 'search.users.active', expr: "COALESCE(ihu.active, u.active)", boolValues: ['S', 'N'] },
-  { key: 'createdAt', kind: 'date', labelKey: 'search.users.createdAt', expr: 'u.created_at', storage: 'datetime' },
+  // A-UC4 (gate P6, X5): a data da credencial também não sai no foco do convite nunca aceito (a busca repetida a revelaria)
+  { key: 'createdAt', kind: 'date', labelKey: 'search.users.createdAt', expr: NAME_IN_FOCUS('u.created_at'), storage: 'datetime' },
 ]
 
 /**
@@ -137,11 +139,12 @@ export async function listInstitutionLookup(filter: string): Promise<Institution
  * de quem tinha um vínculo SUPER revogado — e o Super, ao reativá-lo, entregava a conta (o `setInstitutionLinks` revive a linha).
  */
 export async function listActiveUserLinks(userId: number): Promise<Array<{
-  institutionId: number; kind: string; alive: boolean; deleted: boolean; invite: LinkInviteState
+  institutionId: number; kind: string; alive: boolean; deleted: boolean; invite: LinkInviteState; creator: boolean
 }>> {
   const [rows] = await pool.query<any[]>(
     `SELECT tb_institution_id AS institutionId, kind, (active = 'S' AND deleted = 'N') AS alive, (deleted = 'S') AS deleted,
-            ${INVITE_STATE_SQL('')} AS invite
+            ${INVITE_STATE_SQL('')} AS invite,
+            (invited_at IS NULL OR invited_at = accepted_at) AS creator
        FROM setes_central.tb_institution_has_user
       WHERE tb_user_id = ?`,
     [userId]
@@ -149,17 +152,25 @@ export async function listActiveUserLinks(userId: number): Promise<Array<{
   return rows.map(r => ({
     institutionId: Number(r.institutionId), kind: String(r.kind ?? ''), alive: Boolean(Number(r.alive)),
     deleted: Boolean(Number(r.deleted ?? 0)), invite: (r.invite ?? null) as LinkInviteState,
+    // A-UC7: o vínculo de CRIAÇÃO grava convite e aceite no MESMO instante (D-UC14); os de antes do 75 não têm convite. O interceptado é
+    // aceito depois, no login — e o aceite grava no mínimo 1 s depois do convite (`acceptPendingInvites`), então só a criação tem os dois iguais.
+    creator: Boolean(Number(r.creator ?? 0)),
   }))
 }
 
-/** Usuário tem vínculo ATIVO com a institution? (escopo do admin) */
+/**
+ * Usuário tem vínculo ATIVO com a institution? (escopo do admin). CONV.E2.P6 (gate socrático, HIGH — D-UC12 item 2: "o admin segue no
+ * MESMO formulário definindo perfil e privilégios"): o CONVITE PENDENTE também vale para os privilégios — o vínculo pendente é inativo
+ * por construção (CHECK do 75), e sem isto o formulário do convite parava no 400. Os privilégios gravados ficam inertes até o aceite (o
+ * veredito lê só vínculo ativo — `vw_user_link`); convite retirado nunca vale.
+ */
 export async function userLinkedToInstitution(
   userId: number, institutionId: number
 ): Promise<boolean> {
   const [rows] = await pool.query<any[]>(
     `SELECT 1 FROM setes_central.tb_institution_has_user
-     WHERE tb_user_id = ? AND tb_institution_id = ?
-       AND active = 'S' AND deleted = 'N'`,
+     WHERE tb_user_id = ? AND tb_institution_id = ? AND deleted = 'N'
+       AND (active = 'S' OR ${pendingInviteSql()})`,
     [userId, institutionId]
   )
   return rows.length > 0
@@ -176,7 +187,8 @@ export async function getUser(id: number, institutionId: number | null = null): 
             ${NAME_IN_FOCUS('e.nick_trade')}   AS nickTrade,
             m.email,
             CASE WHEN ihu.tb_user_id IS NULL THEN NULL ELSE ${INVITE_STATE_SQL('ihu.')} END AS invite,
-            (u.password IS NOT NULL AND u.password <> '') AS hasCredential,
+            CASE WHEN ${NEVER_ACCEPTED_IN_FOCUS} THEN 0
+                 ELSE (u.password IS NOT NULL AND u.password <> '') END AS hasCredential,   -- A-UC4 (gate P6): não diz se há senha
             CASE WHEN ? IS NULL THEN NULL
                  WHEN ihu.tb_user_id IS NULL THEN 'N'
                  WHEN ihu.active = 'S' AND ihu.deleted = 'N' THEN 'S' ELSE 'N' END AS active
@@ -475,6 +487,14 @@ export async function setUserPrivileges(
  * Devolve os estabelecimentos que receberam convite NOVO ou renovado (o aviso por e-mail sai depois do commit).
  */
 export async function setInstitutionLinks(
+  userId: number, links: UserInstitutionLink[], inviterId: number | null
+): Promise<number[]> {
+  // gate socrático do P6 (LOW): o FOR UPDATE nos vínculos + o INSERT (trava S da FK em tb_user) cruza com o login (X em tb_user, UPDATE
+  // nos vínculos) — o deadlock possível é refeito inteiro, como no login
+  return withDeadlockRetry('users/institutions', { userId }, 3, () => setInstitutionLinksTx(userId, links, inviterId))
+}
+
+async function setInstitutionLinksTx(
   userId: number, links: UserInstitutionLink[], inviterId: number | null
 ): Promise<number[]> {
   const conn = await pool.getConnection()

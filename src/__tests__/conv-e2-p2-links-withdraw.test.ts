@@ -48,3 +48,12 @@ describe('withdrawUserInvite (D-UC15 — T4)', () => {
     await expect(withdrawUserInvite(admin, 77, null)).rejects.toMatchObject({ statusCode: 409, code: 'INVITE_NOT_PENDING' })
   })
 })
+
+describe('privilégios no convite pendente (D-UC12 item 2 — gate socrático do P6, HIGH)', () => {
+  it('o vínculo que vale para os privilégios é o ATIVO ou o convite PENDENTE (nunca o retirado)', () => {
+    const real = jest.requireActual('../modules/users/users.repository') as typeof repo
+    const src = real.userLinkedToInstitution.toString()
+    expect(src).toContain("active = 'S' OR")
+    expect(src).toContain('pendingInviteSql')
+  })
+})
