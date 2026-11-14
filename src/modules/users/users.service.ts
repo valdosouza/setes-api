@@ -151,9 +151,14 @@ export async function createUser(
       throw new HttpError(409, 'E-mail já usado como login — escolha o estabelecimento para vincular o cadastro existente',
         [{ field: 'email', message: 'E-mail já usado como login' }])
     }
-    // D-PV11/D-PV12 (gate adversarial, "criar com o e-mail do Super → 409"): a conta com vínculo de super (vivo ou adormecido) não é
-    // interceptada pelo cadastro do cliente — segue a recusa de antes, com a mesma mensagem genérica (nada revela que é do Super)
+    // D-UC17 + D-PV11/D-PV12 (gate adversarial, "criar com o e-mail do Super → 409"): a conta com vínculo de super (vivo ou adormecido)
+    // não é interceptada pelo cadastro do cliente — segue a recusa de antes, com a mesma mensagem genérica. D-UC20 (Valdo, 2026-11-14):
+    // como todo outro login vira convite, esta recusa IDENTIFICA o e-mail de um Super — limite aceito, com UMA linha de alarme por recusa
+    // (quem tentou e de onde; nunca o e-mail — D-EA21), para a operação ver alguém mapeando as contas da equipe
     if (!scope.isSuper && (await listActiveUserLinks(owner)).some(l => l.kind === 'super')) {
+      logger.warn('[ALARME CONVITE] cadastro de cliente tentou usar o e-mail de uma conta de super — recusado com 409 (D-UC20)', {
+        byUserId: scope.userId, institutionId: scope.institutionId, at: new Date().toISOString(),
+      })
       throw new HttpError(409, 'E-mail já usado como login de outro usuário',
         [{ field: 'email', message: 'E-mail já usado como login de outro usuário' }])
     }

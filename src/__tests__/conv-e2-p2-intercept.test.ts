@@ -6,6 +6,8 @@ import { createUser } from '../modules/users/users.service'
 import { UserCreateInput, UserScope } from '../modules/users/users.interface'
 
 jest.mock('../modules/users/users.repository')
+jest.mock('../shared/logger/logger', () => ({ __esModule: true, default: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }))
+import logger from '../shared/logger/logger'
 
 const mockFindOwner = repo.findLoginEmailOwner as jest.Mock
 const mockInsert    = repo.insertUserCascade   as jest.Mock
@@ -48,6 +50,11 @@ describe('createUser — e-mail que já é login (D-UC4)', () => {
     await expect(createUser(admin, input)).rejects.toMatchObject({
       statusCode: 409, fields: [{ field: 'email', message: 'E-mail já usado como login de outro usuário' }] })
     expect(mockInvite).not.toHaveBeenCalled()
+    // D-UC20: a recusa deixa UMA linha de alarme, com quem tentou e sem o e-mail
+    const warns = JSON.stringify((logger.warn as jest.Mock).mock.calls)
+    expect(warns).toContain('[ALARME CONVITE]')
+    expect(warns).toContain('"byUserId":41')
+    expect(warns).not.toContain('pessoa@x.com')
   })
 
   it('o Super também passa pelo convite (D-UC16) e escolhe o perfil', async () => {
