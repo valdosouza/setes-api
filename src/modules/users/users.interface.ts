@@ -15,6 +15,8 @@ export interface UserListRow {
   active: 'S' | 'N'
   /** Perfil do vínculo com o institution do filtro (null sem filtro). */
   kind:   string | null
+  /** Convite do vínculo em foco (D-UC14/D-UC15): 'pending' = aguardando aceite (sem nome — A-UC4); null sem foco ou sem convite. */
+  invite?: 'pending' | 'withdrawn' | 'accepted' | null
 }
 
 export interface UserRow {
@@ -32,6 +34,8 @@ export interface UserRow {
    * uma vez só; com senha, só o titular troca, pela recuperação. Nunca o hash.
    */
   hasCredential: boolean
+  /** Convite do vínculo em foco (D-UC14/D-UC15); nunca aceito = nome nulo (A-UC4). Null sem foco ou sem convite. */
+  invite?:       'pending' | 'withdrawn' | 'accepted' | null
 }
 
 export interface UserInput {

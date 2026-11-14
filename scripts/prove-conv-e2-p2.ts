@@ -20,6 +20,8 @@
  *       vínculo antigo sem convite segue o regime de antes (ativa na lista, inativa fora dela, nunca vira convite)
  *   P11 a lista de vínculos do Super mostra o pendente como concedido, com `invite = 'pending'`
  *   P12 `setes_central` intacta
+ *   P14 A-UC4/A-UC8: no foco do convite nunca aceito a lista e o GET não trazem o nome, a busca por nome não o acha (pelo e-mail
+ *       sim), e o PUT não ativa o pendente nem deixa o admin desse estabelecimento editar a credencial
  *   P13 os dados do aviso (T2) saem do banco: o e-mail de LOGIN do titular e o nome do estabelecimento que convidou — nada mais
  *
  * Uso: npx tsx --require tsconfig-paths/register scripts/prove-conv-e2-p2.ts   (SQL_DIR = o repositório sql)
@@ -31,7 +33,9 @@ import pool from '@shared/db/connection'
 import { splitStatements } from '../src/migrations/runner'
 import { assertInviteSchema, pendingInviteSql } from '@shared/user/invite'
 import { createUser, saveInstitutionLinks, withdrawUserInvite } from '@modules/users/users.service'
-import { listInstitutionLinks, findInviteNoticeData } from '@modules/users/users.repository'
+import { listInstitutionLinks, findInviteNoticeData, listUsers, getUser } from '@modules/users/users.repository'
+import { NO_CRITERIA } from '@shared/list'
+import { editUser } from '@modules/users/users.service'
 import { UserScope } from '@modules/users/users.interface'
 
 const PROBE = `setes_convp2_${process.pid}`
@@ -216,6 +220,30 @@ async function main(): Promise<void> {
     const notice = await findInviteNoticeData(uid, 30)
     check('P13: o aviso lê só o e-mail de login e o nome do estabelecimento',
       JSON.stringify(notice) === JSON.stringify({ email: EMAIL, institutionName: 'E30' }), JSON.stringify(notice))
+
+    // P14 — o nome some no foco do convite nunca aceito (30 está pendente); aparece no foco aceito (10) e sem foco
+    const q = (filter: string) => ({ filter, page: 1, pageSize: 25, offset: 0, criteria: NO_CRITERIA }) as any
+    const in30 = (await listUsers(q(''), 30)).rows.find(r => Number(r.id) === uid)
+    const in10 = (await listUsers(q(''), 10)).rows.find(r => Number(r.id) === uid)
+    check('P14: lista no foco pendente = sem nome, com e-mail e invite=pending; no foco aceito o nome aparece',
+      in30?.name === null && in30?.email === EMAIL && in30?.invite === 'pending' && in10?.name === 'Pessoa', JSON.stringify([in30, in10]))
+    const byName30 = (await listUsers(q('Pessoa Original'), 30)).rows.length
+    const byMail30 = (await listUsers(q('pessoa.convp2'), 30)).rows.length
+    const byName10 = (await listUsers(q('Pessoa Original'), 10)).rows.length
+    check('P14: a busca por nome NÃO acha o pendente (pelo e-mail acha; no foco aceito o nome acha)',
+      byName30 === 0 && byMail30 === 1 && byName10 === 1, JSON.stringify({ byName30, byMail30, byName10 }))
+    const g30 = await getUser(uid, 30)
+    const gAll = await getUser(uid, null)
+    check('P14: GET no foco pendente sem nome; sem foco (Super) com nome',
+      g30?.nameCompany === null && g30?.nickTrade === null && (g30 as any)?.invite === 'pending' && gAll?.nickTrade === 'Pessoa',
+      JSON.stringify([g30, gAll]))
+    const ADMIN_30: UserScope = { isSuper: false, institutionId: 30, schemaName: 'setes_zp2_30', userId: 501 }
+    const put = { nameCompany: 'Pessoa Original', nickTrade: 'Pessoa', email: EMAIL }
+    const r14a = await expectHttp(editUser(ADMIN_30, uid, { ...put, nickTrade: 'Renomeado' } as any), 409, 'INVITE_PENDING')
+    const r14b = await expectHttp(editUser(SUPER, uid, { ...put, active: 'S', institutionId: 30 } as any), 409, 'INVITE_PENDING')
+    const s30b = await link(uid, 30)
+    check('P14: o PUT não ativa o pendente (nem o Super) e o admin do convite não edita a credencial (A-UC8/A-UC7)',
+      r14a === 'ok' && r14b === 'ok' && s30b?.active === 'N' && Number(s30b?.pending) === 1, JSON.stringify([r14a, r14b]))
   } finally {
     removeRedirect()
     await rawQuery(`DROP DATABASE IF EXISTS \`${PROBE}\``)

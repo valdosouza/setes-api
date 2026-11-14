@@ -39,8 +39,25 @@ export const USER_INSTITUTION_IDS =
   `(SELECT uih.tb_institution_id FROM setes_central.tb_institution_has_user uih
      WHERE uih.tb_user_id = u.id AND uih.active = 'S' AND uih.deleted = 'N')`
 
+/** Situação do convite de um vínculo: `null` = sem convite (anterior ao 75, do setes-sync). */
+export type LinkInviteState = 'pending' | 'withdrawn' | 'accepted' | null
+
+const INVITE_STATE_SQL = (a: string) =>
+  `CASE WHEN ${a}invited_at IS NULL THEN NULL
+        WHEN ${a}accepted_at IS NOT NULL THEN 'accepted'
+        WHEN ${a}invite_withdrawn_at IS NOT NULL THEN 'withdrawn'
+        ELSE 'pending' END`
+
+/**
+ * A-UC4 (CONV.E2.P2.T3): o vínculo EM FOCO nascido de convite e nunca aceito (pendente ou retirado) não mostra o NOME da pessoa —
+ * só o e-mail e o estado; nem a busca por nome o acha (senão o filtro revelaria o nome por tentativa). Sem foco (Super global) o
+ * `ihu` é nulo e o nome aparece.
+ */
+const NEVER_ACCEPTED_IN_FOCUS = '(ihu.invited_at IS NOT NULL AND ihu.accepted_at IS NULL)'
+const NAME_IN_FOCUS = (col: string) => `CASE WHEN ${NEVER_ACCEPTED_IN_FOCUS} THEN NULL ELSE ${col} END`
+
 export const USER_SEARCH_CRITERIA: readonly SearchCriterion[] = [
-  { key: 'name', kind: 'text', labelKey: 'search.users.name', expr: ['e.nick_trade', 'e.name_company'] },
+  { key: 'name', kind: 'text', labelKey: 'search.users.name', expr: [NAME_IN_FOCUS('e.nick_trade'), NAME_IN_FOCUS('e.name_company')] },
   { key: 'email', kind: 'text', labelKey: 'search.users.email', expr: 'm.email' },
   { key: 'kind', kind: 'options', labelKey: 'search.users.kind', expr: 'ihu.kind', options: USER_KINDS },
   { key: 'institution', kind: 'lookup', labelKey: 'search.users.institution', shape: 'set',
@@ -77,17 +94,18 @@ export async function listUsers(
          ON ihu.tb_user_id = u.id AND ihu.tb_institution_id = ?
         AND ihu.deleted = 'N'
      WHERE u.deleted = 'N'
-       AND (? = '' OR e.nick_trade LIKE ? OR e.name_company LIKE ? OR m.email LIKE ?)
+       AND (? = '' OR ${NAME_IN_FOCUS('e.nick_trade')} LIKE ? OR ${NAME_IN_FOCUS('e.name_company')} LIKE ? OR m.email LIKE ?)
        AND (? IS NULL OR ihu.tb_user_id IS NOT NULL)${query.criteria.sql}`
   const params = [institutionId, query.filter, like, like, like, institutionId,
                   ...query.criteria.params]
 
   const [rows] = await pool.query<any[]>(
     `SELECT u.id,
-            COALESCE(e.nick_trade, e.name_company) AS name,
+            ${NAME_IN_FOCUS('COALESCE(e.nick_trade, e.name_company)')} AS name,
             m.email,
             COALESCE(ihu.active, u.active) AS active,
-            ihu.kind
+            ihu.kind,
+            CASE WHEN ihu.tb_user_id IS NULL THEN NULL ELSE ${INVITE_STATE_SQL('ihu.')} END AS invite
      ${where}
      ORDER BY name, u.id
      LIMIT ? OFFSET ?`,
@@ -156,9 +174,10 @@ export async function userLinkedToInstitution(
 export async function getUser(id: number, institutionId: number | null = null): Promise<UserRow | null> {
   const [rows] = await pool.query<any[]>(
     `SELECT u.id,
-            e.name_company AS nameCompany,
-            e.nick_trade   AS nickTrade,
+            ${NAME_IN_FOCUS('e.name_company')} AS nameCompany,
+            ${NAME_IN_FOCUS('e.nick_trade')}   AS nickTrade,
             m.email,
+            CASE WHEN ihu.tb_user_id IS NULL THEN NULL ELSE ${INVITE_STATE_SQL('ihu.')} END AS invite,
             (u.password IS NOT NULL AND u.password <> '') AS hasCredential,
             CASE WHEN ? IS NULL THEN NULL
                  WHEN ihu.tb_user_id IS NULL THEN 'N'
@@ -541,14 +560,6 @@ export async function setInstitutionLinks(
 // O estado é derivado das colunas (`@shared/user/invite`); o banco recusa convite pendente ativo (CHECK — A-UC8).
 // ---------------------------------------------------------------------
 
-/** Situação do convite de um vínculo: `null` = sem convite (anterior ao 75, do setes-sync). */
-export type LinkInviteState = 'pending' | 'withdrawn' | 'accepted' | null
-
-const INVITE_STATE_SQL = (a: string) =>
-  `CASE WHEN ${a}invited_at IS NULL THEN NULL
-        WHEN ${a}accepted_at IS NOT NULL THEN 'accepted'
-        WHEN ${a}invite_withdrawn_at IS NOT NULL THEN 'withdrawn'
-        ELSE 'pending' END`
 
 /** Resultado do convite: novo vínculo, convite renovado (retirado antes, ou vínculo excluído) ou já pendente (nada muda). */
 export type InviteOutcome = 'invited' | 'reinvited' | 'already-pending'

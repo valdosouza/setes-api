@@ -166,6 +166,7 @@ export const ErrorCodes = {
   INVITE_PROFILE_USER_ONLY: 'INVITE_PROFILE_USER_ONLY',
   INVITE_PENDING: 'INVITE_PENDING',
   INVITE_NOT_PENDING: 'INVITE_NOT_PENDING',
+  USER_NAME_MANAGED_BY_SUPER: 'USER_NAME_MANAGED_BY_SUPER',
   // D-PV48 (2026-10-27): depois de criada a credencial, só o titular troca a senha (recuperação)
   PASSWORD_OWNER_ONLY: 'PASSWORD_OWNER_ONLY',
   // D-EA5 (Onda 3 do endurecer): a troca pelo código recusa a senha igual à atual — julgada SÓ depois do código certo (o código não é gasto)
@@ -370,6 +371,7 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   INVITE_PROFILE_USER_ONLY: 'Com cadastro já existente o perfil é Usuário — só quem cria a credencial escolhe Administrador (A-UC3)',
   INVITE_PENDING: 'Usuário aguardando aceite — só o login do titular ativa o vínculo; enquanto isso, só retirar o convite (A-UC8/D-UC15)',
   INVITE_NOT_PENDING: 'Não há convite aguardando aceite neste estabelecimento — só convite nunca aceito é retirado (D-UC15)',
+  USER_NAME_MANAGED_BY_SUPER: 'O nome é da pessoa — com vínculo ativo em outro estabelecimento, só o Super o altera (A-UC7)',
   PASSWORD_SAME_AS_CURRENT: 'A nova senha é igual à atual — escolha outra (D-EA5); o código de recuperação segue valendo',
   PASSWORD_OWNER_ONLY: 'Depois de criada a credencial, só o próprio usuário troca a senha — pelo "Esqueci minha senha" (D-PV48); o cadastro define a senha uma vez só, na criação',
   OWN_ESTABLISHMENT_READ_ONLY: 'A entidade é o próprio estabelecimento: a cadeia (razão social, IE/IM, endereços, contatos) e a tributação só se editam em Meu Estabelecimento (D-PV32) — os campos do papel seguem editáveis',

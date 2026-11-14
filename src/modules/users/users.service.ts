@@ -183,6 +183,7 @@ export async function editUser(
   const current = await getUser(id)
   if (!current) throw new HttpError(404, 'Usuário não encontrado')
   await assertAccountManageable(scope, id)
+  await assertInviteRules(scope, id, current, input)
   if (normalizeEmail(input.email) !== normalizeEmail(current.email ?? '')) {
     throw new HttpError(409, 'O e-mail de login não muda — a credencial é do titular (inative o vínculo e crie outro usuário)',
       [{ field: 'email', message: 'E-mail de login imutável' }], ErrorCodes.LOGIN_EMAIL_IMMUTABLE)
@@ -211,6 +212,32 @@ export async function editUser(
     hash = await hashPassword(input.password)   // D-EA9: antes da transação da cascata
   }
   await updateUserCascade(id, input, hash, linkInstitutionId)
+}
+
+/**
+ * Convite e nome no PUT (setes-api:CONV.E2.P2 — A-UC7, A-UC8, D-UC15):
+ *   - o admin cujo vínculo com a pessoa é convite NUNCA aceito não edita a credencial (só retira o convite): 409 INVITE_PENDING;
+ *   - ninguém ativa um convite pendente pelo cadastro (só o login do titular — A-UC8): 409 INVITE_PENDING (o CHECK do 75 recusaria);
+ *   - o nome é da pessoa: com vínculo ATIVO em outro estabelecimento, só o Super o altera — 409 USER_NAME_MANAGED_BY_SUPER.
+ */
+async function assertInviteRules(scope: UserScope, id: number, current: UserRow, input: UserUpdateInput): Promise<void> {
+  const links = await listActiveUserLinks(id)
+  const target = input.active !== undefined ? scopeInstitution(scope, input.institutionId ?? null) : null
+  const targetLink = target !== null ? links.find(l => l.institutionId === target && !l.deleted) : undefined
+  if (input.active === 'S' && targetLink?.invite === 'pending') {
+    throw new HttpError(409, 'Usuário aguardando aceite — só o login do titular ativa o vínculo', [], ErrorCodes.INVITE_PENDING)
+  }
+  if (scope.isSuper) return
+  const own = links.find(l => l.institutionId === scope.institutionId && !l.deleted)
+  if (own && (own.invite === 'pending' || own.invite === 'withdrawn')) {
+    throw new HttpError(409, 'Usuário aguardando aceite — enquanto isso, só retirar o convite', [], ErrorCodes.INVITE_PENDING)
+  }
+  const sameName = (a: string | null | undefined, b: string | null | undefined) => (a ?? '').trim() === (b ?? '').trim()
+  const renaming = !sameName(input.nameCompany, current.nameCompany) || !sameName(input.nickTrade, current.nickTrade)
+  if (renaming && links.some(l => l.alive && l.institutionId !== scope.institutionId)) {
+    throw new HttpError(409, 'O nome é da pessoa — com vínculo ativo em outro estabelecimento, só o Super o altera',
+      [{ field: 'nameCompany', message: 'Nome da credencial (A-UC7)' }], ErrorCodes.USER_NAME_MANAGED_BY_SUPER)
+  }
 }
 
 function normalizeEmail(email: string): string {
