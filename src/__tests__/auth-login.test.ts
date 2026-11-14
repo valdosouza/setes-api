@@ -10,6 +10,9 @@ import pool from '../shared/db/connection'
 
 jest.mock('../modules/auth/auth.repository', () => ({
   ...jest.requireActual('../modules/auth/auth.repository'),
+  // CONV.E2.P3 (D-UC12): o aceite do convite no login — aqui nenhum convite pendente (provado em `conv-e2-p3-login-accept.test.ts` e ao vivo
+  // por `scripts/prove-conv-e2-p3.ts`)
+  acceptPendingInvites: jest.fn().mockResolvedValue([]),
   findUserByEmail: jest.fn(), getInstitutionsForUser: jest.fn(),
   // Ondas 1+2 do endurecer (D-EA1/D-EA2): o login passa pelo pré-filtro e pela trava da linha do usuário — aqui sem falhas na janela
   // (o limite por conta é provado em `auth-login-lock-d-ea1.test.ts` e ao vivo por `scripts/prove-login-lock.ts`)

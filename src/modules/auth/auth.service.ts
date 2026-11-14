@@ -7,7 +7,7 @@ import {
   readCurrentPasswordReset, recordFailedPasswordResetAttempt, markPasswordResetUsed, updatePassword, rehashPassword,
   assertPasswordResetSchema, hasRecentPasswordResetNotice, insertPasswordResetNotice, PasswordResetNoticeKind,
   countLoginFailuresInWindow, insertLoginFailure, hasRecentLoginBlockNotice, insertLoginBlockNotice, assertLoginLockSchema,
-  LOGIN_MAX_FAILURES, LOGIN_FAILURE_WINDOW_MINUTES,
+  LOGIN_MAX_FAILURES, LOGIN_FAILURE_WINDOW_MINUTES, acceptPendingInvites,
 } from './auth.repository'
 import { recordLoginRefusal } from './login-watch'
 import pool from '@shared/db/connection'
@@ -298,8 +298,10 @@ async function judgeRound(email: string, meta: LoginMeta, user: AuthUser, passwo
   }
 
   let outcome: LoginTxOutcome
+  let acceptedNow: number[] = []
   try {
     outcome = await withDeadlockRetry('auth/login', { userId: user.id }, 3, async () => {
+      acceptedNow = []                                                   // cada tentativa do retry começa do zero
       const conn = await pool.getConnection()
       try {
         await conn.beginTransaction()
@@ -308,6 +310,9 @@ async function judgeRound(email: string, meta: LoginMeta, user: AuthUser, passwo
         if (judgement.verdict === 'right') {
           if (judgement.active !== 'S') out = { kind: 'inactive' }
           else {
+            // CONV.E2.P3 (D-UC12): o LOGIN é o aceite — senha certa e credencial ativa, sob a trava e pela MESMA conexão, todo convite
+            // PENDENTE vira vínculo ativo ANTES da leitura dos vínculos (o aceito já conta para a escolha e para a recusa "sem vínculo")
+            acceptedNow = await acceptPendingInvites(conn, user.id)
             // Gates das Ondas 1+2 (HIGH): sob a trava, NADA pede outra conexão ao pool — os vínculos vêm pela conexão da transação e
             // a assinatura não usa o banco; o bloco `context` (fato derivado, sem efeito de segurança) é lido DEPOIS do COMMIT
             const institutions = await getInstitutionsForUser(user.id, conn)
@@ -344,6 +349,8 @@ async function judgeRound(email: string, meta: LoginMeta, user: AuthUser, passwo
     alarmNeutral('auth/login', user.id, err, { deadlockIsAlarm: true })   // deadlock que esgotou o retry também é alarme com ref (L7)
     throw refuseLogin(email, meta, (err as { code?: unknown })?.code === 'ER_LOCK_DEADLOCK' ? 'contenção' : 'falha interna', user.id)
   }
+  // depois do COMMIT: a trilha do aceite (D-UC12) — sem e-mail (D-EA21); a resposta do login não muda de forma (nada de oráculo — D-EA6)
+  if (acceptedNow.length) logger.info('Convite aceito pelo login do titular', { userId: user.id, institutionIds: acceptedNow })
   return outcome
 }
 

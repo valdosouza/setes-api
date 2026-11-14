@@ -100,6 +100,38 @@ export async function lockUserCredential(conn: PoolConnection, userId: number): 
   return rows.length ? { id: Number(rows[0].id), active: String(rows[0].active), password: rows[0].password ?? null } : null
 }
 
+/**
+ * O ACEITE do convite pelo LOGIN do titular (setes-api:CONV.E2.P3 — D-UC12, D-UC14, D-UC15, A-UC8; script central 75). Roda na transação
+ * do login, DEPOIS da senha certa e da credencial ativa, com a linha `tb_user` já travada (`lockUserCredential` — parecer do guardião no
+ * CONV.E2.P1), e pela MESMA conexão (gate HIGH das Ondas 1+2: sob a trava nada pede outra conexão ao pool).
+ * Protocolo de trava (o mesmo da recuperação): os vínculos DELE são lidos sem FOR UPDATE (nenhuma trava de intervalo no filho); cada aceite
+ * é um UPDATE pela PK com o filtro do PENDENTE — o UPDATE lê a versão confirmada mais nova da linha, então um convite retirado por outra
+ * transação no meio do caminho não é aceito (o filtro falha) e o write-once de `accepted_at` fica no próprio filtro. Vínculo sem convite
+ * (anterior ao 75, do setes-sync) e convite retirado nunca entram. Devolve os estabelecimentos aceitos agora.
+ */
+export async function acceptPendingInvites(conn: PoolConnection, userId: number): Promise<number[]> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT tb_institution_id AS institutionId
+       FROM setes_central.tb_institution_has_user
+      WHERE tb_user_id = ? AND deleted = 'N'
+        AND invited_at IS NOT NULL AND accepted_at IS NULL AND invite_withdrawn_at IS NULL`,
+    [userId]
+  )
+  const accepted: number[] = []
+  for (const r of rows as any[]) {
+    const institutionId = Number(r.institutionId)
+    const [res] = await conn.query<ResultSetHeader>(
+      `UPDATE setes_central.tb_institution_has_user
+          SET active = 'S', accepted_at = NOW(), updated_at = NOW()
+        WHERE tb_institution_id = ? AND tb_user_id = ? AND deleted = 'N'
+          AND invited_at IS NOT NULL AND accepted_at IS NULL AND invite_withdrawn_at IS NULL`,
+      [institutionId, userId]
+    )
+    if (Number(res?.affectedRows ?? 0) === 1) accepted.push(institutionId)
+  }
+  return accepted
+}
+
 export interface PasswordResetIssueCount {
   lastHour: number
   lastDay:  number
