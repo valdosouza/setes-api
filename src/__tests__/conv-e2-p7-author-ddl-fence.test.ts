@@ -18,7 +18,7 @@ function canonicalTable(): string {
 function checkBodies(sql: string): Record<string, string> {
   const out: Record<string, string> = {}
   for (const name of CHECKS) {
-    const m = new RegExp(`\`${name}\`\s+CHECK\s*(\([\s\S]*?\))\s*(,|\n\)|;|$)`).exec(sql)
+    const m = new RegExp(`\`${name}\`\\s+CHECK\\s*(\\([\\s\\S]*?\\))\\s*(,|\\n\\)|;|$)`).exec(sql)
     expect(m).not.toBeNull()
     out[name] = m![1].replace(/\s+/g, '')
   }
