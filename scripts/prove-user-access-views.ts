@@ -139,6 +139,10 @@ async function resetOld(conn: mysql.PoolConnection): Promise<void> {
   await conn.query(`DROP DATABASE IF EXISTS \`${BACKFILL}\``)
   await conn.query(`CREATE DATABASE \`${BACKFILL}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
   await conn.query(OLD_TABLE(BACKFILL))
+  // o schema como a 075 o deixou (a 076 recria a vw_user_access sobre a vw_user_reach dela — a ordem do runner)
+  await conn.query(`CREATE TABLE \`${BACKFILL}\`.tb_institution_has_interface LIKE \`${CLIENT}\`.tb_institution_has_interface`)
+  await conn.query(`USE \`${BACKFILL}\``)
+  for (const st of statementsOf(migrationSql('075_user_access_views.sql'))) await conn.query(st)
   await conn.query(`INSERT INTO \`${BACKFILL}\`.tb_user_has_privilege (tb_user_id, tb_interface_id, tb_privilege_id, active, deleted)
     VALUES (3, 10, 6, 'S', 'N'), (3, 10, 9, 'S', 'N'), (4, 11, 2, 'N', 'N')`)
 }
@@ -170,8 +174,29 @@ async function proveBackfill(conn: mysql.PoolConnection): Promise<void> {
   const none = await apply076(conn, BACKFILL)
   const [after] = await conn.query<any[]>(`SELECT COUNT(*) n FROM \`${BACKFILL}\`.tb_user_has_privilege
     WHERE tb_institution_id IS NOT NULL`)
-  check('076 sem institution viva: para com erro e nenhuma linha ganha institution (nem 0)', none !== null && Number(after[0].n) === 0,
+  check('076 sem institution viva: para na trava (4025) e nenhuma linha ganha institution (nem 0)', /^4025\b/.test(String(none))
+    && Number(after[0].n) === 0,
     `${none} · ${JSON.stringify(after)}`)
+  // ...e o boot seguinte, com a institution de volta, termina a 076 sobre o que a tentativa anterior deixou (coluna NULL)
+  await conn.query(`UPDATE \`${CENTRAL}\`.tb_institution SET deleted = 'N' WHERE id = 20`)
+  const retry = await apply076(conn, BACKFILL)
+  check('076 depois da falha: com a institution de volta, a reexecução completa e preenche', retry === null && eq(await rowsOf(), [20, 20, 20]),
+    `${retry} · ${JSON.stringify(await rowsOf())}`)
+  // a tentativa que MORREU entre os dois ALTER (a trava gravada, o MODIFY não): o boot seguinte completa a 076 (re-gate socrático)
+  await resetOld(conn)
+  await conn.query(`ALTER TABLE \`${BACKFILL}\`.tb_user_has_privilege ADD COLUMN tb_institution_id INT NULL AFTER tb_user_id`)
+  await conn.query(`UPDATE \`${BACKFILL}\`.tb_user_has_privilege SET tb_institution_id = 20`)
+  await conn.query(`ALTER TABLE \`${BACKFILL}\`.tb_user_has_privilege ADD CONSTRAINT ck_uhp_institution_filled
+    CHECK (tb_institution_id IS NOT NULL AND tb_institution_id <> 0)`)
+  const leftover = await apply076(conn, BACKFILL)
+  const [cks] = await conn.query<any[]>(`SELECT COUNT(*) n FROM information_schema.TABLE_CONSTRAINTS
+    WHERE CONSTRAINT_SCHEMA = ? AND TABLE_NAME = 'tb_user_has_privilege' AND CONSTRAINT_NAME = 'ck_uhp_institution_filled'`, [BACKFILL])
+  check('076 com a trava sobrando de uma tentativa interrompida: completa, preenche e não deixa a trava',
+    leftover === null && eq(await rowsOf(), [20, 20, 20]) && Number(cks[0].n) === 0, `${leftover} · ${JSON.stringify(cks)}`)
+  const [idx] = await conn.query<any[]>(`SELECT DISTINCT INDEX_NAME i FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'tb_user_has_privilege' ORDER BY 1`, [BACKFILL])
+  check('076: a fk da institution usa o idx_uhp_institution (nenhum índice a mais que o canônico)',
+    eq(idx.map((r: any) => r.i), ['idx_uhp_institution', 'PRIMARY']), JSON.stringify(idx))
   await conn.query(`DROP DATABASE IF EXISTS \`${BACKFILL}\``)
   await conn.query(`DELETE FROM \`${CENTRAL}\`.tb_institution WHERE id IN (20, 21, 22)`)
   await conn.query(`USE \`${CLIENT}\``)

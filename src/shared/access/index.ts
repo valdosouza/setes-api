@@ -1,4 +1,5 @@
 import pool from '@shared/db/connection'
+import logger from '@shared/logger/logger'
 import * as lib from 'fiscal-api/access'
 import { InstitutionPayload } from '@shared/types/express'
 import { HttpError } from '@shared/errors/http-error'
@@ -142,6 +143,7 @@ export async function assertAccessSchemaViews(): Promise<string> {
   const [institutions] = await pool.query<any[]>(
     "SELECT schema_name FROM setes_central.tb_institution WHERE active = 'S' AND deleted = 'N'")
   const bad: string[] = []
+  const unreadable: string[] = []
   for (const i of institutions) {
     const schema = assertSchema(String(i.schema_name))      // o nome vai interpolado: a MESMA guarda dos outros leitores
     for (const [view, columns] of SCHEMA_VIEW_COLUMNS) {
@@ -168,13 +170,18 @@ export async function assertAccessSchemaViews(): Promise<string> {
     const [defs] = await pool.query<any[]>(
       "SELECT VIEW_DEFINITION AS d FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'vw_user_access'", [schema])
     const definition = String(defs[0]?.d ?? '')
-    // definição ilegível (sem SHOW VIEW) não reprova: a conferência pelas colunas acima já correu; legível e SEM o filtro, reprova
-    if (definition !== '' && !GRANT_BY_INSTITUTION.test(definition)) bad.push(`${schema}.vw_user_access (sem a institution na concessão)`)
+    // definição ilegível (sem SHOW VIEW) não reprova, mas avisa: a conferência pelas colunas acima já correu; legível e SEM o filtro,
+    // reprova
+    if (definition === '') unreadable.push(schema)
+    else if (!GRANT_BY_INSTITUTION.test(definition)) bad.push(`${schema}.vw_user_access (sem a institution na concessão)`)
   }
   if (bad.length) {
     throw new Error(`veredito de acesso ausente ou desatualizado: ${bad.join(', ')} — as migrations 075 e 076 não rodaram nesses schemas `
       + '(ou o script sql/70 foi aplicado depois e a view ficou inválida: reaplique a 075 E a 076 no schema, nesta ordem) — costura A1 '
       + '(D-AU3) e privilégio por estabelecimento (D-GE3)')
+  }
+  if (unreadable.length) {
+    logger.warn('Definição da vw_user_access ilegível (sem SHOW VIEW): a linha da D-GE3 não foi conferida nesses schemas', { schemas: unreadable })
   }
   return `${institutions.length} schema(s)`
 }
