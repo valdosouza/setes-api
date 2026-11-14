@@ -185,9 +185,15 @@ export async function assertPasswordAuthorSchema(q: Pick<typeof pool, 'query'> =
     throw err
   }
   const [rows] = await q.query<any[]>(
-    `SELECT CONSTRAINT_NAME AS name FROM information_schema.CHECK_CONSTRAINTS
+    `SELECT CONSTRAINT_NAME AS name, CHECK_CLAUSE AS clause FROM information_schema.CHECK_CONSTRAINTS
      WHERE CONSTRAINT_SCHEMA = 'setes_central' AND TABLE_NAME = 'tb_user'
        AND CONSTRAINT_NAME IN ('ck_user_password_author_role', 'ck_user_password_author_has_password')`)
+  // re-gate socrático do P7 (LOW): o corpo do domínio é BINÁRIO ('t' minúscula recusada) — o nome sozinho não prova o corpo (lição do 75)
+  const domain = (rows as any[]).find(r => String(r.name) === 'ck_user_password_author_role')
+  if (domain && !/utf8mb4_bin/i.test(String(domain.clause ?? ''))) {
+    throw new Error('setes_central.tb_user com o CHECK ck_user_password_author_role sem a colação binária — reaplique o script '
+      + 'sql/76_user_password_author_ddl.sql (D-UC19)')
+  }
   if ((rows as any[]).length !== 2) {
     throw new Error('setes_central.tb_user sem os CHECKs do papel da senha — aplique o script sql/76_user_password_author_ddl.sql (D-UC19)')
   }

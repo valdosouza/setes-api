@@ -48,13 +48,16 @@ async function centralColumns(conn: mysql.PoolConnection): Promise<string[]> {
 async function main(): Promise<void> {
   const conn = await pool.getConnection()
   const U = `\`${PROBE}\`.\`tb_user\``
+  let before: string[] = []
   try {
     await conn.query('SET NAMES utf8mb4')
-    const before = await centralColumns(conn)
-    check('A8 (antes): o setes_central do dev ainda não tem a coluna do 76', !before.includes('password_author_role'), JSON.stringify(before))
+    before = await centralColumns(conn)   // o retrato de antes (o 76 pode já estar aplicado no setes_central — a prova não depende disso)
     await conn.query(`DROP DATABASE IF EXISTS \`${PROBE}\``)
     await conn.query(`CREATE DATABASE \`${PROBE}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`)
     await conn.query(`CREATE TABLE ${U} LIKE \`setes_central\`.\`tb_user\``)
+    // se o setes_central já tiver o 76, a cópia nasce com ele: volta ao estado de antes para provar o 76 do zero
+    await conn.query(`ALTER TABLE ${U} DROP CONSTRAINT IF EXISTS ck_user_password_author_role, DROP CONSTRAINT IF EXISTS ck_user_password_author_has_password`).catch(() => undefined)
+    await conn.query(`ALTER TABLE ${U} DROP COLUMN IF EXISTS password_author_role`)
     await conn.query(`ALTER TABLE ${U} ADD COLUMN IF NOT EXISTS password_set_at DATETIME NULL DEFAULT NULL AFTER password`)
     // linhas de ANTES: com senha (e instante), com senha sem instante (anterior ao 70), sem senha (setes-sync)
     await conn.query(`INSERT INTO ${U} (id, password, password_set_at, active, deleted, created_at) VALUES
@@ -110,7 +113,7 @@ async function main(): Promise<void> {
   } finally {
     await conn.query(`DROP DATABASE IF EXISTS \`${PROBE}\``).catch(() => undefined)
     const after = await centralColumns(conn)
-    check('A8: setes_central intacta (sem a coluna do 76)', !after.includes('password_author_role'), JSON.stringify(after))
+    check('A8: setes_central intacta (mesmas colunas antes e depois)', JSON.stringify(after) === JSON.stringify(before), JSON.stringify(after))
     conn.release()
     await pool.end()
   }
