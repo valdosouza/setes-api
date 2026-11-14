@@ -28,6 +28,7 @@ beforeEach(() => {
   ;(repo.inviteToInstitution as jest.Mock).mockImplementation(async () => { order.push('commit do convite'); return 'invited' })
   ;(repo.findInviteNoticeData as jest.Mock).mockResolvedValue({ email: 'pessoa@x.com', institutionName: 'Loja <B> & Cia' })
   ;(repo.userExists as jest.Mock).mockResolvedValue(true)
+  ;(repo.listActiveUserLinks as jest.Mock).mockResolvedValue([])
   mail.mockImplementation(async () => { order.push('e-mail') })
 })
 

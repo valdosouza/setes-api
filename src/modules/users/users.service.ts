@@ -150,6 +150,12 @@ export async function createUser(
       throw new HttpError(409, 'E-mail já usado como login — escolha o estabelecimento para vincular o cadastro existente',
         [{ field: 'email', message: 'E-mail já usado como login' }])
     }
+    // D-PV11/D-PV12 (gate adversarial, "criar com o e-mail do Super → 409"): a conta com vínculo de super (vivo ou adormecido) não é
+    // interceptada pelo cadastro do cliente — segue a recusa de antes, com a mesma mensagem genérica (nada revela que é do Super)
+    if (!scope.isSuper && (await listActiveUserLinks(owner)).some(l => l.kind === 'super')) {
+      throw new HttpError(409, 'E-mail já usado como login de outro usuário',
+        [{ field: 'email', message: 'E-mail já usado como login de outro usuário' }])
+    }
     if (!scope.isSuper && kind !== 'user') {
       throw new HttpError(400, 'Com cadastro já existente o perfil é Usuário',
         [{ field: 'kind', message: 'Só quem cria a credencial escolhe Administrador (A-UC3)' }], ErrorCodes.INVITE_PROFILE_USER_ONLY)
@@ -183,7 +189,6 @@ export async function editUser(
   const current = await getUser(id)
   if (!current) throw new HttpError(404, 'Usuário não encontrado')
   await assertAccountManageable(scope, id)
-  await assertInviteRules(scope, id, current, input)
   if (normalizeEmail(input.email) !== normalizeEmail(current.email ?? '')) {
     throw new HttpError(409, 'O e-mail de login não muda — a credencial é do titular (inative o vínculo e crie outro usuário)',
       [{ field: 'email', message: 'E-mail de login imutável' }], ErrorCodes.LOGIN_EMAIL_IMMUTABLE)
@@ -211,6 +216,7 @@ export async function editUser(
     }
     hash = await hashPassword(input.password)   // D-EA9: antes da transação da cascata
   }
+  await assertInviteRules(scope, id, current, input)
   await updateUserCascade(id, input, hash, linkInstitutionId)
 }
 

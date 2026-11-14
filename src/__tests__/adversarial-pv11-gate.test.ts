@@ -127,7 +127,8 @@ function defaultDb(sql: string, params: any[] = []): any {
   }
   if (/SELECT 1 FROM setes_central\.tb_user WHERE id = \?/.test(sql)) return [[{ 1: 1 }]]
   // D-PV19: editUser lê a conta (getUser) — e-mail atual + ativo do vínculo em foco
-  if (/e\.name_company AS nameCompany/.test(sql) && /FROM setes_central\.tb_user u/.test(sql)) {
+  // CONV.E2.P2: o nome sai por CASE (nulo no foco do convite nunca aceito — A-UC4): `… e.name_company END AS nameCompany`
+  if (/e\.name_company( END)? AS nameCompany/.test(sql) && /FROM setes_central\.tb_user u/.test(sql)) {
     const uid = Number(params[2] ?? params[0])
     return [[{ id: uid, nameCompany: 'U', nickTrade: 'U', email: EMAILS[uid] ?? `u${uid}@x.com`, active: 'S', hasCredential: 1 }]]
   }
@@ -336,7 +337,9 @@ describe('(2) auto-concessão pelo cadastro de privilégios', () => {
   it('[DECIDIDO D-PV19 + D-PV48] admin de OUTRO cliente edita usuário vinculado TAMBÉM à Setes (a A-PV13 morreu) — mas a SENHA ninguém troca: 409', async () => {
     LINKS[5] = [1, 7]
     try {
-      const body = { nameCompany: 'Suporte', nickTrade: 'Suporte', email: 'suporte@setes.com.br', active: 'S' }
+      // CONV.E2.P2 (A-UC7, ratificada 2026-10-20): o NOME é da pessoa — com vínculo ativo em outro estabelecimento só o Super o troca;
+      // o corpo leva o nome ATUAL (o do dublê, 'U') para o PUT seguir provando o que este caso prova: edita, mas a senha ninguém troca
+      const body = { nameCompany: 'U', nickTrade: 'U', email: 'suporte@setes.com.br', active: 'S' }
       const pw = await request(app).put('/api/users/5').set('Authorization', OTHER_ADMIN).send({ ...body, password: 'nova-senha' })
       expect([pw.status, pw.body.code]).toEqual([409, 'PASSWORD_OWNER_ONLY'])
       const r = await request(app).put('/api/users/5').set('Authorization', OTHER_ADMIN).send(body)

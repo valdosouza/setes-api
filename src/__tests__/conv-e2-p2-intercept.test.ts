@@ -20,6 +20,7 @@ beforeEach(() => {
   mockFindOwner.mockResolvedValue(77)          // o e-mail JÁ é login da credencial 77
   mockInvite.mockResolvedValue('invited')
   mockInsert.mockResolvedValue(900)
+  ;(repo.listActiveUserLinks as jest.Mock).mockResolvedValue([])
 })
 
 describe('createUser — e-mail que já é login (D-UC4)', () => {
@@ -39,6 +40,13 @@ describe('createUser — e-mail que já é login (D-UC4)', () => {
     await expect(createUser(admin, { ...input, kind: 'admin' })).rejects.toMatchObject({
       statusCode: 400, code: 'INVITE_PROFILE_USER_ONLY', fields: [{ field: 'kind', message: expect.any(String) }],
     })
+    expect(mockInvite).not.toHaveBeenCalled()
+  })
+
+  it('a conta com vínculo de super (vivo ou adormecido) não é interceptada pelo cliente: 409 genérico de antes (D-PV11/D-PV12)', async () => {
+    ;(repo.listActiveUserLinks as jest.Mock).mockResolvedValue([{ institutionId: 1, kind: 'super', alive: false, deleted: false, invite: null }])
+    await expect(createUser(admin, input)).rejects.toMatchObject({
+      statusCode: 409, fields: [{ field: 'email', message: 'E-mail já usado como login de outro usuário' }] })
     expect(mockInvite).not.toHaveBeenCalled()
   })
 
