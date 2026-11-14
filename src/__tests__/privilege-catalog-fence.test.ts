@@ -64,7 +64,8 @@ const IMPL_NON_PRIVILEGE: Record<string, Record<string, string>> = {
     reachableKeys: 'ALCANCE/licença (sem verbo)',
     accessRows: 'o MENU: devolve TUDO o que o usuário pode (leitor registrado em GRANT_READERS — VISUALIZAR dá o item, REGRA do menu)',
     assertAccessViews: 'boot: as views existem e os literais batem (sem verbo)',
-    assertAccessSchemaViews: 'boot: as views POR SCHEMA (migration 075) existem em cada institution ativa (sem verbo)',
+    assertAccessSchemaViews: 'boot: as views POR SCHEMA (migrations 075 e 076) existem em cada institution ativa (sem verbo)',
+    GRANT_BY_INSTITUTION: 'boot: a linha da D-GE3 (concessão pela institution) na definição da vw_user_access (sem verbo)',
     INTERFACE_KEY_FORM: 'a forma canônica da chave (D-PV42) — a da biblioteca, usada pelo catálogo como INTERFACE_KEY_PATTERN (sem verbo)',
   },
   'setes-api src/shared/auth/module-privilege-gate.ts': {

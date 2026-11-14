@@ -117,6 +117,21 @@ describe('T1/T2 — a chave e o veredito (cercas sobre o SQL que vai ao banco)',
     expect(view).toMatch(/LEFT JOIN `tb_user_has_privilege` g\s+ON g\.`tb_user_id` = r\.`tb_user_id`\s+AND g\.`tb_institution_id` = r\.`tb_institution_id`/)
   })
 
+  it('a cerca pega o leitor que filtra a institution de OUTRA tabela juntada, não a da concessão', () => {
+    const leak = "LEFT JOIN `x`.tb_user_has_privilege uhp ON uhp.tb_user_id = ? WHERE ihi.tb_institution_id = ?`,"
+    const m = /tb_user_has_privilege(?:\s+(?:AS\s+)?(\w+))?([\s\S]*?)`\s*[,)]/i.exec(leak)!
+    expect(m[1]).toBe('uhp')
+    expect(new RegExp(`\\b${m[1]}\\.tb_institution_id\\s*=`).test(m[0])).toBe(false)
+  })
+
+  it('o boot reconhece a linha da D-GE3 na definição que o MariaDB guarda da view', () => {
+    const { GRANT_BY_INSTITUTION } = jest.requireActual('../shared/access') as typeof import('../shared/access')
+    expect(GRANT_BY_INSTITUTION.test('left join `s`.`tb_user_has_privilege` `g` on(`g`.`tb_user_id` = `r`.`tb_user_id` and '
+      + '`g`.`tb_institution_id` = `r`.`tb_institution_id` and `g`.`tb_interface_id` = `ihp`.`tb_interface_id`')).toBe(true)
+    expect(GRANT_BY_INSTITUTION.test('left join `s`.`tb_user_has_privilege` `g` on(`g`.`tb_user_id` = `r`.`tb_user_id` and '
+      + '`g`.`tb_interface_id` = `ihp`.`tb_interface_id`')).toBe(false)
+  })
+
   it('todo SQL do código de produto que toca tb_user_has_privilege nomeia a institution', () => {
     const ROOT = path.join(__dirname, '..')
     const offenders: string[] = []
@@ -125,10 +140,17 @@ describe('T1/T2 — a chave e o veredito (cercas sobre o SQL que vai ao banco)',
         const p = path.join(dir, e.name)
         if (e.isDirectory()) { if (!['__tests__', 'test-setup', 'migrations'].includes(e.name)) walk(p); continue }
         if (!e.name.endsWith('.ts')) continue
-        // sem comentários; de cada menção à tabela até o FIM do literal SQL (crase seguida de `,` ou `)`)
+        // sem comentários; de cada menção à tabela até o FIM do literal SQL (crase seguida de `,` ou `)`). Com apelido (`... uhp`), a
+        // institution tem de vir PELO apelido (`uhp.tb_institution_id`) — a de outra tabela juntada não serve (gate socrático, achado 3);
+        // sem apelido (INSERT/UPDATE), a coluna nua.
         const code = fs.readFileSync(p, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-        for (const m of code.matchAll(/tb_user_has_privilege[\s\S]*?`\s*[,)]/g)) {
-          if (!/tb_institution_id/.test(m[0])) offenders.push(`${path.relative(ROOT, p)}: ${m[0].slice(0, 80)}`)
+        for (const m of code.matchAll(/tb_user_has_privilege(?:\s+(?:AS\s+)?(\w+))?([\s\S]*?)`\s*[,)]/gi)) {
+          const alias = m[1] && !/^(SET|WHERE|ON|VALUES|LIMIT|AND|OR|INNER|LEFT|JOIN|GROUP|ORDER)$/i.test(m[1]) ? m[1] : null
+          // sem apelido, a coluna pode vir ANTES da tabela (`SELECT tb_institution_id FROM … tb_user_has_privilege`)
+          const ok = alias
+            ? new RegExp(`\\b${alias}\\.tb_institution_id\\s*=`).test(m[0])
+            : /(^|[^\w.])tb_institution_id\b/.test(code.slice(Math.max(0, (m.index ?? 0) - 120), m.index) + m[0])
+          if (!ok) offenders.push(`${path.relative(ROOT, p)}: ${m[0].slice(0, 80)}`)
         }
       }
     }

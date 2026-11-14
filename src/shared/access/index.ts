@@ -156,13 +156,31 @@ export async function assertAccessSchemaViews(): Promise<string> {
         throw err
       }
     }
+    // D-GE3 (migration 076 — gate socrático do GRUPO.E3.P1): a concessão é POR ESTABELECIMENTO. A coluna existe e a vw_user_access
+    // em vigor a usa — reaplicar só a 075 devolveria a view antiga (a concessão da matriz valendo na filial) com as MESMAS colunas.
+    try {
+      await pool.query(`SELECT tb_institution_id FROM \`${schema}\`.tb_user_has_privilege LIMIT 0`)
+    } catch (err: any) {
+      if (err?.errno === 1054 || err?.code === 'ER_BAD_FIELD_ERROR' || err?.errno === 1146 || err?.code === 'ER_NO_SUCH_TABLE') {
+        bad.push(`${schema}: falta tb_institution_id em tb_user_has_privilege`)
+      } else throw err
+    }
+    const [defs] = await pool.query<any[]>(
+      "SELECT VIEW_DEFINITION AS d FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'vw_user_access'", [schema])
+    const definition = String(defs[0]?.d ?? '')
+    // definição ilegível (sem SHOW VIEW) não reprova: a conferência pelas colunas acima já correu; legível e SEM o filtro, reprova
+    if (definition !== '' && !GRANT_BY_INSTITUTION.test(definition)) bad.push(`${schema}.vw_user_access (sem a institution na concessão)`)
   }
   if (bad.length) {
-    throw new Error(`views do veredito de acesso ausentes ou inválidas: ${bad.join(', ')} — a migration 075 não rodou nesses schemas `
-      + '(ou o script sql/70 foi aplicado depois e a view ficou inválida: reaplique a 075 no schema) — costura A1 (D-AU3)')
+    throw new Error(`veredito de acesso ausente ou desatualizado: ${bad.join(', ')} — as migrations 075 e 076 não rodaram nesses schemas `
+      + '(ou o script sql/70 foi aplicado depois e a view ficou inválida: reaplique a 075 E a 076 no schema, nesta ordem) — costura A1 '
+      + '(D-AU3) e privilégio por estabelecimento (D-GE3)')
   }
   return `${institutions.length} schema(s)`
 }
+
+/** A linha da D-GE3 na `vw_user_access` (076), como o MariaDB guarda a definição: a concessão `g` pela institution do alcance `r`. */
+export const GRANT_BY_INSTITUTION = /`g`\.`tb_institution_id`\s*=\s*`r`\.`tb_institution_id`/
 
 /** As colunas que a biblioteca `fiscal-api/access` lê de cada view por schema (a 075). */
 const SCHEMA_VIEW_COLUMNS: readonly [string, string][] = [

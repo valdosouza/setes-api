@@ -192,6 +192,9 @@ async function main(): Promise<void> {
     for (const t of ['tb_user', 'tb_institution', 'tb_institution_has_user', 'tb_interface', 'tb_privilege', 'tb_interface_has_privilege']) {
       await conn.query(`CREATE TABLE \`${CENTRAL}\`.\`${t}\` LIKE \`setes_central\`.\`${t}\``)
     }
+    // D-GE3 (gate socrático do GRUPO.E3.P1): hoje `schema_name` é ÚNICO no central (uma institution por schema); a matriz e a filial no
+    // MESMO schema só existem a partir da onda 3 do grupo. Só no central DESCARTÁVEL a chave única sai, para provar o grupo.
+    await conn.query(`ALTER TABLE \`${CENTRAL}\`.tb_institution DROP INDEX IF EXISTS \`schema_name\``)
     for (const t of ['tb_institution_has_interface', 'tb_user_has_privilege']) {
       await conn.query(`CREATE TABLE \`${CLIENT}\`.\`${t}\` LIKE \`setes_setes\`.\`${t}\``)
     }

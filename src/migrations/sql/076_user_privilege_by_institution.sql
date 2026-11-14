@@ -9,7 +9,8 @@
 -- Preenchimento: hoje cada schema tem UMA institution viva (a filial só nasce na onda 3 do grupo), e a concessão existente vai para
 -- ela — neutro. Schema com MAIS de uma institution viva: o UPDATE abaixo FALHA (erro 1242, "Subquery returns more than 1 row") e o
 -- boot para — de propósito: copiar a concessão para todas faria a matriz valer na filial (o contrário da D-GE3), e escolher uma seria
--- decisão do Valdo, nunca do código. Schema sem institution viva com concessão: o MODIFY para NOT NULL falha (1265/1048) — idem.
+-- decisão do Valdo, nunca do código. (Hoje o caso é inalcançável: `setes_central.tb_institution.schema_name` é ÚNICO; a trava vale
+-- para quando a onda 3 do grupo tirar essa chave com um schema ainda sem a 076.) Schema sem institution viva com concessão: o MODIFY para NOT NULL falha (1265/1048) — idem.
 --
 -- Chave: (usuário, institution, interface, privilégio) — o usuário na frente mantém o índice da `fk_uhpriv_to_user` e serve a leitura
 -- (`tb_user_id = ? AND tb_institution_id = ?`); a institution ganha índice próprio para a chave estrangeira, como a
@@ -33,7 +34,7 @@ ALTER TABLE `tb_user_has_privilege`
   ADD KEY IF NOT EXISTS `idx_uhp_institution` (`tb_institution_id`);
 
 ALTER TABLE `tb_user_has_privilege`
-  ADD CONSTRAINT `fk_uhpriv_to_institution` FOREIGN KEY IF NOT EXISTS `fk_uhpriv_to_institution` (`tb_institution_id`)
+  ADD CONSTRAINT `fk_uhpriv_to_institution` FOREIGN KEY IF NOT EXISTS (`tb_institution_id`)
     REFERENCES `setes_central`.`tb_institution` (`id`) ON DELETE NO ACTION ON UPDATE NO ACTION;
 
 -- A `vw_user_access` da 075 com a linha reservada da D-GE3 (`AND g.tb_institution_id = r.tb_institution_id`); o resto é idêntico
