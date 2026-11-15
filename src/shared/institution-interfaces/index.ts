@@ -43,6 +43,78 @@ export function isStructuralInterface(interfaceKey: string | null | undefined): 
   return interfaceKey != null && STRUCTURAL_INTERFACE_KEYS.includes(interfaceKey)
 }
 
+type Querier = Pick<typeof pool, 'query'>
+
+/** As estruturais VIVAS do catálogo central (id e chave), em ordem de id — lidas UMA vez por boot. */
+export interface StructuralCatalog { ids: { id: number; key: string }[]; missingKeys: string[] }
+
+export async function readStructuralCatalog(q: Querier = pool): Promise<StructuralCatalog> {
+  const [rows] = await q.query<any[]>(
+    `SELECT id, i18n_key AS k FROM setes_central.tb_interface WHERE i18n_key IN (?) AND deleted = 'N' ORDER BY id`,
+    [STRUCTURAL_INTERFACE_KEYS]
+  )
+  const ids = (rows as any[]).map(r => ({ id: Number(r.id), key: String(r.k) }))
+  const found = new Set(ids.map(r => r.key))
+  return { ids, missingKeys: STRUCTURAL_INTERFACE_KEYS.filter(k => !found.has(k)) }
+}
+
+/**
+ * D-TM29 (Valdo 2026-10-31) + D-TM31 (2026-11-15) — "estrutural = todo cliente tem" por CONSTRUÇÃO: a concessão das telas
+ * ESTRUTURAIS da institution, regra ÚNICA do onboarding (`grantStructuralInterfaces`) e do passo do boot
+ * (`grantStructuralInterfacesToActive`). Idempotente: só CRIA a linha que FALTA — linha existente não muda (nem `updated_at`);
+ * a revogada pela aba do Super (D-PV35) NÃO volta (A-TM11, a ratificar). Na A2 este passo MUDA para a auth-api junto da escrita da
+ * licença (D-AU18 — `auth-api:AUTH.E2.P4.T4`).
+ *
+ * Quanto nasceu = as que FALTAVAM na leitura (gate do delta, HIGH): o `affectedRows` do upsert NÃO serve — o mysql2 liga FOUND_ROWS
+ * por padrão e a linha existente "sem mudança" também conta 1. O upsert sem efeito (`tb_interface_id = tb_interface_id`) fica só para a
+ * corrida de dois processos subindo juntos (a mesma linha que faltou nos dois não vira erro de chave duplicada).
+ */
+export async function ensureStructuralInterfaces(
+  schemaName: string, institutionId: number, q: Querier = pool, catalog?: StructuralCatalog,
+): Promise<{ catalog: number; created: number; missingKeys: string[] }> {
+  const s = assertSchema(schemaName)
+  const cat = catalog ?? await readStructuralCatalog(q)
+  if (cat.ids.length === 0) return { catalog: 0, created: 0, missingKeys: cat.missingKeys }
+  const [have] = await q.query<any[]>(
+    `SELECT tb_interface_id AS id FROM \`${s}\`.tb_institution_has_interface WHERE tb_institution_id = ? AND tb_interface_id IN (?)`,
+    [institutionId, cat.ids.map(r => r.id)]
+  )
+  const existing = new Set((have as any[]).map(r => Number(r.id)))     // viva, revogada ou apagada: existe = não se toca
+  const missing = cat.ids.filter(r => !existing.has(r.id))
+  if (missing.length > 0) {
+    const values = missing.map(r => [institutionId, r.id, 'S'])
+    await q.query(
+      `INSERT INTO \`${s}\`.tb_institution_has_interface (tb_institution_id, tb_interface_id, active, created_at, updated_at)
+       VALUES ${values.map(() => '(?, ?, ?, NOW(), NOW())').join(', ')}
+       ON DUPLICATE KEY UPDATE tb_interface_id = tb_interface_id`,
+      values.flat()
+    )
+  }
+  return { catalog: cat.ids.length, created: missing.length, missingKeys: cat.missingKeys }
+}
+
+/**
+ * D-TM29 — o PASSO DO BOOT (server.ts, depois do runner): concede as estruturais que faltam a CADA institution ativa (com o grupo, cada
+ * estabelecimento do schema — a licença é por `tb_institution_id`). O catálogo é lido UMA vez. Estrutural fora do catálogo = AVISO no
+ * resumo (o seed central não chegou), sobe assim mesmo; erro de banco = o boot NÃO sobe (como o runner; o passo é idempotente — o boot
+ * seguinte completa o que faltou).
+ */
+export async function grantStructuralInterfacesToActive(q: Querier = pool): Promise<string> {
+  const [rows] = await q.query<any[]>(
+    `SELECT id, schema_name AS schemaName FROM setes_central.tb_institution WHERE active = 'S' AND deleted = 'N' ORDER BY id`)
+  const catalog = await readStructuralCatalog(q)
+  let created = 0
+  const touched: string[] = []
+  for (const r of rows as any[]) {
+    const out = await ensureStructuralInterfaces(String(r.schemaName), Number(r.id), q, catalog)
+    created += out.created
+    if (out.created > 0) touched.push(`${r.id}:+${out.created}`)
+  }
+  const n = (rows as any[]).length
+  return `${n} estabelecimento(s) ativo(s), ${created} concessão(ões) nova(s)${touched.length ? ` [${touched.join(' ')}]` : ''}`
+    + (catalog.missingKeys.length ? ` — AVISO: fora do catálogo central: ${catalog.missingKeys.join(', ')}` : '')
+}
+
 /** Grupo do catálogo que NUNCA vai ao menu de cliente nem se vende (regra do menu — `NOT_SUPER_GROUP` do core.repository). */
 export const SUPER_GROUP = 'Super'
 

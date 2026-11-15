@@ -3,7 +3,7 @@ import { HttpError } from '@shared/errors/http-error'
 import { ListQuery, PagedRows, SearchCriterion, escapeLike } from '@shared/list'
 import { entityRoleSearchCriteria, roleStatusSearchCriteria, saveEntityFiscalChain, getEntityFiscalFull } from '@shared/entity'
 import { SETES_INSTITUTION_ID, SETES_SCHEMA } from '@shared/auth/roles'
-import { STRUCTURAL_INTERFACE_KEYS } from '@shared/institution-interfaces'
+import { STRUCTURAL_INTERFACE_KEYS, ensureStructuralInterfaces } from '@shared/institution-interfaces'
 import { assertSchema } from '@shared/db/schema'
 import {
   InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
@@ -284,27 +284,12 @@ export async function insertDefaultFlags(institutionId: number): Promise<void> {
 // revoga). Re-exportada aqui para os consumidores do módulo (testes do onboarding).
 export { STRUCTURAL_INTERFACE_KEYS }
 
+// D-TM29/D-TM31 (2026-11-15): a regra é UMA, na peça (`ensureStructuralInterfaces`) — o onboarding e o passo do boot a usam. Cria só
+// a concessão que falta (a institution nova não tem nenhuma). Devolve quantas estruturais o catálogo tem (o contrato de antes).
 export async function grantStructuralInterfaces(
   schemaName: string, institutionId: number
 ): Promise<number> {
-  const s = assertSchema(schemaName)
-  const [rows] = await pool.query<any[]>(
-    `SELECT id FROM setes_central.tb_interface
-      WHERE i18n_key IN (?) AND deleted = 'N'`,
-    [STRUCTURAL_INTERFACE_KEYS]
-  )
-  if (rows.length === 0) return 0
-
-  const now    = new Date()
-  const values = rows.map((r: any) => [institutionId, r.id, 'S', now, now])
-  await pool.query(
-    `INSERT INTO \`${s}\`.tb_institution_has_interface
-       (tb_institution_id, tb_interface_id, active, created_at, updated_at)
-     VALUES ?
-     ON DUPLICATE KEY UPDATE active = 'S', deleted = 'N', updated_at = NOW()`,
-    [values]
-  )
-  return rows.length
+  return (await ensureStructuralInterfaces(schemaName, institutionId)).catalog
 }
 
 // ---------------------------------------------------------------------

@@ -16,6 +16,7 @@ import { assertF2aFreezeTriggers } from './migrations/f2a-freeze-triggers'
 import { assertPrivilegeCatalog } from '@shared/auth/assert-privilege-catalog'
 import { assertAccessViews, assertAccessSchemaViews } from '@shared/access'
 import { assertInviteSchema, assertPasswordAuthorSchema } from '@shared/user/invite'
+import { grantStructuralInterfacesToActive } from '@shared/institution-interfaces'
 import { SETES_INSTITUTION_ID } from '@shared/auth/roles'
 import { DELEGABLE_SUPER_INTERFACES } from '@shared/auth/delegable-interfaces'
 
@@ -55,6 +56,8 @@ async function bootstrap() {
     logger.info(`Gatilhos de TRAVA da F2a: ${await assertF2aFreezeTriggers()}`)
     // Costura A1 (D-AU3): as views POR SCHEMA do veredito (migration 075) — faltando num cliente, o setes-api NÃO sobe
     logger.info(`Veredito de acesso (075 por schema): ${await assertAccessSchemaViews()}`)
+    // D-TM29/D-TM31: as telas ESTRUTURAIS concedidas a TODO estabelecimento ativo (só a que falta — A-TM11); erro de banco = NÃO sobe
+    logger.info(`Telas estruturais (D-TM29): ${await grantStructuralInterfacesToActive()}`)
     // D-PV9: os pares (interface, privilégio) que o código consome conferidos contra o catálogo — faltando = ALARME, sobe assim mesmo
     logger.info(`Catálogo de privilégios: ${await assertPrivilegeCatalog()}`)
     logger.info('Migrations concluidas. Subindo servidor...')
