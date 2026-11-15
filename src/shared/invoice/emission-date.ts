@@ -23,7 +23,7 @@ export function invoiceEmissionDateFor(
  * `issuer` = cliente) — o critério é o evento E.
  * Leitura CONSISTENTE: quem decide chama DEPOIS de tomar a trava que serializa com o faturamento (o retrato nasce depois da espera).
  * null = nenhuma nota do ERP web. **Lida a partir do FATO que a define** (gate do delta, ADV-D103-01): varredura DESCENDENTE pelos eventos
- * E no índice `idx_invoice_event_issue` (076) que para na 1ª nota VIVA — O(1) linhas lidas; filtrar as notas pela existência do evento
+ * E no índice `idx_invoice_event_issue` (077) que para na 1ª nota VIVA — O(1) linhas lidas; filtrar as notas pela existência do evento
  * materializava todos os eventos e varria as notas do ERP Desktop mais novas (1,3–1,6 s sob a trava com 300 mil notas). Devolve a data do
  * EVENTO E (`dt_record` — o `issueInvoice` grava a data de emissão, D-IB64): a data que a nota do ERP web LEU; o cabeçalho reescrito na
  * mesma PK pelo sincronizador (id do ERP Desktop alcançando o da web — ADV-D103-02) não move a fronteira.

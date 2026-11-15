@@ -140,35 +140,124 @@ Authorization: Bearer <jwt_token>
 PRIVADA; nfse-api/nfe-api só a PÚBLICA. HS256/`JWT_SECRET` aposentados — sem a chave o boot NÃO sobe. Testes assinam
 pelo `testToken` (`src/test-setup/test-token.ts`; par de TESTE gerado pelo setup do jest). NUNCA segredo em script versionado.
 
-**Licença × privilégio** (D-F37): as guardas de ação (`@shared/auth/require-privilege`) conferem a interface CONTRATADA
-para TODOS; super/admin passam só o privilégio.
+**Licença × privilégio** (D-F37, revista pela A-PV1 e pela D-PV62): as guardas de ação (`@shared/auth/require-privilege`) conferem a
+interface CONTRATADA para todos menos o super (A-PV1); super e admin dispensam a CONCESSÃO (o admin, menos nas telas delegáveis do Super —
+D-PV11), mas NUNCA o REGISTRO: só passam em par que existe em `tb_interface_has_privilege` (D-PV62 — verbo conferido sem seed = negado a
+todos até o seed; a cerca da D-PV51 e o `check:privileges` barram antes de publicar).
+
+**Veredito de acesso = UMA peça (costura A1 da frente auth-api — D-AU3/D-AU6/D-AU8, 2026-10-31)**: a regra "usuário U pode o verbo V
+na interface I" mora numa pilha de VIEWS (`setes_central.vw_user_link`/`vw_interface_catalog` — script `sql/70`; `<schema>.vw_user_reach`
+/`vw_user_access` — migration 075), lida VIVA (sem cache) pela biblioteca `fiscal-api/access`; aqui só o adaptador `@shared/access`
+(o único que importa o subpath — cerca `f2a-fiscal-api-fence`). `require-privilege`, `module-privilege-gate`, políticas e o MENU leem por
+ele; nenhum SQL próprio de `tb_user_has_privilege`/`tb_institution_has_interface` para decidir. O `authMiddleware` lê a SESSÃO viva em
+toda rota (401 `SESSION_REVOKED`; o `role` do token é trocado pelo perfil vivo — D-UC9). Boot recusa subir sem as views do `sql/70`
+(`assertAccessViews`). Prova da semântica: `scripts/prove-user-access-views.ts` (banco descartável). Na suíte, a leitura da sessão é
+dublada globalmente (`src/test-setup/access-session.mock.ts`) e o veredito responde por `src/test-setup/access-model.ts`.
+
+**Privilégio POR ESTABELECIMENTO (D-GE3, migration 076 — setes-api:GRUPO.E3.P1)**: `tb_user_has_privilege` tem `tb_institution_id` na
+chave (usuário, institution, interface, privilégio) e a `vw_user_access` só aceita a concessão da MESMA institution do alcance: com o
+grupo (filial no mesmo schema), o privilégio da matriz NÃO vale na filial. Todo SQL de produto que toca a tabela nomeia a institution
+(cerca `grupo-e3-privilegio-por-estabelecimento.test.ts`). A 076 preenche a concessão antiga com a ÚNICA institution viva do schema e
+PARA (erro 1242) se houver duas — escolher seria decisão do Valdo.
 
 ### Recuperação de senha, aviso ao dono e SMTP (Q-PV38 / D-RS4 / D-RS5 — 2026-10-18/21)
 
 `POST /auth/recovery-password` + `/auth/change-password` com o PEDIDO DE TROCA DE SENHA em `setes_central.tb_user_password_reset`
-(sql/67 — o boot NÃO sobe sem a tabela): 5 erradas esgotam o código, 3/h e 10/24 h por conta, resposta neutra com piso de 400 ms,
+(sql/67 — o boot NÃO sobe sem a tabela): 5 erradas esgotam o código, 3/h e 10/24 h por conta, resposta neutra com piso de 700 ms (D-EA43),
 código como HMAC. **D-RS4**: quando um código esgota ou o teto é atingido, o DONO recebe e-mail neutro (no máximo 1/h — fato na irmã
 `tb_user_password_reset_notice`, também do sql/67). **D-RS5**: em PRODUÇÃO (`NODE_ENV=production`) o SMTP é OBRIGATÓRIO — o boot
 recusa subir sem `SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/SMTP_FROM` completos (`assertMailerReady`); em dev sem SMTP o código vai
 ao LOG. Valores reais só no `.env` vivo (Valdo). Pré-voo: `scripts/pre-deploy-tz-check.ts` confere config + conexão SMTP sem enviar.
+**D-EA21**: o DESTINATÁRIO de todo e-mail da casa nunca vai inteiro ao log — todo log que cita destinatário usa `maskEmail` (que
+mascara TODO endereço, inclusive de valor gravado em lista) e todo erro de envio passa por `mailErrorForLog` (ambos da `@shared/mailer`;
+o nodemailer põe o endereço na mensagem e em `response`/`rejected`); as três rotas públicas de `/auth` também nunca logam o `err` cru
+(o erro do mysql2 traz o `sql` com o e-mail digitado). FORA da regra, por ora: o remetente (`SMTP_FROM`/`SMTP_USER`, mostrado no boot e
+no ensaio para conferência) e o erro de banco das demais telas (`handleError` — D-EA25: frente própria "dado pessoal no log").
+**D-EA26**: a `sendMail` só manda para UM endereço válido — o valor APARADO (só o espaço do FIM — D-EA27, a mesma igualdade do login; outro branco nas pontas = recusa) passa no `z.string().email()` do cadastro e é ele que vai ao
+transporte (`singleMailAddress`); lista, nome + endereço, quebra de linha ou não-texto = `MailRecipientRejectedError`
+(`MAIL_RECIPIENT_INVALID`), ANTES do transporte e do modo dev, para TODO e-mail da casa. Quem chama trata como falha de envio (a
+recuperação segue neutra; em produção o código não vai a lugar nenhum). Nenhuma outra regra de endereço: quem precisa decidir antes usa
+o mesmo predicado (a escolha do e-mail de login do Super — `pickLoginEmail` — já usa).
 Detalhes: `Infra-IA/prompts/prompt_privilegios_interfaces.md` §13 (§13.8 publicação, §13.10 execução de 2026-10-21).
 
-### Senha perdida do SUPER — procedimento do OPERADOR (D-PV46, 2026-10-20; exceção explícita — PADROES §3.1)
+### Login com limite POR CONTA, resposta única e alarme (Ondas 1+2 do endurecer — D-EA1…D-EA4/D-EA6/D-EA11/D-EA14/D-EA15, 2026-11-05)
 
-Nenhuma porta HTTP redefine a senha do Super (o admin não troca a senha do super — D-PV12; com DOIS Supers ativos, um define a do outro
-pela tela de Usuários do Super). Quando NÃO resta outro Super ativo e o e-mail de recuperação não resolve, o operador roda NO SERVIDOR,
-com o `.env` do destino:
+`POST /auth/login` (`auth.service.ts` `login` → `judgeLoginAttempt`; `Infra-IA/prompts/prompt_endurecer_autenticacao.md`, protocolo do §P.3):
+- **Limite por conta (D-EA1/D-EA2)**: 10 senhas erradas em 15 min (janela DESLIZANTE) bloqueiam a conta até a falha mais velha envelhecer —
+  sem botão de desbloquear; durante o bloqueio até a senha CERTA é recusada; vale para todo perfil, Super inclusive. O fato é
+  `setes_central.tb_user_login_failure` (script `sql/74` — o boot NÃO sobe sem ela: `assertLoginLockReady`), só falhas, append-only,
+  `seq` MAX+1 sob a trava da linha do usuário (`lockUserCredential` — o serializador de TODO fato da credencial, ex-`lockUserForPasswordReset`).
+  Trocar a senha (código, script do Super) NÃO desbloqueia — a contagem nunca filtra por `password_set_at` (conhecimento negativo).
+- **Protocolo**: busca da conta → PRÉ-FILTRO sem trava (bloqueada = recusa sem conferir a senha e sem travar) → senha conferida FORA da
+  trava (`checkPassword`, scrypt assíncrono, tempo constante — `@shared/auth/password`) → transação: trava (WAIT 5) → hash travado ≠ conferido = reconfere →
+  contagem refeita → errada grava a falha; certa: inativo/sem vínculo = recusa sem gravar, senão o token é ASSINADO com a trava segura. 1205
+  = recusa neutra (nunca 409); 1213 reexecuta e, esgotado, recusa + alarme com ref. Conta sem credencial e e-mail inexistente: nenhuma linha.
+
+### Hash da senha = scrypt (Onda 4 do endurecer — D-EA9/D-EA17/D-EA18, 2026-11-07)
+
+- A ÚNICA peça que grava e confere senha é `@shared/auth/password`: `hashPassword` (todo escritor — cadastro de usuário, admin do onboarding,
+  troca pelo código, script do Super) e `checkPassword` (login, "igual à atual" da troca). Formato `scrypt$N=…,r=…,p=…$<sal b64>$<hash b64>`
+  (≤ 93 caracteres, cabe no `varchar(100)`); peso VIGENTE só em `SCRYPT_CURRENT` (`N=2^15,r=8,p=3` — provisório até a medição no servidor
+  real, D-EA17); `maxmem` explícito (sem ele o Node recusa o peso). Valor gravado fora das formas = recusa neutra + alarme, nunca cálculo.
+- **NUNCA `scryptSync`** e nunca o hash sob a trava da linha nem com conexão do pool presa: o scrypt leva centenas de ms no pool do libuv —
+  calcula-se ANTES da transação (cercas no `password-scrypt-d-ea9.test.ts`).
+- **MD5 legado**: só conferido; o login CERTO e ADMITIDO regrava em scrypt (e senha de peso antigo no peso vigente) na MESMA transação, por
+  compare-and-set (`rehashPassword` — a exceção nomeada da cerca D-EA7: NÃO grava `password_set_at`, a sessão não cai). A regravação mata o
+  código de recuperação aberto daquela conta (HMAC amarrado ao hash). A suíte grava no peso leve `N=2^14,p=1` (`test-setup/scrypt-weight.ts`).
+- **Piso das recusas = 700 ms** (D-EA43 — login, troca pelo código e pedido do código; acima do p99 de uma conferência scrypt no dev); a
+  conta inexistente NÃO calcula hash falso. Sob carga (inclusive provocada pelo atacante) o tempo volta a distinguir — LIMITE CONHECIDO até
+  a medição no servidor real (D-EA45).
+- **Quem paga scrypt**: no login, só a conta com falhas gravadas + tentativas EM ANDAMENTO < 10 (D-EA44 — contagem em memória por
+  processo; acima, a recusa sem calcular); na troca pelo código, só a conta com código ABERTO, no prazo e não esgotado (D-EA46 — leitura
+  sem trava antes dos dois cálculos).
+- Medição: `scripts/measure-scrypt.ts` (rodar no SERVIDOR REAL antes de fechar o peso e o piso das recusas — H11); prova em schema
+  descartável: `scripts/prove-scrypt-migration.ts`.
+- **Uma resposta (D-EA6)**: toda recusa = a MESMA 401 `{ error: 'Email ou senha inválidos' }` (o "Usuário inativo" e o 403 morreram), depois
+  do piso `LOGIN_REFUSAL_FLOOR_MS` (só nas recusas — A-EA4); `email`/`password` que não são texto = 400. O motivo real vai só ao LOG: UMA
+  linha `Login recusado (D-EA11)` por recusa, com e-mail MASCARADO, IP, motivo e instante — nunca a senha.
+- **Aviso ao dono (D-EA3/D-EA14/D-EA15)**: na falha que leva a janela a 10, vaga horária em `tb_user_login_block_notice` (sob SAVEPOINT — a
+  falha do aviso nunca desfaz a 10ª falha) e e-mail neutro ao e-mail de login GRAVADO depois do COMMIT, em segundo plano.
+- **Alarme global (D-EA4, `login-watch.ts`)**: contador em MEMÓRIA de toda recusa (inclusive e-mail inexistente): > 100/min ou > 30 contas
+  distintas em 5 min → `[ALARME LOGIN]` no log + `recordCrash` + e-mail à operação, no máximo 1 a cada 15 min; NUNCA bloqueia. **`OPS_ALERT_EMAIL`
+  é OBRIGATÓRIO em produção** (o boot recusa subir sem ele válido — `assertOpsAlertReady`; o pré-voo confere); fora de produção vazio = só log.
+- Prova ao vivo em schema descartável: `scripts/prove-login-lock.ts` (50 erradas paralelas = 10 linhas; contas em paralelo sem deadlock;
+  EXPLAIN da janela; trava S das FKs de negócio — o login da conta espera até 5 s e, passado isso, recusa: limite aceito até a A2).
+
+### Senha perdida do SUPER — procedimento do OPERADOR (D-PV46 + D-RS7/D-RS13/D-RS14/D-RS16; exceção explícita — PADROES §3.1)
+
+Nenhuma porta HTTP redefine a senha do Super — nem de ninguém com credencial: D-PV48 (2026-10-27) — depois de criada a credencial, só o
+titular troca, pela recuperação (o `PUT /api/users/:id` recusa `password` com 409 `PASSWORD_OWNER_ONLY`; conta SEM senha vinda do sync
+recebe a 1ª uma vez — A-PV23). Ninguém define a senha de OUTRO pela tela — nem um Super a de outro Super. Este script é a ÚNICA exceção
+(A-PV22): quando o Super perdeu a senha e o e-mail de recuperação não resolve, o operador roda NO SERVIDOR, com o `.env` do destino:
 
 ```bash
-npx tsx --require tsconfig-paths/register scripts/reset-super-password.ts          # ENSAIO: lista o(s) Super(s), nada gravado
-npx tsx --require tsconfig-paths/register scripts/reset-super-password.ts --vai    # redefine (1 Super ativo); --user-id/--email nomeiam o alvo
+npx tsx --require tsconfig-paths/register scripts/reset-super-password.ts                     # ENSAIO: lista o(s) Super(s), nada gravado
+npx tsx --require tsconfig-paths/register scripts/reset-super-password.ts --vai               # redefine o ÚNICO Super ativo
+npx tsx --require tsconfig-paths/register scripts/reset-super-password.ts --user-id 7 --vai   # 2+ Supers ativos: nomeie o alvo (ou --email <login>)
 ```
 
-O script gera senha inicial aleatória (16 caracteres), grava com o MESMO hash do login pela peça do auth (sob a trava da linha do usuário —
-mata o código de recuperação aberto), **imprime a senha UMA vez** no terminal (nunca em log/arquivo/banco) e registra no LOG quem rodou
-(usuário do SO + host), quando e o id do Super; `tb_user.updated_at` recebe o instante (`tb_user` não tem `updated_by`). Recusa qualquer
-conta que não seja Super (vínculo `kind='super'` na institution 1), Super inativo e 2+ Supers ativos. Entregar a senha ao titular por canal
-seguro; ele define a própria em seguida. Roteiro de operação definitivo nasce com a Onda 4 (deploy) — até lá, esta nota.
+- **Alvo (D-RS7)**: com um só Super ativo, ele é o alvo implícito; com 2+ ativos o script só redefine o alvo NOMEADO por `--user-id` ou
+  `--email` — sem nome, recusa (nunca escolhe sozinho).
+- **Quem pode ser alvo (D-RS14/D-RS16)**: só Super = vínculo `kind='super'` na institution 1, com usuário E vínculo ativos (o mesmo
+  predicado do login). Admin, outra conta e Super inativo são recusados sem escrita; o script NUNCA reativa (reativar é ato de outro Super
+  pela tela de Usuários; o ÚNICO Super inativo só sai por SQL manual do operador — limite conhecido). Super SEM e-mail de login também é
+  recusado sem escrita (D-EA20 — o login é pelo e-mail: a senha nova não serviria; cadastre o e-mail antes), conferido sob a trava.
+  **O e-mail de login é UM, por UMA regra** (D-EA23 — peça `pickLoginEmail`): o 1º e-mail de login vivo que, aparado, é um endereço válido
+  pelo `z.email()` do cadastro; a lista, o ensaio e o ATO (sob a trava) usam a peça, e o aviso vai ao e-mail que o ato escolheu.
+- **O ato**: senha inicial aleatória (16 caracteres) gravada pela MESMA peça do login (sob a trava da linha do usuário — mata o código de
+  recuperação aberto; grava `password_set_at` — D-EA7, as sessões abertas do Super caem), **impressa UMA vez** no terminal (nunca em
+  log/arquivo/banco); o LOG do script registra quem rodou (usuário do SO + host), quando, o id e o e-mail mascarado — como TODO log de
+  e-mail da casa (D-EA21: `maskEmail`/`mailErrorForLog` da `@shared/mailer`; o transporte recebe o endereço inteiro); `tb_user` não ganha
+  `kind`/`updated_by` (D-RS15). O ENSAIO mostra o estado do SMTP e diz se o alvo está INATIVO (o `--vai` recusa, com a saída real).
+- **Aviso ao Super (D-RS13)**: depois de gravar, e-mail NEUTRO ao e-mail de login gravado ("sua senha foi redefinida pelo operador em
+  <instante na zona da Setes>; se não reconhece, avise") pela `@shared/mailer`, sem link e sem a senha, só para UM endereço válido;
+  falha do envio = log, a troca fica. **O aviso sai ANTES de a senha aparecer** (D-EA19 — o sinal fora da máquina precede a entrega do
+  segredo); a espera tem teto TOTAL de 60 s (D-EA24 — `SUPER_NOTICE_CAP_MS`; os tetos do SMTP contam só silêncio): estourado, "NÃO
+  CONFIRMADO (pode ainda sair)" e a senha aparece — o envio segue em segundo plano e o desfecho tardio vai ao log (o processo só termina
+  quando o servidor de e-mail responder ou desistir); Ctrl+C na espera deixa a senha trocada e desconhecida — rodar de novo.
+
+Entregar a senha ao titular por canal seguro; ele define a própria em seguida. Roteiro de operação definitivo nasce com a Onda 4 (deploy) —
+até lá, esta nota. Na A2 o script muda para a auth-api com os outros escritores da credencial (D-AU6/D-RS15).
 
 ### Chave do Sincronizador
 

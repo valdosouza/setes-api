@@ -59,7 +59,7 @@ export type EstablishmentUpdateDto = z.infer<typeof establishmentUpdateDto>
 
 // ---------------------------------------------------------------------------
 // Sub-recurso OPÇÃO DE APURAÇÃO DO IBS/CBS (D-IB99/D-IB100 — prompt_fase_ibs_cbs.md §14): escritor ÚNICO de
-// a tabela da opção (migration 076) pela peça @shared/ibscbs-assessment (o PUT acima NÃO recebe a opção). A data é a
+// a tabela da opção (migration 077) pela peça @shared/ibscbs-assessment (o PUT acima NÃO recebe a opção). A data é a
 // IDENTIDADE da linha (PK estabelecimento × início): POST registra; PUT/DELETE em /:validFrom trocam/excluem só linha FUTURA.
 // ---------------------------------------------------------------------------
 

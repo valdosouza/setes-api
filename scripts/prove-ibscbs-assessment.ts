@@ -1,7 +1,7 @@
 /**
- * PROVA da migration 076 e da peça @shared/ibscbs-assessment (fase IBS/CBS, D-IB99/D-IB100 — prompt_fase_ibs_cbs.md §14) em
+ * PROVA da migration 077 e da peça @shared/ibscbs-assessment (fase IBS/CBS, D-IB99/D-IB100 — prompt_fase_ibs_cbs.md §14) em
  * SCHEMA DESCARTÁVEL: cria `setes_ib99_probe_<pid>` (a FK aponta para a institution REAL do schema de origem — só leitura na
- * central), copia VAZIA a tabela de config que o fuso lê, aplica a 076 DUAS vezes (re-executável), confere o CHECK pelo NOME e pelo
+ * central), copia VAZIA a tabela de config que o fuso lê, aplica a 077 DUAS vezes (re-executável), confere o CHECK pelo NOME e pelo
  * corpo (a mesma conferência do boot), sonda o domínio, exercita a peça inteira (registrar, alterar, excluir, reviver, imutabilidade
  * do vigente, piso do regular, a recusa do faturamento) e PROVA a trava: com o faturamento lendo a opção (LOCK IN SHARE MODE), o
  * registro de uma opção com início ≤ a competência ESPERA. Apaga o schema descartável no fim (inclusive em falha). NUNCA escreve no
@@ -22,7 +22,7 @@ import {
 const SOURCE = process.argv[2] ?? 'setes_setes'
 const INSTITUTION = Number(process.argv[3] ?? 1)
 const PROBE = `setes_ib99_probe_${process.pid}`
-const MIGRATION = path.join(__dirname, '..', 'src', 'migrations', 'sql', '076_establishment_ibscbs_assessment.sql')
+const MIGRATION = path.join(__dirname, '..', 'src', 'migrations', 'sql', '077_establishment_ibscbs_assessment.sql')
 
 const addDays = (iso: string, n: number) => {
   const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
@@ -49,7 +49,7 @@ async function main() {
     await conn.query(`USE \`${PROBE}\``)
     const statements = splitStatements(fs.readFileSync(MIGRATION, 'utf8'))
     for (let run = 1; run <= 2; run++) for (const st of statements) await conn.query(st)
-    check('076 aplicada DUAS vezes sem erro (re-executável)', true)
+    check('077 aplicada DUAS vezes sem erro (re-executável)', true)
 
     const problem = await ibscbsAssessmentCheckProblem(conn, PROBE)
     const [ck] = await conn.query<any[]>(
@@ -145,7 +145,7 @@ async function main() {
     // TRAVA (PADROES §9 regra 2): o faturamento lê a opção na competência com LOCK IN SHARE MODE; o registro de uma opção com
     // início ≤ competência ESPERA o faturamento terminar — a nota nunca é decidida com uma opção que muda no meio dela. A espera
     // ORDENA, não confere: depois do commit o registro passa e cobre a nota já emitida no mesmo dia (limite da Q-IB105)
-    // recomeça a tabela por DDL (nunca DELETE de dado — PADROES §3.1) e prova a 3ª execução da 076
+    // recomeça a tabela por DDL (nunca DELETE de dado — PADROES §3.1) e prova a 3ª execução da 077
     await conn.query('DROP TABLE tb_establishment_ibscbs_assessment')
     for (const st of statements) await conn.query(st)
     const competence = '2027-03-10'

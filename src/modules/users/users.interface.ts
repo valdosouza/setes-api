@@ -15,6 +15,8 @@ export interface UserListRow {
   active: 'S' | 'N'
   /** Perfil do vínculo com o institution do filtro (null sem filtro). */
   kind:   string | null
+  /** Convite do vínculo em foco (D-UC14/D-UC15): 'pending' = aguardando aceite (sem nome — A-UC4); null sem foco ou sem convite. */
+  invite?: 'pending' | 'withdrawn' | 'accepted' | null
 }
 
 export interface UserRow {
@@ -22,16 +24,35 @@ export interface UserRow {
   nameCompany: string | null
   nickTrade:   string | null
   email:       string | null
-  active:      'S' | 'N'
+  /**
+   * D-PV19/D-UC2 (2026-10-20): "ativo" é do VÍNCULO `tb_institution_has_user.active` com o estabelecimento em FOCO (admin = o do
+   * JWT; super = `?institutionId`). Sem foco (super na tela global) vem `null` — a credencial em si nunca se inativa pelo cadastro.
+   */
+  active:      'S' | 'N' | null
+  /**
+   * D-PV48/A-PV23 (2026-10-27/31): a credencial já foi CRIADA (há senha)? Sem senha (usuário vindo do setes-sync) o cadastro define a 1ª,
+   * uma vez só; com senha, só o titular troca, pela recuperação. Nunca o hash.
+   */
+  /** null no foco do convite nunca aceito (A-UC4: quem convida não sabe se a credencial tem senha). */
+  hasCredential: boolean | null
+  /** Convite do vínculo em foco (D-UC14/D-UC15); nunca aceito = nome nulo (A-UC4). Null sem foco ou sem convite. */
+  invite?:       'pending' | 'withdrawn' | 'accepted' | null
 }
 
 export interface UserInput {
   nameCompany: string
   nickTrade:   string
+  /** D-PV19/D-UC1: o e-mail de LOGIN é imutável — no PUT tem de ser o atual (409 LOGIN_EMAIL_IMMUTABLE se diferir). */
   email:       string
   /** null/ausente no PUT = mantém a senha atual. */
   password?:   string | null
-  active:      'S' | 'N'
+  /** D-PV19/D-UC2: ativo do VÍNCULO com o estabelecimento alvo; ausente no PUT = não mexe. */
+  active?:     'S' | 'N'
+}
+
+/** PUT: o alvo do "ativo" — super informa `institutionId`; admin tem o alvo forçado ao JWT. */
+export interface UserUpdateInput extends UserInput {
+  institutionId?: number | null
 }
 
 /**
@@ -40,6 +61,8 @@ export interface UserInput {
  * admin do cliente → SEMPRE a institution do JWT (o service força).
  */
 export interface UserCreateInput extends UserInput {
+  /** Na criação o ativo da credencial é obrigatório (o DTO dá 'S' por padrão); o vínculo nasce vivo. */
+  active:         'S' | 'N'
   institutionId?: number | null
   kind?:          string | null   // perfil do vínculo (default 'user')
 }
@@ -55,6 +78,8 @@ export interface UserScope {
   isSuper:       boolean
   institutionId: number
   schemaName:    string
+  /** Quem opera (do JWT) — o convidante do vínculo (D-UC14, `tb_user_inviter_id`). */
+  userId:        number
 }
 
 /** Um privilégio do catálogo da interface + situação da concessão ao usuário. */
@@ -87,7 +112,10 @@ export interface UserInstitutionGrant {
   schemaName:    string
   /** Perfil do usuário NESTA institution (vira o role do JWT). */
   kind:          string | null
+  /** 'S' = vínculo ativo OU convite aguardando aceite (D-UC16: o Super vê e mantém o convite ao salvar a lista). */
   granted:       'S' | 'N'
+  /** 'pending' = convite aguardando o login do titular (D-UC14/D-UC15); null nos demais. */
+  invite:        'pending' | null
 }
 
 /** Entrada do PUT de vínculos (sincroniza: concede a lista, revoga as demais). */

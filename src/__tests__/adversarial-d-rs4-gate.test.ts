@@ -21,7 +21,8 @@ jest.mock('../shared/db/connection', () => ({
 }))
 jest.mock('../shared/logger/logger', () => ({ __esModule: true, default: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }))
 jest.mock('../shared/mailer/mailer', () => ({
-  __esModule: true, sendMail: jest.fn().mockResolvedValue(undefined), isMailerConfigured: jest.fn(() => true),
+  __esModule: true, ...jest.requireActual('../shared/mailer/mailer'),   // maskEmail / mailErrorForLog reais (D-EA21)
+  sendMail: jest.fn().mockResolvedValue(undefined), isMailerConfigured: jest.fn(() => true),
   isProduction: jest.fn(() => false),
 }))
 jest.mock('../shared/errors/crash.repository', () => ({
@@ -42,7 +43,7 @@ import {
 } from '../modules/auth/super-password-reset'
 import logger from '../shared/logger/logger'
 import { recordCrash } from '../shared/errors/crash.repository'
-import { md5Password } from '../shared/auth/password'
+import { md5Password, checkPassword } from '../shared/auth/password'
 
 const q = (pool as any).query as jest.Mock
 const getConn = (pool as any).getConnection as jest.Mock
@@ -140,7 +141,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     const u = [...users.values()].filter(x => x.deleted === 'N' && dbEq(x.email, String(email))).sort((a, b) => a.id - b.id)[0]
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
     const [userId] = params
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     const u = users.get(Number(userId))
@@ -190,6 +191,16 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     const r = resets.find(x => x.userId === Number(userId) && x.seq === Number(seq) && x.usedAt === null)
     if (r) { r.usedAt = now; undo.push(() => { r.usedAt = null }) }
     return [{ affectedRows: r ? 1 : 0 }]
+  }
+  // D-EA9 (Onda 4): a REGRAVAÇÃO do hash no login certo — compare-and-set, SEM o instante T (exceção nomeada da cerca D-EA7)
+  if (/UPDATE setes_central\.tb_user SET password = \? WHERE id = \? AND BINARY password = \?/.test(sql)) {
+    const [hash, userId, from] = params
+    const u = users.get(Number(userId))
+    if (!u || u.password !== from) return [{ affectedRows: 0 }]
+    const before = u.password
+    u.password = hash
+    undo.push(() => { u.password = before })
+    return [{ affectedRows: 1 }]
   }
   if (/UPDATE setes_central\.tb_user SET password = \?/.test(sql)) {
     if (failUpdatePasswordWith) throw failUpdatePasswordWith(params)
@@ -372,7 +383,7 @@ describe('[ataque] furar o "no máximo 1 aviso por hora por conta"', () => {
     await recover(email)
     const code = lastCode(email)
     await wrongs(email, code, PASSWORD_RESET_MAX_FAILED_ATTEMPTS - 1)
-    const r = await Promise.allSettled([changePassword(email, wrongOf(code, 7), 'x-nova'), changePassword(email, wrongOf(code, 8), 'x-nova')])
+    const r = await Promise.allSettled([changePassword(email, wrongOf(code, 7), 'x-nova-kq7'), changePassword(email, wrongOf(code, 8), 'x-nova-kq7')])
     expect(r.every(x => x.status === 'rejected' && (x.reason as any).statusCode === 401)).toBe(true)
     expect(resets[0].failed).toBe(PASSWORD_RESET_MAX_FAILED_ATTEMPTS)
     expect(notices).toHaveLength(1)
@@ -455,7 +466,7 @@ describe('[ataque] derrubar o aviso para reabrir a força bruta', () => {
     const verdicts = await wrongs(email, code, PASSWORD_RESET_MAX_FAILED_ATTEMPTS + 3)       // 8 erradas: a 5ª, 6ª, 7ª e 8ª "esgotariam"
     expect(verdicts.every(v => v === 401)).toBe(true)                                           // o atacante vê a MESMA 401 em todas
     expect(resets[0].failed).toBe(PASSWORD_RESET_MAX_FAILED_ATTEMPTS)                           // SEGURA: o contador tem de chegar ao teto…
-    await expect(changePassword(email, code, 'tomada')).rejects.toMatchObject({ statusCode: 401 }) // …e o certo depois tem de ser recusado
+    await expect(changePassword(email, code, 'tomada-kq7')).rejects.toMatchObject({ statusCode: 401 }) // …e o certo depois tem de ser recusado
     expect(passwordWrites).toEqual([])
   })
 
@@ -607,7 +618,7 @@ describe('[ataque] D-RS5 — variantes do .env contra assertMailerReady / mailer
 // (g) D-PV46 — a peça do Super: viés da senha, forma do hash = o que o login compara, e o "ativo" do vínculo
 // =====================================================================================================================
 describe('[ataque] D-PV46 — a senha inicial e a definição de "Super ativo"', () => {
-  it('[RESISTIU] senha inicial: 16 do alfabeto (55 símbolos, sem 0/O/1/l/I), sem viés mensurável (χ² em 110.000 símbolos), cabe no DTO 5–100, hash = login', () => {
+  it('[RESISTIU] senha inicial: 16 do alfabeto (55 símbolos, sem 0/O/1/l/I), sem viés mensurável (χ² em 110.000 símbolos), cabe no DTO 5–100, hash = login', async () => {
     const counts = new Map<string, number>()
     const N = 110_000 / INITIAL_PASSWORD_LENGTH
     for (let i = 0; i < N; i++) {
@@ -622,9 +633,9 @@ describe('[ataque] D-PV46 — a senha inicial e a definição de "Super ativo"',
     const chi2 = [...INITIAL_PASSWORD_ALPHABET].reduce((s, ch) => s + ((counts.get(ch) ?? 0) - expected) ** 2 / expected, 0)
     expect(chi2).toBeLessThan(110)                                                               // 54 graus de liberdade: p ≈ 0,9999 → sem viés de módulo
     const p = generateInitialPassword()
-    expect(hashInitialPassword(p)).toBe(md5Password(p))
-    expect(hashInitialPassword(p).toUpperCase()).toBe(md5Password(p))                             // o login compara password.toUpperCase() === md5(…)
-  })
+    const h = await hashInitialPassword(p)                                                       // D-EA9: scrypt da peça do login
+    expect((await checkPassword(p, h)).ok).toBe(true)
+  }, 30000)
 
   function superConn(world: { user?: { id: number; active: string; password: string | null }; link?: { active: string; deleted: string } }) {
     const sql: string[] = []
@@ -644,11 +655,11 @@ describe('[ataque] D-PV46 — a senha inicial e a definição de "Super ativo"',
     })
     return { c: { query } as any, sql, world }
   }
-  const HASH = md5Password('qualquer')
+  const HASH = 'scrypt$N=32768,r=8,p=3$' + 'A'.repeat(22) + '==$' + 'A'.repeat(43) + '='   // forma da casa (D-EA9), sem custo
 
   it('[RESISTIU] hash fora da forma (minúsculo/curto/senha em claro) recusado ANTES da trava; conta inexistente e admin = not-super sem escrita', async () => {
     const a = superConn({ user: { id: 7, active: 'S', password: 'OLD' }, link: { active: 'S', deleted: 'N' } })
-    for (const bad of [HASH.toLowerCase(), HASH.slice(1), 'senha-em-claro', HASH + 'A']) await expect(resetSuperPasswordTx(a.c, 7, bad)).rejects.toThrow(/fora da forma/)
+    for (const bad of [HASH.toLowerCase(), HASH.slice(1), 'senha-em-claro', HASH + 'A', md5Password('qualquer')]) await expect(resetSuperPasswordTx(a.c, 7, bad)).rejects.toThrow(/fora da forma/)
     expect(a.sql).toEqual([])
     const b = superConn({ user: { id: 8, active: 'S', password: 'OLD' } })
     await expect(resetSuperPasswordTx(b.c, 8, HASH)).resolves.toEqual({ status: 'not-super', userId: 8 })

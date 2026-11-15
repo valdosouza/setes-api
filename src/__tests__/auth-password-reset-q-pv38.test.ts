@@ -13,7 +13,8 @@ jest.mock('../shared/db/connection', () => ({
 }))
 jest.mock('../shared/logger/logger', () => ({ __esModule: true, default: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }))
 jest.mock('../shared/mailer/mailer', () => ({
-  __esModule: true, sendMail: jest.fn().mockResolvedValue(undefined), isMailerConfigured: jest.fn(() => true),
+  __esModule: true, ...jest.requireActual('../shared/mailer/mailer'),   // maskEmail / mailErrorForLog reais (D-EA21)
+  sendMail: jest.fn().mockResolvedValue(undefined), isMailerConfigured: jest.fn(() => true),
   isProduction: jest.fn(() => false),
 }))
 jest.mock('../shared/errors/crash.repository', () => ({
@@ -68,6 +69,8 @@ function seedUsers(): void {
     'a9@x.com', 'a10@x.com', 'a11@x.com', 'a12@x.com', 'a13@x.com', 'a14@x.com', 'a15@x.com', 'a16@x.com', 'fulano@gmail.com',
     // reservados aos testes da D-RS4/D-RS5 (o limite por e-mail em memória é do PROCESSO — e-mails já gastos acima dariam 429)
     'n1@x.com', 'n2@x.com', 'n3@x.com', 'n4@x.com', 'n5@x.com', 'n6@x.com', 'n7@x.com', 'n8@x.com', 'n9@x.com',
+    // reservados à Onda 3 (D-EA5 — política de senha na troca pelo código)
+    'p1@x.com', 'p2@x.com', 'p3@x.com', 'p4@x.com',
   ]) {
     users.set(id, { id, password: `HASH${id}`, active: 'S', deleted: 'N', email })
     id++
@@ -107,7 +110,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     const u = [...users.values()].filter(x => x.deleted === 'N' && dbEq(x.email, String(email))).sort((a, b) => a.id - b.id)[0]
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(sql)) {
     const [userId] = params
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     const u = users.get(Number(userId))
@@ -158,8 +161,19 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     if (r) { r.usedAt = now; undo.push(() => { r.usedAt = null }) }
     return [{ affectedRows: r ? 1 : 0 }]
   }
+  // D-EA9 (Onda 4): a REGRAVAÇÃO do hash no login certo — compare-and-set, SEM o instante T (exceção nomeada da cerca D-EA7)
+  if (/UPDATE setes_central\.tb_user SET password = \? WHERE id = \? AND BINARY password = \?/.test(sql)) {
+    const [hash, userId, from] = params
+    const u = users.get(Number(userId))
+    if (!u || u.password !== from) return [{ affectedRows: 0 }]
+    const before = u.password
+    u.password = hash
+    undo.push(() => { u.password = before })
+    return [{ affectedRows: 1 }]
+  }
   if (/UPDATE setes_central\.tb_user SET password = \?/.test(sql)) {
-    const [hash, userId] = params
+    const [hash, setAt, userId] = params                 // D-EA7: a senha e o instante T vão JUNTOS (a peça "definir a senha")
+    if (!/password_set_at = \?/.test(sql) || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(setAt))) throw new Error('senha sem o instante T (D-EA7)')
     const u = users.get(Number(userId))!
     const before = u.password
     u.password = hash
@@ -363,7 +377,7 @@ describe('Q-PV38 — resposta neutra (não revela se o e-mail existe)', () => {
   it('CONTENÇÃO (lock wait na trava do usuário) é carga normal: resposta neutra, só aviso — sem alarme na crashlytics', async () => {
     await recover('a10@x.com')
     const code = lastCode('a10@x.com')
-    failNext = { match: 'SELECT id, active, password FROM setes_central.tb_user', err: lockWait('ER_LOCK_WAIT_TIMEOUT', 1205) }
+    failNext = { match: 'SELECT id, active, password, password_author_role FROM setes_central.tb_user', err: lockWait('ER_LOCK_WAIT_TIMEOUT', 1205) }
     const c = await change('a10@x.com', code)
     expect([c.status, c.body]).toEqual([401, { error: INVALID_PASSWORD_RESET_CODE }])
     expect(recordCrash).not.toHaveBeenCalled()
@@ -716,7 +730,8 @@ describe('D-RS5 — o código vai ao log só em dev', () => {
     await recover('n8@x.com')
     const logged = (logger.info as jest.Mock).mock.calls.find(c => /modo dev, SMTP ausente/.test(c[0]))
     expect(logged).toBeDefined()
-    expect(logged![1]).toEqual(expect.objectContaining({ email: 'n8@x.com', code: expect.stringMatching(/^\d{6}$/) }))
+    // D-EA21 (Valdo 2026-11-01): o e-mail vai MASCARADO a todo log — o código (só fora de produção) segue legível para o dev
+    expect(logged![1]).toEqual(expect.objectContaining({ email: 'n***@x.com', code: expect.stringMatching(/^\d{6}$/) }))
   })
 
   it('PRODUÇÃO com SMTP ausente em execução: o código NUNCA vai ao log (nem o aviso em claro)', async () => {
@@ -730,4 +745,144 @@ describe('D-RS5 — o código vai ao log só em dev', () => {
   })
   /** em produção o código só existe no HMAC — nenhum caminho de leitura o devolve */
   const lastCodeFromDb = () => undefined
+})
+
+// =====================================================================================================================
+// D-EA26 (Valdo 2026-11-04, "(a) Recusar em todos"): a peça de envio recusa destinatário que não seja UM endereço válido. Aqui, o caminho
+// da recuperação com o e-mail GRAVADO como lista (entrou fora da porta validada — SQL, carga): a peça REAL recusa antes do transporte,
+// o service trata como falha de envio e, em produção, o código não vai a lugar nenhum — nem ao terceiro, nem ao log.
+// =====================================================================================================================
+describe('D-EA26 — e-mail gravado como lista nunca recebe o código', () => {
+  const actualSendMail = jest.requireActual('../shared/mailer/mailer').sendMail
+  const prod = isProduction as jest.Mock
+  afterEach(() => { mail.mockReset().mockResolvedValue(undefined); prod.mockImplementation(() => false) })
+
+  it('PRODUÇÃO: a resposta segue neutra, o código fica só no HMAC, o erro vai ao log mascarado e nenhum código sai', async () => {
+    const lista = 'lista@x.com; terceiro@y.com'
+    users.set(95, { id: 95, password: 'HASH95', active: 'S', deleted: 'N', email: lista })
+    mail.mockImplementation(actualSendMail)
+    prod.mockImplementation(() => true)
+    const r = await recover(lista)
+    expect(r.status).toBe(200)                                                   // neutra (D-PV13): o público não sabe de nada
+    expect(resets.filter(x => x.userId === 95)).toHaveLength(1)                  // emitido — e não entregue
+    const err = (logger.error as jest.Mock).mock.calls.find(c => /Falha no envio do email de recuperação/.test(c[0]))
+    expect(err).toBeDefined()
+    expect(err![1]).toEqual(expect.objectContaining({ code: 'MAIL_RECIPIENT_INVALID', userId: 95 }))
+    const everything = JSON.stringify([
+      (logger.info as jest.Mock).mock.calls, (logger.warn as jest.Mock).mock.calls, (logger.error as jest.Mock).mock.calls,
+    ])
+    expect(everything).not.toMatch(/terceiro@y\.com|lista@x\.com/)              // D-EA21: nada inteiro no log
+    expect(everything).not.toMatch(/"code":"\d{6}"/)                            // D-RS5: código nunca no log de produção
+  })
+})
+
+describe('D-EA5 — política de senha na troca pelo código (Onda 3 — §P.5 PP1/PP5)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { md5Password } = require('../shared/auth/password') as typeof import('../shared/auth/password')
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { PASSWORD_PROBLEM_MESSAGES } = require('../shared/auth/password-policy') as typeof import('../shared/auth/password-policy')
+
+  it('PP5: senha IGUAL à atual com o código CERTO = 422 no campo newPassword; o código NÃO é gasto nem conta erro; outra senha passa', async () => {
+    const email = 'p1@x.com'
+    userByEmail(email).password = md5Password('atual-kq7#mv2x')
+    await recover(email)
+    const code = lastCode(email)
+    const same = await change(email, code, 'atual-kq7#mv2x')
+    expect([same.status, same.body]).toEqual([422, {
+      error: PASSWORD_PROBLEM_MESSAGES['same-as-current'], code: 'PASSWORD_SAME_AS_CURRENT',
+      fields: [{ field: 'newPassword', message: PASSWORD_PROBLEM_MESSAGES['same-as-current'] }],
+    }])
+    expect(passwordWrites).toEqual([])
+    expect(resets[0].usedAt).toBeNull()
+    expect(resets[0].failed).toBe(0)
+    // D-EA37: a recusa deixa UMA linha forense, com o e-mail mascarado — nunca a senha nem o código
+    const forense = (logger.warn as jest.Mock).mock.calls.filter(c => /igual à atual \(D-EA37\)/.test(c[0]))
+    expect(forense).toHaveLength(1)
+    expect(forense[0][1]).toMatchObject({ userId: userByEmail(email).id })
+    const logged = JSON.stringify((logger.warn as jest.Mock).mock.calls)
+    expect(logged).not.toContain('p1@x.com')
+    expect(logged).not.toContain('atual-kq7#mv2x')
+    expect(logged).not.toContain(code)
+    const ok = await change(email, code, 'outra-kq7#mv2x')
+    expect([ok.status, ok.body]).toEqual([200, { ok: true }])
+  })
+
+  it('PP5 (oráculo): a senha igual à atual com o código ERRADO recebe a MESMA 401 neutra e conta como erro', async () => {
+    const email = 'p2@x.com'
+    userByEmail(email).password = md5Password('atual-kq7#mv2x')
+    await recover(email)
+    const code = lastCode(email)
+    const same = await change(email, wrongOf(code), 'atual-kq7#mv2x')
+    const other = await change(email, wrongOf(code, 1), 'outra-kq7#mv2x')
+    expect([same.status, same.body]).toEqual([401, { error: INVALID_PASSWORD_RESET_CODE }])
+    expect([other.status, other.body]).toEqual([401, { error: INVALID_PASSWORD_RESET_CODE }])
+    expect(resets[0].failed).toBe(2)
+  })
+
+  it('PP5 (oráculo): sem pedido de troca aberto, a senha igual à atual é a MESMA 401 neutra', async () => {
+    const email = 'p3@x.com'
+    userByEmail(email).password = md5Password('atual-kq7#mv2x')
+    const r = await change(email, '123456', 'atual-kq7#mv2x')
+    expect([r.status, r.body]).toEqual([401, { error: INVALID_PASSWORD_RESET_CODE }])
+  })
+
+  it.each([
+    ['abc1234', 'too-short'], ['senha123', 'common'], ['flamengo', 'common'], ['xp4-p4zz', null],
+  ] as const)('PP1: %j é julgada ANTES do código, igual para conta que existe e que não existe, sem tocar o banco', async (pwd, problem) => {
+    for (const email of ['p4@x.com', 'ninguem-p4@x.com']) {
+      seenSql = []
+      const r = await change(email, '123456', pwd)
+      if (problem) {
+        expect([r.status, r.body.fields]).toEqual([400, [{ field: 'newPassword', message: PASSWORD_PROBLEM_MESSAGES[problem] }]])
+        expect(seenSql).toEqual([])
+      } else {
+        expect(r.status).toBe(401)
+      }
+    }
+  })
+
+  it('PP1/D-EA16: a parte local do e-mail DIGITADO conta (só o texto da requisição — não diz nada sobre a conta)', async () => {
+    for (const email of ['p4@x.com', 'p4zz@x.com']) {
+      const r = await change(email, '123456', 'xyz-P4ZZ-2026')
+      expect(r.status).toBe(email === 'p4zz@x.com' ? 400 : 401)
+    }
+  })
+})
+
+describe('D-EA9 — Onda 4 (scrypt) na troca pelo código (§P.5 H5)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { md5Password, hashPassword, checkPassword } = require('../shared/auth/password') as typeof import('../shared/auth/password')
+
+  it('H5: a regravação do hash no login (MD5 → scrypt, mesma senha) MATA o código aberto — o HMAC é amarrado ao hash (linha no roteiro de deploy)', async () => {
+    const email = 'p1@x.com'
+    userByEmail(email).password = md5Password('atual-kq7#mv2x')
+    await recover(email)
+    const code = lastCode(email)
+    userByEmail(email).password = await hashPassword('atual-kq7#mv2x')         // o que o login certo grava (`rehashPassword`)
+    const r = await change(email, code, 'outra-kq7#mv2x')
+    expect([r.status, r.body]).toEqual([401, { error: INVALID_PASSWORD_RESET_CODE }])
+    expect(passwordWrites).toEqual([])
+    expect(resets[0].failed).toBe(1)                                            // conta como palpite errado (o código não vale mais)
+  })
+
+  it('H6: a troca pelo código grava scrypt pela peça (nunca MD5) e a senha nova confere', async () => {
+    const email = 'p2@x.com'
+    userByEmail(email).password = md5Password('atual-kq7#mv2x')
+    await recover(email)
+    const r = await change(email, lastCode(email), 'outra-kq7#mv2x')
+    expect([r.status, r.body]).toEqual([200, { ok: true }])
+    expect(passwordWrites).toHaveLength(1)
+    expect(passwordWrites[0].hash).toMatch(/^scrypt\$N=\d+,r=8,p=\d\$/)
+    expect((await checkPassword('outra-kq7#mv2x', passwordWrites[0].hash)).ok).toBe(true)
+  })
+
+  it('PP5 com scrypt: a senha igual à atual (gravada em scrypt) é reconhecida — 422 sem gastar o código', async () => {
+    const email = 'p3@x.com'
+    userByEmail(email).password = await hashPassword('atual-kq7#mv2x')
+    await recover(email)
+    const r = await change(email, lastCode(email), 'atual-kq7#mv2x')
+    expect([r.status, r.body.code]).toEqual([422, 'PASSWORD_SAME_AS_CURRENT'])
+    expect(passwordWrites).toEqual([])
+    expect(resets[0].usedAt).toBeNull()
+  })
 })

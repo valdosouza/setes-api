@@ -1,6 +1,7 @@
 import pool from '@shared/db/connection'
 import { PoolConnection } from 'mysql2/promise'
 import { nextEntityId, insertEntity } from '@shared/entity/entity.repository'
+import { passwordSetAt, PASSWORD_AUTHOR_ADMIN } from '@shared/auth/password'
 
 /**
  * Peça `user` — nascimento de uma CREDENCIAL (entity + tb_user + e-mail de
@@ -31,6 +32,8 @@ export interface UserCascadeInput {
 export interface UserInstitutionLink {
   institutionId: number
   kind:          string
+  /** D-UC14 (script 75): quem opera o ato que cria o vínculo — `tb_user_inviter_id`; ausente/null = desconhecido (onboarding). */
+  inviterId?:    number | null
 }
 
 /**
@@ -117,18 +120,23 @@ export async function insertUserCascade(
     await insertEntity(conn, id, {
       nameCompany: input.nameCompany, nickTrade: input.nickTrade,
     })
+    // D-EA7: a criação da credencial grava o instante T junto do hash (o par)
+    // D-UC19 (script 76): a senha da criação é definida por TERCEIRO — o administrador (D-UC8): papel 'A' no MESMO comando do hash
     await conn.query(
-      `INSERT INTO setes_central.tb_user (id, password, active, created_at, updated_at)
-       VALUES (?, ?, ?, NOW(), NOW())`,
-      [id, passwordHash, input.active]
+      `INSERT INTO setes_central.tb_user (id, password, password_set_at, password_author_role, active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+      [id, passwordHash, passwordHash ? passwordSetAt() : null, passwordHash ? PASSWORD_AUTHOR_ADMIN : null, input.active]
     )
     await syncLoginEmail(conn, id, input.email)
     if (link !== null) {
+      // D-UC14 (script 75): a criação no 1º estabelecimento grava convite e aceite no MESMO instante (o CHECK
+      // ck_ihu_accept_after_invite exige o convite para o aceite) — o vínculo nasce ativo e já aceito, nunca pendente
       await conn.query(
         `INSERT INTO setes_central.tb_institution_has_user
-           (tb_institution_id, tb_user_id, kind, active, created_at, updated_at, deleted)
-         VALUES (?, ?, ?, 'S', NOW(), NOW(), 'N')`,
-        [link.institutionId, id, link.kind]
+           (tb_institution_id, tb_user_id, kind, active, created_at, updated_at, deleted,
+            tb_user_inviter_id, invited_at, accepted_at)
+         VALUES (?, ?, ?, 'S', NOW(), NOW(), 'N', ?, NOW(), NOW())`,
+        [link.institutionId, id, link.kind, link.inviterId ?? null]
       )
     }
     await conn.commit()

@@ -127,6 +127,25 @@ router.put('/:id/institutions', controller.putInstitutions)
 
 /**
  * @swagger
+ * /api/users/{id}/invite/withdraw:
+ *   post:
+ *     summary: Retira o convite ainda não aceito (D-UC15) — admin no próprio estabelecimento; super informa institutionId
+ *     tags: [Users]
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               institutionId: { type: integer, nullable: true }
+ *     responses:
+ *       200: { description: Convite retirado — o login do titular não o aceita mais }
+ *       409: { description: "INVITE_NOT_PENDING: não há convite aguardando aceite" }
+ */
+router.post('/:id/invite/withdraw', controller.withdrawInvite)
+
+/**
+ * @swagger
  * /api/users/{id}/privileges:
  *   get:
  *     summary: Interfaces contratadas do institution alvo × privilégios do catálogo × concessão ao usuário (ACL — workflow 2026-07-12)
@@ -162,8 +181,14 @@ router.put('/:id/privileges/:interfaceId', controller.putPrivileges)
  * @swagger
  * /api/users/{id}:
  *   get:
- *     summary: Usuário completo (nome/apelido + email de login + ativo — senha NUNCA sai)
+ *     summary: Usuário completo (nome/apelido + email de login + ativo do VÍNCULO em foco — senha NUNCA sai)
+ *     description: D-PV19/D-UC2 — `active` é o do vínculo com o estabelecimento em foco (admin = o do JWT; super = `?institutionId`; sem foco = null)
  *     tags: [Users]
+ *     parameters:
+ *       - in: query
+ *         name: institutionId
+ *         schema: { type: integer }
+ *         description: Vínculo em foco (só o super escolhe)
  */
 router.get('/:id', controller.getById)
 
@@ -180,18 +205,14 @@ router.post('/', controller.create)
  * @swagger
  * /api/users/{id}:
  *   put:
- *     summary: Atualiza usuário (senha ausente/null mantém a atual; troca de email sincroniza o vínculo grupo 2)
+ *     summary: Atualiza usuário (senha ausente/null mantém a atual; e-mail de login IMUTÁVEL; ativo = o vínculo com o estabelecimento alvo)
+ *     description: >
+ *       D-PV19 (D-UC1…D-UC3): o e-mail de login nunca muda (409 LOGIN_EMAIL_IMMUTABLE); `active` (opcional) grava
+ *       `tb_institution_has_user.active` do vínculo com `institutionId` (só o super informa; o admin tem o alvo forçado ao JWT —
+ *       sem alvo com `active` presente = 400); a conta do super só o Super altera (403 USER_MANAGED_BY_SUPER).
+ *       A exclusão de usuário NÃO existe (a credencial nunca é excluída — inativa-se o vínculo).
  *     tags: [Users]
  */
 router.put('/:id', controller.update)
-
-/**
- * @swagger
- * /api/users/{id}:
- *   delete:
- *     summary: Exclui logicamente o usuário (deleted='S' — a entity permanece)
- *     tags: [Users]
- */
-router.delete('/:id', controller.remove)
 
 export default router

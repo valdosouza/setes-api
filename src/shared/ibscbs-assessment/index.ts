@@ -10,7 +10,7 @@ import { emitterRegimeAt } from '@shared/entity-tax/entity-tax.repository'
 /**
  * PEÇA @shared/ibscbs-assessment (fase IBS/CBS, D-IB99/D-IB100 — Infra-IA/prompts/prompt_fase_ibs_cbs.md §14): a OPÇÃO de
  * apuração do IBS/CBS do Simples (`regApIBSCBSSN` da NT 009), fato DATADO de cada estabelecimento
- * (`tb_establishment_ibscbs_assessment`, migration 076). Dona ÚNICA da tabela — leitura na data, regra da recusa e escrita das
+ * (`tb_establishment_ibscbs_assessment`, migration 077). Dona ÚNICA da tabela — leitura na data, regra da recusa e escrita das
  * linhas; ninguém mais toca a tabela (cerca `ibscbs-assessment-fence.test.ts`).
  *
  * - **Fato gerador próprio** (parecer do guardião, D-IB100): opção CGSN 194, semestral e irretratável no semestre — distinta do
@@ -500,7 +500,7 @@ export async function assertIbscbsAssessmentChecks(q: Queryable = pool): Promise
     if (problem) bad.push(`${s}: ${problem}`)
   }
   if (bad.length) {
-    throw new Error(`D-IB100: domínio da opção de apuração IBS/CBS sem a guarda do banco — ${bad.join(' | ')} — confira a migration 076`)
+    throw new Error(`D-IB100: domínio da opção de apuração IBS/CBS sem a guarda do banco — ${bad.join(' | ')} — confira a migration 077`)
   }
   return `${CHECK_NAME} em ${(schemas as any[]).length} schema(s)`
 }

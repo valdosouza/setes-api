@@ -1,4 +1,4 @@
--- 076 — Fase IBS/CBS, D-IB99/D-IB100: a OPÇÃO de apuração do IBS/CBS do Simples (regApIBSCBSSN — NT 009) vira fato
+-- 077 — Fase IBS/CBS, D-IB99/D-IB100: a OPÇÃO de apuração do IBS/CBS do Simples (regApIBSCBSSN — NT 009) vira fato
 -- DATADO de cada estabelecimento — Infra-IA/prompts/prompt_fase_ibs_cbs.md §14.
 --   D-IB99  (Valdo 2026-10-31): configuração com data de início; sem preenchimento vale 1 (efeito legal de não optar — D-IB1);
 --           2/3 são GRAVADOS e o faturamento recusa a nota cuja competência cai na vigência deles até o cálculo do regime

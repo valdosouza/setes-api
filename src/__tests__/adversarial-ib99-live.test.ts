@@ -16,7 +16,7 @@ const live = process.env.IB99_ADV_LIVE === '1'
   let pool: any, piece: any, splitStatements: (sql: string) => string[]
   const S = `setes_ib99_adv_jest_${Date.now().toString(36)}`
   const D = '2027-03-10'
-  const MIGRATION = path.join(SRC, 'migrations', 'sql', '076_establishment_ibscbs_assessment.sql')
+  const MIGRATION = path.join(SRC, 'migrations', 'sql', '077_establishment_ibscbs_assessment.sql')
   const codeOf = async (p: Promise<unknown>) => { try { await p; return 'ok' } catch (e: any) { return e?.code ?? 'erro' } }
   /**
    * O relógio REAL (ADV-D101-06 do gate do delta): a fronteira da D-IB101 usa `new Date()` DEPOIS da trava — o relógio da operação

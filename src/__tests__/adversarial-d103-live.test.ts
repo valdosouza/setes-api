@@ -12,8 +12,8 @@ const live = process.env.IB99_ADV_LIVE === '1'
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   require(require.resolve('dotenv', { paths: [API] })).config({ path: path.join(API, '.env') })
   let pool: any, lastErpWebEmissionDate: (q: any, s: string, i: number) => Promise<string | null>, splitStatements: (sql: string) => string[]
-  // a 076 REAL (o índice da fronteira entra junto)
-  const MIGRATION = path.join(API, 'src/migrations/sql/076_establishment_ibscbs_assessment.sql')
+  // a 077 REAL (o índice da fronteira entra junto)
+  const MIGRATION = path.join(API, 'src/migrations/sql/077_establishment_ibscbs_assessment.sql')
   const S = `setes_ib99_d103_jest_${Date.now().toString(36)}`
 
   beforeAll(async () => {

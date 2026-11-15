@@ -12,7 +12,7 @@ const SCRIPTS = path.join(ROOT, 'scripts')
 const OWNER = path.join(SRC, 'shared', 'ibscbs-assessment', 'index.ts')
 const ALLOWED = new Set([
   OWNER,
-  path.join(SRC, 'migrations', 'sql', '076_establishment_ibscbs_assessment.sql'),
+  path.join(SRC, 'migrations', 'sql', '077_establishment_ibscbs_assessment.sql'),
   path.join(SCRIPTS, 'prove-ibscbs-assessment.ts'),
 ])
 const TABLE = /tb_establishment_ibscbs_assessment/

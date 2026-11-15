@@ -20,7 +20,8 @@ jest.mock('../shared/db/connection', () => ({
 }))
 jest.mock('../shared/logger/logger', () => ({ __esModule: true, default: { error: jest.fn(), warn: jest.fn(), info: jest.fn() } }))
 jest.mock('../shared/mailer/mailer', () => ({
-  __esModule: true, sendMail: jest.fn().mockResolvedValue(undefined), isMailerConfigured: jest.fn(() => true),
+  __esModule: true, ...jest.requireActual('../shared/mailer/mailer'),   // maskEmail / mailErrorForLog reais (D-EA21)
+  sendMail: jest.fn().mockResolvedValue(undefined), isMailerConfigured: jest.fn(() => true),
   isProduction: jest.fn(() => false),     // D-RS5: a peça do mailer ganhou o predicado de produção (o service o consome)
 }))
 // recordCrash grava no banco (alarme neutro); mocka para o dublê não ter de modelar a tb_crashlytics.
@@ -135,7 +136,7 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     return [u ? [{ id: u.id, password: u.password, active: u.active, loginEmail: u.email }] : []]
   }
   // trava de REGISTRO da linha do usuário — aceita o `FOR UPDATE` com ou sem ` WAIT n` (novo: WAIT 5 quando suportado)
-  if (/SELECT id, active, password FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
+  if (/SELECT id, active, password(?:, password_author_role)? FROM setes_central\.tb_user WHERE id = \? AND deleted = 'N' FOR UPDATE(?: WAIT \d+)?/.test(sql)) {
     const [userId] = params
     if (!owner) throw new Error('FOR UPDATE fora de transação')
     const u = users.get(Number(userId))
@@ -187,9 +188,20 @@ async function run(sql: string, params: any[], owner: object | null, undo: Array
     return [{ affectedRows: r ? 1 : 0 }]
   }
   // novo: o UPDATE da senha limpa activation_key junto (código antigo em texto puro não revive)
+  // D-EA9 (Onda 4): a REGRAVAÇÃO do hash no login certo — compare-and-set, SEM o instante T (exceção nomeada da cerca D-EA7)
+  if (/UPDATE setes_central\.tb_user SET password = \? WHERE id = \? AND BINARY password = \?/.test(sql)) {
+    const [hash, userId, from] = params
+    const u = users.get(Number(userId))
+    if (!u || u.password !== from) return [{ affectedRows: 0 }]
+    const before = u.password
+    u.password = hash
+    undo.push(() => { u.password = before })
+    return [{ affectedRows: 1 }]
+  }
   if (/UPDATE setes_central\.tb_user SET password = \?/.test(sql)) {
     if (failUpdatePasswordWith) throw failUpdatePasswordWith(params)
-    const [hash, userId] = params
+    const [hash, setAt, userId] = params                 // D-EA7: a senha e o instante T vão JUNTOS (a peça "definir a senha")
+    if (!/password_set_at = \?/.test(sql) || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(setAt))) throw new Error('senha sem o instante T (D-EA7)')
     const u = users.get(Number(userId))!
     const before = u.password
     u.password = hash
@@ -501,6 +513,7 @@ describe('[delta] contenção acima do piso com a trava da linha do usuário (FO
 
   it.failing('[ACHADO·LOW] t_tx = 80 ms (banco remoto/carregado) → a fila de 10 na conta existente passa do piso; deveria sair no mesmo tempo da inexistente', async () => {
     txLatencyMs = 80
+    await recover('b5@x.com')                                   // D-EA46: sem código aberto a troca recusa sem transação — a fila precisa do código
     const [ex, mi] = await withFloor(async () => [await burst('b5@x.com', 10), await burst('nao-existe-d4b@x.com', 10)])
     expect([...ex, ...mi].every(o => o.r.status === 401)).toBe(true)
     // asserção SEGURA: a mais lenta das duas rajadas tem de sair no mesmo tempo. HOJE: ~800 ms (existe) × ~400 ms (não existe).
@@ -510,6 +523,8 @@ describe('[delta] contenção acima do piso com a trava da linha do usuário (FO
 
 describe('[delta] o piso segura recurso? (pool, timers, memória sob rajada)', () => {
   it('[RESISTIU] o piso NÃO segura conexão do pool: a conexão volta antes da espera, a resposta sai no piso', async () => {
+    await recover('b11@x.com')                                  // D-EA46: só com código aberto a troca abre transação
+    releaseTimes.length = 0
     const t0 = Date.now()
     const { r } = await withFloor(() => timed(change('b11@x.com', '123456')))
     const responded = Date.now()
@@ -555,7 +570,7 @@ describe('[delta] borda do job de fundo e o log do alarme neutro', () => {
     const code = lastCode(email)
     failUpdatePasswordWith = (params: any[]) => Object.assign(new Error("Data too long for column 'password' at row 1"), {
       code: 'ER_DATA_TOO_LONG', errno: 1406, sqlMessage: "Data too long for column 'password' at row 1",
-      sql: `UPDATE setes_central.tb_user SET password = '${params[0]}', activation_key = NULL, updated_at = NOW() WHERE id = ${params[1]}`,
+      sql: `UPDATE setes_central.tb_user SET password = '${params[0]}', password_set_at = '${params[1]}', activation_key = NULL, updated_at = NOW() WHERE id = ${params[2]}`,
     })
     await expect(changePassword(email, code, newPassword)).rejects.toMatchObject({ statusCode: 401 })
     const md5 = md5Password(newPassword)
