@@ -109,6 +109,8 @@ export const APP_IMPL = [
 const SIBLING_ENV: Record<string, string> = {
   // D-F228 ("Cada um no seu"): o núcleo `fiscal-api` NÃO é repositório irmão desta cerca — entra só pelo pacote em `vendor/`
   'nfse-api': 'NFSE_API_DIR', 'setes-app': 'SETES_APP_DIR', sql: 'SQL_DIR',
+  // setes-api:AUTH.E6.P1 (D-AU19): o vetor de contrato do token e o vetor da política de senha da auth-api
+  'auth-api': 'AUTH_API_DIR',
 }
 
 /**

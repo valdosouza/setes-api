@@ -198,13 +198,17 @@ describe('D-F13 — JWT RS256 com kid (ataques ao verificador)', () => {
     const bad: Record<string, unknown>[] = [
       { ...FINAL, institutionId: '2' }, { ...FINAL, institutionId: 2.5 }, { ...FINAL, institutionId: 0 }, { ...FINAL, institutionId: -2 },
       { ...FINAL, institutionId: 2 ** 53 }, { ...FINAL, userId: -1 }, { ...FINAL, userId: '9' }, { ...FINAL, userId: null },
-      { ...FINAL, role: '' }, { ...FINAL, role: 1 }, { ...FINAL, role: ['admin'] },
       { ...FINAL, schemaName: 'setes_x`; DROP DATABASE setes_central; --' }, { ...FINAL, schemaName: 'SETES_X' },
       { ...FINAL, schemaName: 'setes_' }, { ...FINAL, schemaName: 'information_schema' }, { ...FINAL, schemaName: ['setes_x'] },
       { ...FINAL, scope: null }, { ...FINAL, scope: '' }, { ...FINAL, scope: 'select-institution' },
       { institutionId: 2, userId: 9, role: 'user' },
     ]
     for (const p of bad) expect([p, (await probe(`Bearer ${testToken(p)}`)).status]).toEqual([p, 401])
+    // D-AU19 (setes-api:AUTH.E6.P1, 2026-11-15): o `role` saiu da FORMA exigida — tolerado e ignorado (o token da auth-api não o leva,
+    // D-AU3); qualquer valor que não é texto vira '' e o perfil é sempre o VIVO (a sessão real o sobrescreve — auth-e6-token-contract)
+    for (const role of ['', 1, ['admin'], undefined]) {
+      expect(verifyFinalToken(testToken({ ...FINAL, role }))).toEqual({ ...FINAL, role: '' })
+    }
     // claims extras não vazam para req.institution (só os 4 campos)
     expect(verifyFinalToken(testToken({ ...FINAL, isSuper: true, institution: 1, role: 'user' }))).toEqual(FINAL)
   })
