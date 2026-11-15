@@ -79,7 +79,12 @@ router.get('/', controller.get)
  *                 type: array
  *                 items: { type: object }
  *     responses:
- *       200: { description: '{ ok: true, data: EstablishmentDto }' }
+ *       200:
+ *         description: >-
+ *           { ok: true, data: EstablishmentDto + ibscbsAssessmentNotice }. D-IB105: ibscbsAssessmentNotice = { validFrom } (início da
+ *           1ª opção FUTURA 2/3 de apuração do IBS/CBS) quando ESTE salvamento tirou o estabelecimento do Simples (simplesRegime gravado
+ *           3/4 → outro); null = sem aviso. Aviso que NÃO bloqueia: o salvamento já gravou; o faturamento a partir dessa data será
+ *           recusado até a opção ser excluída ou trocada (aba Regime IBS/CBS).
  *       400: { description: Validação falhou }
  *       401: { description: Não autenticado }
  *       403: { description: Restrito a administradores }
@@ -100,7 +105,7 @@ router.put('/', controller.update)
 
 // ---------------------------------------------------------------------------
 // Sub-recurso OPÇÃO DE APURAÇÃO DO IBS/CBS do Simples (`regApIBSCBSSN` — D-IB99/D-IB100, prompt_fase_ibs_cbs.md §14):
-// fato DATADO do estabelecimento (tabela da migration 076), escrito SÓ por aqui pela peça
+// fato DATADO do estabelecimento (tabela da migration 077), escrito SÓ por aqui pela peça
 // @shared/ibscbs-assessment. adminGuard herdado do gateway; institution SEMPRE do token; a data de início é a identidade.
 // Lista curta de um único registro (sem paginação — como a habilitação do emissor).
 // ---------------------------------------------------------------------------

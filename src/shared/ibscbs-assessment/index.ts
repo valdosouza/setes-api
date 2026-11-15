@@ -226,6 +226,31 @@ export async function readIbscbsAssessmentView(
   }
 }
 
+/**
+ * D-IB105 (Valdo 2026-11-01, Q-IB108 "Avisa sem bloquear"): quem tira o estabelecimento do Simples (o opSimpNac gravado sai de
+ * `SIMPLES_REGIMES_WITH_REGULAR_OPTION` — D-IB102) com opção FUTURA 2/3 registrada recebe um AVISO, nunca uma recusa: o faturamento a
+ * partir dessa data será recusado (D-IB99) até a linha ser excluída ou trocada por 1. A transição é do chamador; aqui só o fato: o
+ * início da 1ª linha viva 2/3 depois de hoje do estabelecimento (null = nenhuma — sem aviso). Leitura sem trava: é aviso, não decisão.
+ */
+export async function firstFutureRegularAssessmentFrom(
+  schemaName: string, institutionId: number, q: Queryable = pool,
+): Promise<string | null> {
+  const today = await todayFor(schemaName, institutionId, q)
+  const regular = IBSCBS_ASSESSMENTS.filter(a => isRegularAssessment(a))
+  const [rows] = await q.query(
+    `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom
+       FROM ?? WHERE tb_institution_id = ? AND deleted = 'N' AND valid_from > ? AND assessment IN (?)
+      ORDER BY valid_from LIMIT 1`,
+    [tableOf(schemaName), institutionId, today, regular])
+  const row = (rows as any[])[0]
+  return row ? String(row.validFrom) : null
+}
+
+/** D-IB105: o PUT tirou o estabelecimento do conjunto que admite a opção pelo regime regular (3/4 → outro, inclusive limpar). */
+export const leavesRegularOptionRegimes = (before: string | null | undefined, after: string | null | undefined): boolean =>
+  before != null && SIMPLES_REGIMES_WITH_REGULAR_OPTION.has(before)
+  && !(after != null && SIMPLES_REGIMES_WITH_REGULAR_OPTION.has(after))
+
 const nextDay = (iso: string): string => {
   const d = new Date(`${iso}T00:00:00Z`)
   d.setUTCDate(d.getUTCDate() + 1)

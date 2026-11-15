@@ -6,11 +6,12 @@ import { getEntityTax, upsertEntityTax } from '@shared/entity-tax/entity-tax.rep
 import { parseCrt } from '@shared/entity-tax/entity-tax.types'
 import { crtGroup, clearIcmsCodesForRegime } from '@shared/tax-rule'
 import logger from '@shared/logger/logger'
-import { EstablishmentDto, EstablishmentUpdateInput } from './establishment.interface'
+import { EstablishmentDto, EstablishmentUpdateInput, EstablishmentUpdateResult } from './establishment.interface'
 import { getEstablishmentChain, saveEstablishmentChain } from './establishment.repository'
 import {
   IbscbsAssessmentView, IbscbsAssessmentInput, readIbscbsAssessmentView,
   createIbscbsAssessment, changeIbscbsAssessment, removeIbscbsAssessment,
+  firstFutureRegularAssessmentFrom, leavesRegularOptionRegimes,
 } from '@shared/ibscbs-assessment'
 
 /**
@@ -76,7 +77,7 @@ export async function fetchEstablishment(
 export async function editEstablishment(
   institutionId: number, schemaName: string,
   input: EstablishmentUpdateInput, updatedBy: number | null
-): Promise<EstablishmentDto> {
+): Promise<EstablishmentUpdateResult> {
   const chain = await getEstablishmentChain(institutionId)
   if (!chain) {
     throw new HttpError(500,
@@ -103,6 +104,19 @@ export async function editEstablishment(
     if (regime === '3' && aliquot == null) {
       throw new HttpError(422, 'Empresa ME/EPP precisa informar o "% aproximado de tributos do Simples" (alíquota efetiva do DAS) — o fisco exige esse dado na NFS-e',
         [{ field: 'simplesTotalTaxAliquot', message: 'Obrigatório para ME/EPP' }], ErrorCodes.REQUIRED_FIELDS)
+    }
+  }
+
+  // D-IB105: saiu do Simples (opSimpNac gravado ANTES em 3/4 → outro) com opção FUTURA 2/3 → aviso que não bloqueia. Lido ANTES de
+  // gravar (gate adversarial ADV-IB105-02): uma falha da leitura aborta o PUT sem salvar pela metade — nunca 500 com o salvamento
+  // já feito. Só a transição deste PUT avisa (a aba segue com o próprio aviso); a linha continua excluível pela aba (D-IB102).
+  // Limite conhecido (ADV-IB105-04): leitura sem trava — dois PUTs simultâneos podem avisar em dobro ou um só; nada gravado muda.
+  let ibscbsAssessmentNotice: EstablishmentUpdateResult['ibscbsAssessmentNotice'] = null
+  if (input.simplesRegime !== undefined) {
+    const before = (await getEntityTax(schemaName, institutionId, institutionId))?.simplesRegime
+    if (leavesRegularOptionRegimes(before, input.simplesRegime)) {
+      const validFrom = await firstFutureRegularAssessmentFrom(schemaName, institutionId)
+      ibscbsAssessmentNotice = validFrom === null ? null : { validFrom }
     }
   }
 
@@ -170,7 +184,7 @@ export async function editEstablishment(
       })
     }
   }
-  return fetchEstablishment(institutionId, schemaName)
+  return { ...(await fetchEstablishment(institutionId, schemaName)), ibscbsAssessmentNotice }
 }
 
 // ---------------------------------------------------------------------------

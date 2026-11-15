@@ -25,6 +25,12 @@ jest.mock('../shared/tax-rule', () => ({
   clearIcmsCodesForRegime: jest.fn().mockResolvedValue(0),
 }))
 const taxRulePiece = require('../shared/tax-rule')
+// D-IB105: o aviso de saída do Simples lê a opção futura 2/3 pela peça — dublado aqui (sem linha); a regra está no
+// ib105-establishment-notice.test.ts.
+jest.mock('../shared/ibscbs-assessment', () => ({
+  ...jest.requireActual('../shared/ibscbs-assessment'),
+  firstFutureRegularAssessmentFrom: jest.fn().mockResolvedValue(null),
+}))
 
 beforeEach(() => {
   jest.clearAllMocks()
