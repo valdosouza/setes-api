@@ -86,14 +86,35 @@ describe('domínio e regra (D-IB99)', () => {
 })
 
 describe('ibscbsAssessmentAt — a opção que governa a data', () => {
-  it('linha viva de maior início ≤ data; TRAVANTE compartilhada só quando pedido; tabela por parâmetro (??)', async () => {
+  it('D-IB128: o SQL entrega as linhas vivas ≤ data SEM escolher (sem ORDER BY/LIMIT); TRAVANTE compartilhada só quando pedido; tabela por parâmetro (??)', async () => {
     const q = { query: jest.fn().mockResolvedValue([[{ validFrom: '2027-01-01', assessment: '3' }]]) }
     expect(await ibscbsAssessmentAt(q, 'setes_acme', 7, '2027-02-10', { lock: true })).toEqual({ assessment: '3', validFrom: '2027-01-01' })
     const sql = String(q.query.mock.calls[0][0])
-    expect(sql).toMatch(/valid_from <= \?[\s\S]*deleted = 'N'[\s\S]*ORDER BY valid_from DESC LIMIT 1 LOCK IN SHARE MODE/)
+    expect(sql).toMatch(/tb_institution_id = \? AND valid_from <= \? AND deleted = 'N' LOCK IN SHARE MODE$/)
+    expect(sql).not.toMatch(/ORDER BY|LIMIT|MAX\(/i)
     expect(q.query.mock.calls[0][1]).toEqual([TABLE, 7, '2027-02-10'])
     await ibscbsAssessmentAt(q, 'setes_acme', 7, '2027-02-10', { lock: false })
     expect(String(q.query.mock.calls[1][0])).not.toMatch(/LOCK|FOR UPDATE/)
+  })
+
+  it('D-IB128: a vigente é escolhida pelo seletor IMPORTADO do núcleo — várias linhas fora de ordem → a de maior início ≤ data', async () => {
+    const core = jest.requireActual('fiscal-api/ibscbs-assessment') as typeof import('fiscal-api/ibscbs-assessment')
+    const rows = [{ validFrom: '2027-07-01', assessment: '1' }, { validFrom: '2027-01-01', assessment: '3' }, { validFrom: '2026-11-05', assessment: '2' }]
+    const q = { query: jest.fn().mockResolvedValue([rows]) }
+    for (const d of ['2026-11-04', '2026-11-05', '2027-03-10', '2027-07-01', '2028-01-01']) {
+      const at = await ibscbsAssessmentAt(q, 'setes_acme', 7, d, { lock: false })
+      expect(at).toEqual({ ...core.ibscbsAssessmentOf(rows as any, d) })   // a MESMA regra, nunca uma 2ª cópia
+    }
+    expect(await ibscbsAssessmentAt(q, 'setes_acme', 7, '2027-03-10', { lock: false })).toEqual({ assessment: '3', validFrom: '2027-01-01' })
+    expect(await ibscbsAssessmentAt(q, 'setes_acme', 7, '2026-11-04', { lock: false })).toEqual({ assessment: '1', validFrom: null })
+  })
+
+  it('D-IB130 (P-IBS-14): opção gravada fora de 1/2/3 FALHA ALTO pelo seletor no faturamento e na prévia (não é a recusa 422)', async () => {
+    const q = { query: jest.fn().mockResolvedValue([[{ validFrom: '2027-01-01', assessment: '9' }]]) }
+    const err = await assertIbscbsAssessmentSupported(q, 'setes_acme', 7, '2027-03-01').catch(e => e)
+    expect(String(err?.message)).toMatch(/opção fora do domínio 1\/2\/3/)
+    expect(err?.statusCode).toBeUndefined()
+    await expect(previewIbscbsAssessmentRefusal(q, 'setes_acme', 7, '2027-03-01')).rejects.toThrow(/opção fora do domínio 1\/2\/3/)
   })
 
   it.each(['', 'abc', '2027-13-45', '2027-02-30'])('ADV-IB99-03: competência inválida %p falha FECHADO antes do SQL (nunca "sem linha = 1")', async d => {
@@ -153,6 +174,16 @@ describe('readIbscbsAssessmentView — o que a tela mostra', () => {
     expect(v.items.map(i => [i.validFrom, i.inEffect, i.editable])).toEqual([
       ['2026-11-05', false, false], ['2027-01-01', true, false], ['2027-07-01', false, true],
     ])
+  })
+
+  it('D-IB128: a tela escolhe a vigente de HOJE pelo MESMO seletor importado (lista fora de ordem); D-IB130: linha fora do domínio falha alto', async () => {
+    tz.todayFor.mockResolvedValue('2027-03-01')
+    const rows = [{ validFrom: '2027-07-01', assessment: '1' }, { validFrom: '2026-11-05', assessment: '1' }, { validFrom: '2027-01-01', assessment: '3' }]
+    const v = await readIbscbsAssessmentView('setes_acme', 7, { query: jest.fn().mockResolvedValue([rows]) })
+    expect(v.current).toEqual({ assessment: '3', validFrom: '2027-01-01', supported: false })
+    expect(v.items.filter(i => i.inEffect).map(i => i.validFrom)).toEqual(['2027-01-01'])
+    const bad = { query: jest.fn().mockResolvedValue([[{ validFrom: '2027-01-01', assessment: 'x' }]]) }
+    await expect(readIbscbsAssessmentView('setes_acme', 7, bad)).rejects.toThrow(/opção fora do domínio 1\/2\/3/)
   })
 })
 

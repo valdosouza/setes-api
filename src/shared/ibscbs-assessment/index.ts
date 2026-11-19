@@ -6,6 +6,10 @@ import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { todayFor } from '@shared/time-zone'
 import { lastErpWebEmissionDate } from '@shared/invoice/emission-date'
 import { emitterRegimeAt } from '@shared/entity-tax/entity-tax.repository'
+import {
+  IBSCBS_ASSESSMENTS, IBSCBS_ASSESSMENT_WITHOUT_OPTION, IbscbsAssessment, IbscbsAssessmentDatedOption,
+  ibscbsAssessmentOf, isIbscbsAssessment, isIbscbsAssessmentDate,
+} from 'fiscal-api/ibscbs-assessment'
 
 /**
  * PEÇA @shared/ibscbs-assessment (fase IBS/CBS, D-IB99/D-IB100 — Infra-IA/prompts/prompt_fase_ibs_cbs.md §14): a OPÇÃO de
@@ -32,12 +36,15 @@ import { emitterRegimeAt } from '@shared/entity-tax/entity-tax.repository'
 
 export type Queryable = { query: (sql: string, params?: unknown[]) => Promise<any> }
 
-/** Domínio da NT 009 (`regApIBSCBSSN`). */
-export const IBSCBS_ASSESSMENTS = Object.freeze(['1', '2', '3'] as const)
-export type IbscbsAssessment = typeof IBSCBS_ASSESSMENTS[number]
-
-/** D-IB1: quem não registrou opção apura IBS e CBS pelo Simples — o efeito legal de não optar. */
-export const IBSCBS_ASSESSMENT_WITHOUT_OPTION: IbscbsAssessment = '1'
+/**
+ * D-IB128 (Valdo 2026-11-18 — prompt_fase_ibs_cbs.md §17.5; setes-api:IBS.E6.P7): a REGRA DE LEITURA — o domínio da NT 009
+ * (`regApIBSCBSSN`), "sem linha = 1" (D-IB1: o efeito legal de não optar), a data real e o SELETOR da vigente — sai de UMA biblioteca, o
+ * subpath puro `fiscal-api/ibscbs-assessment` (o mesmo que o leitor da view no núcleo usa). Reexportados daqui para os consumidores da
+ * peça não mudarem. D-IB130 (P-IBS-14, Valdo 2026-11-19 — §17.9): o seletor é ESTRITO e a peça NÃO trata o erro dele — opção gravada
+ * fora de 1/2/3 (só sem o CHECK binário da 077, que o boot exige) falha alto no faturamento, na prévia e na tela (continua fechado).
+ */
+export { IBSCBS_ASSESSMENTS, IBSCBS_ASSESSMENT_WITHOUT_OPTION, isIbscbsAssessment }
+export type { IbscbsAssessment }
 
 /** D-IB99: o que o faturamento sabe tratar HOJE. Cresce com o cálculo do regime regular (D-IB11/D-IB12) — nunca vira coluna/flag. */
 export const IBSCBS_ASSESSMENTS_SUPPORTED: ReadonlySet<string> = Object.freeze(new Set<IbscbsAssessment>(['1']))
@@ -51,9 +58,6 @@ export const IBSCBS_ASSESSMENT_LABELS: Readonly<Record<IbscbsAssessment, string>
   '2': 'CBS apurada pelo Simples Nacional e IBS pelo regime regular',
   '3': 'IBS e CBS apurados pelo regime regular',
 })
-
-export const isIbscbsAssessment = (v: unknown): v is IbscbsAssessment =>
-  typeof v === 'string' && (IBSCBS_ASSESSMENTS as readonly string[]).includes(v)
 
 export const isRegularAssessment = (a: IbscbsAssessment): boolean => a !== '1'
 
@@ -72,14 +76,14 @@ const SIMPLES_REGIME_NAMES: Readonly<Record<string, string>> = Object.freeze({
 export const isAssessmentSupported = (a: string): boolean => IBSCBS_ASSESSMENTS_SUPPORTED.has(a)
 
 /**
- * Data de calendário REAL 'YYYY-MM-DD'. O servidor roda SEM modo estrito: '2027-02-30' viraria '0000-00-00' com um aviso —
- * o que valida é o que grava (`setes-api/02-VALIDACAO.md`).
+ * Data de calendário REAL 'YYYY-MM-DD' a partir de 2000-01-01 — a do núcleo (D-IB128: os dois lados aceitam as mesmas datas). O servidor
+ * roda SEM modo estrito: '2027-02-30' viraria '0000-00-00' com um aviso — o que valida é o que grava (`setes-api/02-VALIDACAO.md`).
  */
-export function isIsoDate(v: unknown): v is string {
-  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false
-  const d = new Date(`${v}T00:00:00Z`)
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v && v >= '2000-01-01'
-}
+export const isIsoDate: (v: unknown) => v is string = isIbscbsAssessmentDate
+
+/** As linhas lidas do banco como o seletor do núcleo as recebe (cru: o seletor confere data e domínio e falha alto — D-IB130). */
+const datedOptions = (rows: any[]): IbscbsAssessmentDatedOption[] =>
+  rows.map(r => ({ validFrom: r.validFrom, assessment: r.assessment }))
 
 const TABLE = 'tb_establishment_ibscbs_assessment'
 const CHECK_NAME = 'ck_establishment_ibscbs_assessment'
@@ -87,17 +91,18 @@ const tableOf = (schemaName: string) => `${schemaName}.${TABLE}`
 
 /** A opção que governa uma data. `validFrom` null = sem linha até a data (vale 1 — D-IB1). */
 export interface IbscbsAssessmentAt {
-  /** Valor gravado, cru (fora do domínio = desconhecido → recusado). */
+  /** Sempre do domínio desde a D-IB128/D-IB130 (o seletor recusa o resto); `string` para o `assessmentRefusalOf` seguir aceitando valor cru. */
   assessment: string
   validFrom:  string | null
 }
 
 /**
- * A opção vigente na DATA (a competência da nota = `dt_emission`, D-IB64): a linha viva de maior `valid_from` ≤ data. Dentro da
- * transação que decide (faturamento) a leitura é TRAVANTE compartilhada (PADROES §9 regra 2): o registro de uma opção nova com
- * início ≤ data ESPERA o faturamento terminar (nunca uma nota decidida com uma opção que muda no meio dela) — provado em
- * `scripts/prove-ibscbs-assessment.ts`. A espera ORDENA; quem CONFERE as notas já nascidas é o escritor da opção, depois da trava
- * (D-IB101 — `frontierAfterLock`).
+ * A opção vigente na DATA (a competência da nota = `dt_emission`, D-IB64): a linha viva de maior `valid_from` ≤ data — escolhida
+ * pelo seletor ÚNICO do núcleo (`ibscbsAssessmentOf` — D-IB128): o SELECT não escolhe a linha (sem `ORDER BY … LIMIT 1`), entrega as
+ * linhas vivas ≤ data. Dentro da transação que decide (faturamento) a leitura é TRAVANTE compartilhada (PADROES §9 regra 2): o
+ * registro de uma opção nova com início ≤ data ESPERA o faturamento terminar (nunca uma nota decidida com uma opção que muda no meio
+ * dela) — provado em `scripts/prove-ibscbs-assessment.ts` (de novo com o seletor importado, IBS.E6.P7). A espera ORDENA; quem CONFERE
+ * as notas já nascidas é o escritor da opção, depois da trava (D-IB101 — `frontierAfterLock`).
  */
 export async function ibscbsAssessmentAt(
   q: Queryable, schemaName: string, institutionId: number, date: string, opts: { lock: boolean },
@@ -107,12 +112,10 @@ export async function ibscbsAssessmentAt(
   if (!isIsoDate(date)) throw new Error(`Opção IBS/CBS: competência inválida (${JSON.stringify(date)}) — o produtor da nota não mandou a data de emissão`)
   const [rows] = await q.query(
     `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment
-       FROM ?? WHERE tb_institution_id = ? AND valid_from <= ? AND deleted = 'N'
-      ORDER BY valid_from DESC LIMIT 1${opts.lock ? ' LOCK IN SHARE MODE' : ''}`,
+       FROM ?? WHERE tb_institution_id = ? AND valid_from <= ? AND deleted = 'N'${opts.lock ? ' LOCK IN SHARE MODE' : ''}`,
     [tableOf(schemaName), institutionId, date])
-  const row = (rows as any[])[0]
-  if (!row) return { assessment: IBSCBS_ASSESSMENT_WITHOUT_OPTION, validFrom: null }
-  return { assessment: String(row.assessment ?? ''), validFrom: String(row.validFrom) }
+  const { assessment, validFrom } = ibscbsAssessmentOf(datedOptions(rows as any[]), date)
+  return { assessment, validFrom }
 }
 
 export interface IbscbsAssessmentRefusal {
@@ -206,11 +209,13 @@ export async function readIbscbsAssessmentView(
        FROM ?? WHERE tb_institution_id = ? AND deleted = 'N' ORDER BY valid_from`,
     [tableOf(schemaName), institutionId])
   const changeable = (validFrom: string) => validFrom > today && (lastInvoice === null || validFrom > lastInvoice)
-  const lines = (rows as any[]).map(r => ({ validFrom: String(r.validFrom), assessment: String(r.assessment ?? '') }))
-  const governing = [...lines].reverse().find(l => l.validFrom <= today) ?? null
+  // a vigente de HOJE pelo MESMO seletor do faturamento (D-IB128); linha fora do domínio falha alto (D-IB130)
+  const resolved = ibscbsAssessmentOf(datedOptions(rows as any[]), today)
+  const lines = (rows as any[]).map(r => ({ validFrom: String(r.validFrom), assessment: String(r.assessment) }))
+  const governing = resolved.validFrom === null ? null : { validFrom: resolved.validFrom, assessment: resolved.assessment }
   const current = governing
     ? { ...governing, supported: isAssessmentSupported(governing.assessment) }
-    : { assessment: IBSCBS_ASSESSMENT_WITHOUT_OPTION, validFrom: null, supported: true }
+    : { assessment: resolved.assessment, validFrom: null, supported: isAssessmentSupported(resolved.assessment) }
   const dayAfterInvoice = lastInvoice === null ? null : nextDay(lastInvoice)
   return {
     today, lastInvoice, firstStart: dayAfterInvoice !== null && dayAfterInvoice > today ? dayAfterInvoice : today,

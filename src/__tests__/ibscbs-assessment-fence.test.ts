@@ -2,7 +2,7 @@
 // Fase IBS/CBS, D-IB99/D-IB100 (prompt_fase_ibs_cbs.md §14): CERCA — `tb_establishment_ibscbs_assessment` tem UM dono: a peça
 // @shared/ibscbs-assessment (leitura na data, regra da recusa e escrita). Outro arquivo que nomeie a tabela é uma 2ª regra ou um 2º
 // escritor (ex.: um backfill de '1' — maquete nº 2 do parecer do guardião: duas representações de "não optou") — este teste falha e
-// diz onde. Exceções nomeadas: a migration que a cria e a prova em schema DESCARTÁVEL.
+// diz onde. Exceções nomeadas: a migration que a cria, a da view publicada (078) e a prova em schema DESCARTÁVEL.
 import fs from 'fs'
 import path from 'path'
 
@@ -13,6 +13,8 @@ const OWNER = path.join(SRC, 'shared', 'ibscbs-assessment', 'index.ts')
 const ALLOWED = new Set([
   OWNER,
   path.join(SRC, 'migrations', 'sql', '077_establishment_ibscbs_assessment.sql'),
+  // D-IB127 (IBS.E6.P7): a VIEW publicada só das linhas vivas — sem regra (a vigente é do seletor do núcleo, D-IB128)
+  path.join(SRC, 'migrations', 'sql', '078_establishment_ibscbs_assessment_view.sql'),
   path.join(SCRIPTS, 'prove-ibscbs-assessment.ts'),
 ])
 const TABLE = /tb_establishment_ibscbs_assessment/

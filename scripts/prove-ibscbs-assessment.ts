@@ -7,10 +7,17 @@
  * registro de uma opção com início ≤ a competência ESPERA. Apaga o schema descartável no fim (inclusive em falha). NUNCA escreve no
  * schema de origem nem na central.
  *
+ * setes-api:IBS.E6.P7 (D-IB127/D-IB128/D-IB129 — prompt_fase_ibs_cbs.md §17): também a VIEW publicada (migration 078) — aplicada duas
+ * vezes, colunas = o contrato do núcleo, EXPLAIN fundido pela PK, linha morta fora dela, o seletor IMPORTADO sobre a view = a peça, e o
+ * usuário da API fiscal lendo a view e recusado no INSERT na tabela (credencial por `FISCAL_DB_USER`/`FISCAL_DB_PASSWORD` no ambiente —
+ * a do `.env` da nfse-api; nunca impressa; sem ela a prova FALHA; `FISCAL_DB_HOST` opcional = o DB_HOST da nfse-api). E a trava de novo, com a vigente escolhida pelo seletor importado.
+ *
  * Uso: npx tsx --require tsconfig-paths/register scripts/prove-ibscbs-assessment.ts [schema-origem=setes_setes] [institution=1]
  */
 import fs from 'fs'
 import path from 'path'
+import mysql from 'mysql2/promise'
+import { ESTABLISHMENT_IBSCBS_ASSESSMENT_VIEW, ESTABLISHMENT_IBSCBS_ASSESSMENT_COLUMNS, ibscbsAssessmentOf } from 'fiscal-api/ibscbs-assessment'
 import pool from '@shared/db/connection'
 import { splitStatements } from '../src/migrations/runner'
 import { todayFor } from '@shared/time-zone'
@@ -23,6 +30,8 @@ const SOURCE = process.argv[2] ?? 'setes_setes'
 const INSTITUTION = Number(process.argv[3] ?? 1)
 const PROBE = `setes_ib99_probe_${process.pid}`
 const MIGRATION = path.join(__dirname, '..', 'src', 'migrations', 'sql', '077_establishment_ibscbs_assessment.sql')
+const MIGRATION_VIEW = path.join(__dirname, '..', 'src', 'migrations', 'sql', '078_establishment_ibscbs_assessment_view.sql')
+const VIEW = ESTABLISHMENT_IBSCBS_ASSESSMENT_VIEW
 
 const addDays = (iso: string, n: number) => {
   const d = new Date(`${iso}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10)
@@ -50,6 +59,11 @@ async function main() {
     const statements = splitStatements(fs.readFileSync(MIGRATION, 'utf8'))
     for (let run = 1; run <= 2; run++) for (const st of statements) await conn.query(st)
     check('077 aplicada DUAS vezes sem erro (re-executável)', true)
+    const viewStatements = splitStatements(fs.readFileSync(MIGRATION_VIEW, 'utf8'))
+    for (let run = 1; run <= 2; run++) for (const st of viewStatements) await conn.query(st)
+    check('078 (view) aplicada DUAS vezes sem erro (re-executável)', true)
+    /** DROP da tabela invalida a view: a 077 e a 078 são reaplicadas JUNTAS. */
+    const reapply = async () => { for (const st of [...statements, ...viewStatements]) await conn.query(st) }
 
     const problem = await ibscbsAssessmentCheckProblem(conn, PROBE)
     const [ck] = await conn.query<any[]>(
@@ -142,12 +156,71 @@ async function main() {
       view.current.validFrom === today && view.items.find(i => i.validFrom === today)?.inEffect === true
       && view.items.find(i => i.validFrom === today)?.editable === false)
 
+    // ── VIEW publicada (D-IB127/D-IB129) — antes do 1º DROP da tabela ──────────────────────────────────────────────────────────
+    const [cols] = await conn.query<any[]>(
+      `SELECT COLUMN_NAME AS c, DATA_TYPE AS t FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`,
+      [PROBE, VIEW])
+    const contract = ESTABLISHMENT_IBSCBS_ASSESSMENT_COLUMNS
+    check(`view: colunas NA ORDEM = contrato do núcleo (${(cols as any[]).map(r => `${r.c}:${r.t}`).join(', ')})`,
+      JSON.stringify((cols as any[]).map(r => r.c)) === JSON.stringify(contract.map(c => c[0]))
+      && contract.every(([c, , kind]) => kind !== 'date' || (cols as any[]).find(r => r.c === c)?.t === 'date'))
+    // 30 linhas vivas de datas variadas (2040+, longe de tudo acima) + 1 morta — o dado do EXPLAIN e do seletor
+    for (let i = 0; i < 30; i++) {
+      await conn.query(
+        `INSERT INTO tb_establishment_ibscbs_assessment (tb_institution_id, valid_from, assessment, tb_user_id, deleted) VALUES (?, ?, ?, 1, 'N')`,
+        [INSTITUTION, `${2040 + Math.floor(i / 3)}-${String(1 + (i % 3) * 4).padStart(2, '0')}-01`, String(1 + (i % 3))])
+    }
+    const deadDate = '2045-03-01'
+    await conn.query(
+      `INSERT INTO tb_establishment_ibscbs_assessment (tb_institution_id, valid_from, assessment, tb_user_id, deleted) VALUES (?, ?, '3', 1, 'S')`,
+      [INSTITUTION, deadDate])
+    await conn.query('ANALYZE TABLE tb_establishment_ibscbs_assessment')
+    const [vplan] = await conn.query<any[]>(
+      `EXPLAIN SELECT tb_institution_id, DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment FROM ${VIEW}
+        WHERE tb_institution_id = ? AND valid_from <= ?`, [INSTITUTION, '2045-06-01'])
+    check(`view: EXPLAIN fundido pela PK (${(vplan as any[]).map(r => `${r.select_type}/${r.table}/${r.type}/${r.key ?? '-'}`).join(' ')})`,
+      (vplan as any[]).length === 1 && (vplan as any[]).every(r => r.select_type === 'SIMPLE' && (r.table === 'a' || r.table === 'tb_establishment_ibscbs_assessment')
+        && r.key === 'PRIMARY' && /^(range|ref)$/.test(String(r.type))))
+    const viewRows = async (q: { query: (s: string, p?: unknown[]) => Promise<any> }) => {
+      const [r] = await q.query(
+        `SELECT DATE_FORMAT(valid_from, '%Y-%m-%d') AS validFrom, assessment FROM \`${PROBE}\`.${VIEW} WHERE tb_institution_id = ?`, [INSTITUTION])
+      return r as { validFrom: string; assessment: any }[]
+    }
+    const vr = await viewRows(conn)
+    check('view: a linha morta (deleted = S) NÃO aparece; as vivas sim', !vr.some(r => r.validFrom === deadDate) && vr.length >= 30)
+    const same = await Promise.all(['2026-11-30', '2041-05-15', deadDate, '2049-12-31'].map(async d =>
+      JSON.stringify(ibscbsAssessmentOf(vr.filter(r => r.validFrom <= d) as any, d)) === JSON.stringify(
+        { ...await ibscbsAssessmentAt(conn, S, INSTITUTION, d, { lock: false }) })))
+    check('view: o seletor IMPORTADO sobre as linhas da view = ibscbsAssessmentAt da peça (4 datas, inclusive a da linha morta)', same.every(Boolean))
+    // o usuário da API fiscal (GRANT SELECT em setes\_% — §17.1 R4): lê a view; INSERT na tabela recusado por permissão
+    const fiscalUser = process.env.FISCAL_DB_USER
+    const fiscalPassword = process.env.FISCAL_DB_PASSWORD
+    if (!fiscalUser || !fiscalPassword) {
+      check('usuário da API fiscal: NÃO PROVADO (FISCAL_DB_USER/FISCAL_DB_PASSWORD ausentes no ambiente)', false)
+    } else {
+      const fiscal = await mysql.createConnection({
+        // o MESMO host da nfse-api (`FISCAL_DB_HOST` = o DB_HOST do .env dela): o servidor tem uma conta por host (@localhost, @127.0.0.1…)
+        host: process.env.FISCAL_DB_HOST ?? process.env.DB_HOST, port: Number(process.env.DB_PORT ?? 3306), user: fiscalUser, password: fiscalPassword,
+      }).catch((e: any) => { check(`usuário ${fiscalUser}: NÃO CONECTOU (${e?.code ?? e?.message}) — a trava segue provada abaixo`, false); return null })
+      if (fiscal) try {
+        const fr = await viewRows(fiscal)
+        check(`usuário ${fiscalUser}: lê a view (${fr.length} linhas, as mesmas da peça)`, JSON.stringify(fr) === JSON.stringify(vr))
+        let denied = 'gravou'
+        try {
+          await fiscal.query(
+            `INSERT INTO \`${PROBE}\`.tb_establishment_ibscbs_assessment (tb_institution_id, valid_from, assessment, tb_user_id) VALUES (?, '2050-01-01', '1', 1)`,
+            [INSTITUTION])
+        } catch (e: any) { denied = e?.errno === 1142 ? 'recusado' : `erro:${e?.code}` }
+        check(`usuário ${fiscalUser}: INSERT na tabela recusado por permissão (1142): ${denied}`, denied === 'recusado')
+      } finally { await fiscal.end() }
+    }
+
     // TRAVA (PADROES §9 regra 2): o faturamento lê a opção na competência com LOCK IN SHARE MODE; o registro de uma opção com
     // início ≤ competência ESPERA o faturamento terminar — a nota nunca é decidida com uma opção que muda no meio dela. A espera
     // ORDENA, não confere: depois do commit o registro passa e cobre a nota já emitida no mesmo dia (limite da Q-IB105)
     // recomeça a tabela por DDL (nunca DELETE de dado — PADROES §3.1) e prova a 3ª execução da 077
     await conn.query('DROP TABLE tb_establishment_ibscbs_assessment')
-    for (const st of statements) await conn.query(st)
+    await reapply()
     const competence = '2027-03-10'
     await other.query('SET SESSION innodb_lock_wait_timeout = 2')
     const insertBy = async (validFrom: string) => {
@@ -166,10 +239,26 @@ async function main() {
     await conn.query(
       `INSERT INTO tb_establishment_ibscbs_assessment (tb_institution_id, valid_from, assessment, tb_user_id) VALUES (?, '2027-01-01', '1', 1)`,
       [INSTITUTION])
+    // IBS.E6.P7 (gate da ficha): sem o LIMIT 1 a leitura trava TODAS as linhas vivas ≤ competência — linha FUTURA não pode ganhar espera
+    // nova. Uma vizinha imediata (o InnoDB trava o registro seguinte do intervalo — informativo) e uma distante (tem de passar)
+    for (const d of ['2027-05-01', '2027-11-01']) {
+      await conn.query(
+        `INSERT INTO tb_establishment_ibscbs_assessment (tb_institution_id, valid_from, assessment, tb_user_id) VALUES (?, ?, '1', 1)`, [INSTITUTION, d])
+    }
+    const updateBy = async (validFrom: string) => {
+      try {
+        await other.query(
+          `UPDATE \`${PROBE}\`.tb_establishment_ibscbs_assessment SET tb_user_id = 2 WHERE tb_institution_id = ? AND valid_from = ?`,
+          [INSTITUTION, validFrom])
+        return 'gravou'
+      } catch (e: any) { return e?.errno === 1205 ? 'esperou' : `erro:${e?.sqlMessage ?? e?.message}` }
+    }
     await conn.beginTransaction()
     await ibscbsAssessmentAt(conn, S, INSTITUTION, competence, { lock: true })   // COM linha anterior
     check('com linha travada: registrar entre a linha e a competência ESPERA', await insertBy('2027-02-01') === 'esperou')
     check('com linha travada: registrar NA competência ESPERA', await insertBy(competence) === 'esperou')
+    check('com linha travada: alterar linha FUTURA distante (2027-11-01) NÃO espera', await updateBy('2027-11-01') === 'gravou')
+    console.log(`     (informativo) alterar a linha futura VIZINHA (2027-05-01) com a leitura travada: ${await updateBy('2027-05-01')}`)
     const after = await insertBy('2027-07-01')
     console.log(`     (informativo) registrar DEPOIS da competência com a leitura travada: ${after}`)
     await conn.commit()
@@ -179,7 +268,7 @@ async function main() {
     // início na competência ESPERA, o faturamento grava a nota e confirma; o registro, ao passar, enxerga a nota (o retrato da transação
     // dele nasce DEPOIS da espera) e recusa com INVOICED. Sem isso, a opção passaria a cobrir a nota que já leu a anterior.
     await conn.query('DROP TABLE tb_establishment_ibscbs_assessment')
-    for (const st of statements) await conn.query(st)
+    await reapply()
     const raceDay = addDays(today, 7)
     await conn.beginTransaction()
     await ibscbsAssessmentAt(conn, S, INSTITUTION, raceDay, { lock: true })            // o faturamento leu "sem linha = 1"

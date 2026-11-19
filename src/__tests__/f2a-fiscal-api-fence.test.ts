@@ -16,7 +16,10 @@ function walk(dir: string): string[] {
 
 // D-CJ2 (frente do CNPJ alfanumérico, 2026-10-15): o 2º subpath permitido é a inscrição federal `fiscal-api/federal-id` — peça PURA
 // (sem banco, sem I/O), a regra única do CPF/CNPJ que o `@shared/validation` reexporta. Nada do lado de escrita.
-const ALLOWED = new Set(['fiscal-api/reading', 'fiscal-api/federal-id'])
+// D-IB129 (fase IBS/CBS, Valdo 2026-11-18 — prompt_fase_ibs_cbs.md §17.7): o 4º subpath é a opção de apuração do IBS/CBS
+// `fiscal-api/ibscbs-assessment` — peça PURA (sem banco, sem I/O) com a regra ÚNICA da vigente (D-IB128) e o contrato da view; aceita
+// em qualquer arquivo, como o `federal-id`.
+const ALLOWED = new Set(['fiscal-api/reading', 'fiscal-api/federal-id', 'fiscal-api/ibscbs-assessment'])
 // Costura A1 da auth-api (D-AU6, Valdo 2026-10-31): o 3º subpath é o LEITOR do veredito de acesso `fiscal-api/access` (a pilha de views
 // publicada — nada de escrita). Só o ADAPTADOR o importa (`@shared/access` — um leitor no setes-api) e a prova das views em banco descartável.
 const ALLOWED_ONLY_IN: Readonly<Record<string, readonly string[]>> = {
@@ -25,7 +28,7 @@ const ALLOWED_ONLY_IN: Readonly<Record<string, readonly string[]>> = {
     'scripts/adv-a1-delta-probe.ts', 'scripts/measure-access-reads.ts'],
 }
 
-describe('cerca F2a — o setes-api só importa `fiscal-api/reading`, `fiscal-api/federal-id` e (só no adaptador) `fiscal-api/access`', () => {
+describe('cerca F2a — o setes-api só importa `fiscal-api/reading`, `fiscal-api/federal-id`, `fiscal-api/ibscbs-assessment` e (só no adaptador) `fiscal-api/access`', () => {
   it('nenhum import/require/import() de `fiscal-api` (raiz) ou de outro subpath dele', () => {
     const bad: string[] = []
     for (const f of ROOTS.flatMap(walk)) {
