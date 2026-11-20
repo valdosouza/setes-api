@@ -221,7 +221,8 @@ export async function switchSyncApiKey(id: number, active: 'S' | 'N', actorUserI
  * PDV) ou L → P (cliente com PDV — os PDVs passam a receber o catálogo da web). Grava `transition_ended_at`, muda o fato, cria as
  * categorias padrão que faltarem e, no destino W, inativa a chave do sincronizador em definitivo; no destino P a chave fica (é a dos
  * PDVs — A-PR4/Q-PR60) e o servidor desktop passa a ser recusado pelo FATO no setes-sync (`SYNC_TRANSITION_ENDED` — contrato com o grupo
- * do sync). O motivo e o autor vão ao log (Q-PR48 (a); coluna própria = Q-PR59). Reexecuta em deadlock (cunha id de categoria).
+ * do sync). O autor e o motivo viram FATO do objeto (`transition_ended_by`/`transition_end_reason`, gravados no MESMO UPDATE do ato —
+ * D-PR53/D-PR57) e seguem também no log. Reexecuta em deadlock (cunha id de categoria).
  */
 /**
  * BARREIRA INTERINA (A-PR5 — gate socrático da Rodada 7; questão Q-PR62 ao Valdo): o destino P deixa a chave viva para os PDVs (A-PR4) e
@@ -241,8 +242,10 @@ export async function endLegacyTransition(
       [{ field: 'destination', message: `destinos abertos: ${[...OPEN_TRANSITION_DESTINATIONS].join(', ')}` }],
       ErrorCodes.LEGACY_TRANSITION_DESTINATION_PENDING)
   }
+  // a rota passa por auth + superGuard: o token SEMPRE traz o usuário — sem ele o ato não grava pela metade (o CHECK da 079 recusaria)
+  if (actorUserId == null) throw new Error('encerrar a transição: autor ausente — a rota exige o usuário do token (D-PR53)')
   const outcome = await withDeadlockRetry('institutions end-legacy-transition POST', { institutionId: id }, 3,
-    () => endLegacyTransitionTx(id, destination))
+    () => endLegacyTransitionTx(id, destination, actorUserId, reason))
   if (outcome.kind === 'missing') throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
   if (outcome.kind === 'not-applicable') {
     // o instante não vai na prosa (PADROES §10: instante na zona é da fronteira do app) — vai tipado em fields[]

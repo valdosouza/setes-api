@@ -80,13 +80,13 @@ function db(sql: string, params: any[] = []): any {
     const i = institutions.get(Number(params[0]))
     return [i ? [{ schemaName: i.schemaName, sourceKind: i.kind, transitionEndedAt: i.endedAt }] : []]
   }
-  if (/SELECT schema_name AS schemaName, active, source_kind AS sourceKind, transition_ended_at/.test(s)) {
+  if (/SELECT i\.schema_name AS schemaName, i\.active, i\.source_kind AS sourceKind, i\.transition_ended_at/.test(s)) {
     const i = institutions.get(Number(params[0]))
     return [i ? [{ schemaName: i.schemaName, active: 'S', sourceKind: i.kind, transitionEndedAt: i.endedAt }] : []]
   }
-  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\)/.test(s)) {
-    instUpdates.push(params)
-    const i = institutions.get(Number(params[1]))
+  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?/.test(s)) {
+    instUpdates.push(params)                                  // [destino, autor, motivo, id] — as quatro marcas no MESMO UPDATE (D-PR53)
+    const i = institutions.get(Number(params[3]))
     if (!i || i.kind !== 'L' || i.endedAt) return [{ affectedRows: 0 }]
     i.kind = params[0]; i.endedAt = NOW
     return [{ affectedRows: 1 }]
@@ -327,7 +327,7 @@ describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível
     expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'W', endedAt: NOW })
     expect(keys.get(1)![0].active).toBe('N')
     expect(cats.get(1)!.find(c => c.id === 10)).toMatchObject({ kind: 'S', active: 'S' })
-    expect(instUpdates).toEqual([['W', 1]])
+    expect(instUpdates).toEqual([['W', 1, 'servidor desktop desligado em 20/10', 1]])   // autor = userId do SUPER (D-PR53)
     const log = (logger.info as jest.Mock).mock.calls.find(c => /ENCERRADA/.test(c[0]))
     expect(log?.[1]).toMatchObject({ institutionId: 1, destination: 'W', reason: 'servidor desktop desligado em 20/10', actorUserId: 1, syncKeysInactivated: 1 })
     expect(JSON.stringify((logger.info as jest.Mock).mock.calls)).not.toContain(KEY)
@@ -365,7 +365,7 @@ describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível
     const native = await end(2, { destination: 'W', reason: 'nativo web' })
     expect([native.status, native.body.code]).toEqual([409, 'LEGACY_TRANSITION_NOT_APPLICABLE'])
     expect(native.body.error).toMatch(/só vale para estabelecimento em transição/)
-    expect(instUpdates).toEqual([['W', 1]])
+    expect(instUpdates).toEqual([['W', 1, 'primeira vez', 1]])
     expect(institutions.get(1)!.kind).toBe('W'); expect(institutions.get(2)!.kind).toBe('W')
   })
 
@@ -388,7 +388,7 @@ describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível
     expect(r.status).toBe(200)
     expect(r.body.data).toMatchObject({ sourceKind: 'W', syncKeysInactivated: 1, defaultCategories: { P: null, S: 10 } })
     expect(cats.get(1)!.filter(c => c.kind === 'S')).toHaveLength(1)
-    expect(instUpdates).toEqual([['W', 1]])                                            // a 1ª tentativa foi desfeita
+    expect(instUpdates).toEqual([['W', 1, 'com deadlock no meio', 1]])                 // a 1ª tentativa foi desfeita
     expect(txConns.length).toBeGreaterThanOrEqual(2)
     expect(txConns[0].rollback).toHaveBeenCalled()
     expect(txConns[0].commit).not.toHaveBeenCalled()

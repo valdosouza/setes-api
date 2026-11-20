@@ -70,9 +70,14 @@ export async function listInstitutions(query: ListQuery): Promise<PagedRows<Inst
 /** Objeto COMPLETO: cadeia compartilhada (shared/entity) + tb_institution. */
 export async function getInstitution(id: number): Promise<InstitutionFull | null> {
   const [rows] = await pool.query<any[]>(
-    `SELECT schema_name AS schemaName, active, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt
-     FROM setes_central.tb_institution
-     WHERE id = ? AND deleted = 'N'`,
+    // o nome do autor do ato (D-PR58, Valdo 2026-11-20 — a tela mostra autor e motivo ao lado da data): `nick_trade` não vazio, senão
+    // `name_company` (a variante com NULLIF do users.repository; tb_user herda a PK de tb_entity); sem filtro de `deleted`: fato histórico
+    `SELECT i.schema_name AS schemaName, i.active, i.source_kind AS sourceKind, i.transition_ended_at AS transitionEndedAt,
+            i.transition_ended_by AS transitionEndedBy, i.transition_end_reason AS transitionEndReason,
+            COALESCE(NULLIF(ea.nick_trade, ''), ea.name_company) AS transitionEndedByName
+     FROM setes_central.tb_institution i
+     LEFT JOIN setes_central.tb_entity ea ON ea.id = i.transition_ended_by
+     WHERE i.id = ? AND i.deleted = 'N'`,
     [id]
   )
   if (!rows[0]) return null
@@ -83,6 +88,9 @@ export async function getInstitution(id: number): Promise<InstitutionFull | null
   return {
     ...chain, schemaName: rows[0].schemaName, active: rows[0].active,
     sourceKind: rows[0].sourceKind, transitionEndedAt: toIso(rows[0].transitionEndedAt),
+    transitionEndedBy: rows[0].transitionEndedBy == null ? null : Number(rows[0].transitionEndedBy),
+    transitionEndReason: rows[0].transitionEndReason ?? null,
+    transitionEndedByName: rows[0].transitionEndedBy == null ? null : (rows[0].transitionEndedByName ?? null),
   }
 }
 
@@ -417,15 +425,21 @@ export type LegacyTransitionOutcome =
  *     por ela lê o fato novo) e o fato `FOR UPDATE` (regra 2 do §9 — leitura que decide trava);
  *  2. só `source_kind = 'L'` passa (não-L = `not-applicable`: repetir o ato cai aqui — não há 2º código, depois do ato a institution
  *     simplesmente não é L);
- *  3. `UPDATE … SET source_kind = destino, transition_ended_at = NOW() WHERE id = ? AND source_kind = 'L'` — a condição NO COMANDO
- *     (PADROES §11 regra 10: fato monotônico); 0 linhas = alguém mudou o fato por baixo → falha alto;
+ *  3. `UPDATE … SET source_kind = destino, transition_ended_at = NOW(), transition_ended_by = autor, transition_end_reason = motivo
+ *     WHERE id = ? AND source_kind = 'L' AND transition_ended_at IS NULL` — as QUATRO marcas do ato no MESMO comando (D-PR53: write-once,
+ *     nascem juntas; o CHECK `ck_institution_transition_author` da 079 recusa o ato pela metade) e a condição NO COMANDO (PADROES §11
+ *     regra 10: fato monotônico); 0 linhas = alguém mudou o fato por baixo → falha alto;
  *  4. destino W: as chaves vivas do sincronizador ficam INATIVAS em definitivo (W nunca reativa — `switchSyncApiKeyTx`); destino P: a
  *     chave fica — é a MESMA que os PDVs usam (D-PR49/D-TM11; A-PR4 — Q-PR60 ao Valdo); o servidor desktop passa a ser recusado pelo
  *     FATO, lido pelo setes-sync (contrato `SYNC_TRANSITION_ENDED` — grupo do sync);
  *  5. as categorias padrão que faltarem ("Produtos" P / "Serviços" S — `ensureDefaultCategories`, a MESMA regra da migration 073).
  * Falha em qualquer passo desfaz TUDO (o fato segue L). Quem chama reexecuta em deadlock (o passo 5 cunha id).
+ * ORDEM DAS TRAVAS (gate adversarial da PROD.E6.P2): a FK do autor (079) põe trava S em `tb_user(autor)` DEPOIS da trava da institution —
+ * transação nova que trave `tb_user` e depois o contador/linha de uma institution inverte a ordem e pode dar deadlock com o ato.
  */
-export async function endLegacyTransitionTx(institutionId: number, destination: 'W' | 'P'): Promise<LegacyTransitionOutcome> {
+export async function endLegacyTransitionTx(
+  institutionId: number, destination: 'W' | 'P', actorUserId: number, reason: string
+): Promise<LegacyTransitionOutcome> {
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
@@ -443,9 +457,9 @@ export async function endLegacyTransitionTx(institutionId: number, destination: 
     const s = assertSchema(schemaName)
     const [upd] = await conn.query<any>(
       `UPDATE setes_central.tb_institution
-          SET source_kind = ?, transition_ended_at = NOW(), updated_at = NOW()
+          SET source_kind = ?, transition_ended_at = NOW(), transition_ended_by = ?, transition_end_reason = ?, updated_at = NOW()
         WHERE id = ? AND source_kind = 'L' AND transition_ended_at IS NULL`,
-      [destination, institutionId])
+      [destination, actorUserId, reason, institutionId])
     if (Number(upd.affectedRows) !== 1) {
       throw new Error(`encerrar a transição: o fato da institution ${institutionId} mudou por baixo da trava (affectedRows = ${upd.affectedRows})`)
     }

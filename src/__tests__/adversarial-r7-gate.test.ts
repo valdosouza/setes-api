@@ -155,7 +155,7 @@ describe('o fato é MONOTÔNICO e só o ato o muda — cercas no código do mód
     const probeFn = piece.slice(piece.indexOf('export async function assertInstitutionSourceKindSchema'))
     expect(probeFn).toMatch(/finally \{\s*await conn\.rollback\(\)/)                                                     // sempre desfeita
     expect(repo.match(/SET source_kind = \?/g)).toHaveLength(1)
-    expect(repo).toMatch(/SET source_kind = \?, transition_ended_at = NOW\(\), updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
+    expect(repo).toMatch(/SET source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
     expect(repo).toMatch(/Number\(upd\.affectedRows\) !== 1/)
     // o INSERT da institution leva o fato declarado; a edição só CONFERE (409), nunca grava
     expect(repo).toMatch(/INSERT INTO setes_central\.tb_institution \(id, schema_name, source_kind, active, created_at, updated_at\)/)
@@ -190,9 +190,10 @@ describe('o fato é MONOTÔNICO e só o ato o muda — cercas no código do mód
     expect(piece).toMatch(/information_schema\.CHECK_CONSTRAINTS/)
     expect(piece).toMatch(/CK_INSTITUTION_SOURCE_KIND = 'ck_institution_source_kind'/)
     expect(piece).toMatch(/CK_INSTITUTION_TRANSITION_ENDED = 'ck_institution_transition_ended'/)
-    expect(piece).toMatch(/refuses\('X', 'NULL', CK_INSTITUTION_SOURCE_KIND\)/)                   // fora do domínio
-    expect(piece).toMatch(/refuses\('l', 'NULL', CK_INSTITUTION_SOURCE_KIND\)/)                   // a minúscula de um válido
-    expect(piece).toMatch(/refuses\('L', 'NOW\(\)', CK_INSTITUTION_TRANSITION_ENDED\)/)          // "L com data" recusado pela 2ª
+    expect(piece).toMatch(/refuses\('X', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)            // fora do domínio
+    expect(piece).toMatch(/refuses\('l', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)            // a minúscula de um válido
+    expect(piece).toMatch(/refuses\('L', 'NOW\(\)', true, CK_INSTITUTION_TRANSITION_ENDED\)/)     // "L com data" (com autor e motivo — isola a 072)
+    expect(piece).toMatch(/refuses\('W', 'NOW\(\)', false, CK_INSTITUTION_TRANSITION_AUTHOR\)/)   // o ato sem autor nem motivo (079 — D-PR53)
     expect(piece).toMatch(/BOOT_PROBE_ID = -1/)                                                   // PK própria — nunca a linha da Setes
     expect(piece).not.toMatch(/UPDATE setes_central\.tb_institution/)
     expect(piece).toMatch(/err\?\.errno === 4025 \|\| err\?\.errno === 3819/)

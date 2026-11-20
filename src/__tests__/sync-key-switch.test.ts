@@ -42,7 +42,7 @@ const factForUpdate = (kind: string | null, endedAt: Date | null = null): Route 
 const keysOf = (rows: any[]): Route => [/SELECT id, active FROM setes_central\.tb_sync_api_key\s+WHERE tb_institution_id = \? AND deleted = 'N' FOR UPDATE/, () => [rows]]
 const keyUpdate: Route = [/UPDATE setes_central\.tb_sync_api_key SET active = \?, updated_at = NOW\(\)/, () => [{ affectedRows: 1 }]]
 const keyInactivate = (n: number): Route => [/UPDATE setes_central\.tb_sync_api_key SET active = 'N', updated_at = NOW\(\)\s+WHERE tb_institution_id = \? AND deleted = 'N' AND active = 'S'/, () => [{ affectedRows: n }]]
-const instUpdate = (affected = 1): Route => [/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\), updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/, () => [{ affectedRows: affected }]]
+const instUpdate = (affected = 1): Route => [/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/, () => [{ affectedRows: affected }]]
 const liveCategory = (has: Record<string, boolean>): Route => [/tb_category\s+WHERE tb_institution_id = \? AND kind = \? AND deleted = 'N' AND active = 'S' LIMIT 1 FOR UPDATE/, p => [has[p[1]] ? [{ id: 1 }] : []]]
 const catMax: Route = [/MAX\(id\), 0\) \+ 1 AS nextId FROM `setes_setes`\.tb_category/, () => [[{ nextId: 10 }]]]
 const catInsert: Route = [/INSERT INTO `setes_setes`\.tb_category/, () => [{}]]
@@ -133,7 +133,7 @@ describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível
     expect(all[0]).toMatch(/tb_institution WHERE id = \? FOR UPDATE/)
     expect(all[1]).toMatch(/transition_ended_at AS transitionEndedAt[\s\S]*FOR UPDATE/)
     expect(all[2]).toMatch(/UPDATE setes_central\.tb_institution[\s\S]*WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
-    expect(c.query.mock.calls[2][1]).toEqual(['W', 1])
+    expect(c.query.mock.calls[2][1]).toEqual(['W', 7, 'servidor desktop desligado em 20/10', 1])   // as quatro marcas no MESMO UPDATE (D-PR53)
     expect(all[3]).toMatch(/UPDATE setes_central\.tb_sync_api_key SET active = 'N'/)
     expect(all.filter(s => /INSERT INTO `setes_setes`\.tb_category/.test(s))).toHaveLength(1)          // só a S faltava
     const ins = c.query.mock.calls.find((x: any[]) => /INSERT INTO `setes_setes`\.tb_category/.test(x[0]))!
@@ -146,9 +146,9 @@ describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível
 
   it('L → P na TRANSAÇÃO (repositório): a chave NÃO é tocada (é a dos PDVs — A-PR4/Q-PR60); o destino vai no UPDATE do fato; as duas categorias nascem se faltarem', async () => {
     const c = conn([lock, factForUpdate('L'), instUpdate(1), keyInactivate(1), liveCategory({ P: false, S: false }), catMax, catInsert])
-    const out = await endLegacyTransitionTx(1, 'P')
+    const out = await endLegacyTransitionTx(1, 'P', 7, 'ficam os PDVs')
     expect(out).toMatchObject({ kind: 'ended', syncKeysInactivated: 0, defaultCategories: { P: 10, S: 10 } })
-    expect(c.query.mock.calls[2][1]).toEqual(['P', 1])
+    expect(c.query.mock.calls[2][1]).toEqual(['P', 7, 'ficam os PDVs', 1])
     expect(sqls(c).some(s => /UPDATE setes_central\.tb_sync_api_key/.test(s))).toBe(false)
     expect(sqls(c).filter(s => /INSERT INTO `setes_setes`\.tb_category/.test(s))).toHaveLength(2)
   })

@@ -56,8 +56,8 @@ export type InstitutionUpdateDto = z.infer<typeof institutionUpdateDto>
 export const syncApiKeyActiveDto = z.object({ active: z.enum(['S', 'N']) })
 
 /** Ato "encerrar a transição" (D-PR48/D-PR49): único e IRREVERSÍVEL — o Super escolhe o DESTINO (W = cliente sem PDV · P = cliente com
- *  PDV; os PDVs passam a receber o catálogo da web) e confirma com o MOTIVO (vai ao log com o autor — Q-PR48 (a); coluna própria é a
- *  Q-PR59). */
+ *  PDV; os PDVs passam a receber o catálogo da web) e confirma com o MOTIVO — gravado APARADO em `tb_institution.transition_end_reason`
+ *  com o autor (D-PR53; o limite de 255 é conferido aqui, depois do trim: o modo de sessão do servidor truncaria antes do CHECK). */
 export const endLegacyTransitionDto = z.object({
   destination: z.enum(['W', 'P']),
   reason:      z.string().trim().min(5, 'Informe o motivo (mínimo 5 caracteres)').max(255),

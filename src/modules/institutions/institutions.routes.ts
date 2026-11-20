@@ -94,10 +94,10 @@ router.get('/fiscal-exists', controller.fiscalExists)
  * /api/institutions/{id}:
  *   get:
  *     summary: Retorna o estabelecimento COMPLETO (entity + fiscal + endereços/fones/redes + institution)
- *     description: "Além da cadeia: schemaName, active, sourceKind (W nativo web · L transição do desktop legado · P PDV — D-PR47) e transitionEndedAt (instante do ato encerrar a transição, ou null — D-PR48)."
+ *     description: "Além da cadeia: schemaName, active, sourceKind (W nativo web · L transição do desktop legado · P PDV — D-PR47) e transitionEndedAt (instante do ato encerrar a transição, ou null — D-PR48), transitionEndedBy (id do usuário que executou o ato, ou null), transitionEndedByName (nome de exibição desse usuário, ou null — D-PR57) e transitionEndReason (o motivo, ou null — D-PR53; nascem juntos)."
  *     tags: [Institutions]
  *     responses:
- *       200: { description: '{ ok, data: { …cadeia, schemaName, active, sourceKind, transitionEndedAt } }' }
+ *       200: { description: '{ ok, data: { …cadeia, schemaName, active, sourceKind, transitionEndedAt, transitionEndedBy, transitionEndedByName, transitionEndReason } }' }
  *       404: { description: Estabelecimento não encontrado }
  */
 router.get('/:id', controller.getById)
@@ -250,10 +250,11 @@ router.put('/:id/sync-api-key/active', controller.setSyncKeyActive)
  *   post:
  *     summary: "ENCERRA a transição do desktop legado (D-PR48/D-PR49) — ato ÚNICO e IRREVERSÍVEL do Super: L → W (sem PDV) ou L → P (com PDV)"
  *     description: >
- *       Só para estabelecimento com origem dos cadastros L. Numa transação: grava `transitionEndedAt`, muda `sourceKind` para o destino,
+ *       Só para estabelecimento com origem dos cadastros L. Numa transação: grava `transitionEndedAt`, o autor (usuário do token) e o
+ *       motivo (aparado) no MESMO comando que muda `sourceKind` para o destino (D-PR53 — o GET /:id devolve autor e motivo),
  *       cria as categorias padrão que faltarem ("Produtos"/"Serviços") e, no destino W, inativa a chave do sincronizador em definitivo
  *       (nunca reativa); no destino P a chave fica — é a dos PDVs, que passam a receber o catálogo da web (grupo do sync / frente
- *       tb_terminal). A partir daí a web é a dona do catálogo de base (D-PR47/D-PR52). Motivo e autor vão ao log.
+ *       tb_terminal). A partir daí a web é a dona do catálogo de base (D-PR47/D-PR52). Motivo e autor também vão ao log.
  *     tags: [Institutions]
  *     parameters:
  *       - in: path

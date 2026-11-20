@@ -36,6 +36,12 @@ export interface InstitutionFull extends EntityFiscalFull {
   sourceKind:        SourceKind
   /** Instante do ato "encerrar a transição" (write-once); NULL = nunca foi L ou ainda é. */
   transitionEndedAt: string | null
+  /** Autor do ato (tb_user.id do Super que o executou — D-PR53/D-PR57); NULL junto com `transitionEndedAt`. */
+  transitionEndedBy: number | null
+  /** Nome de exibição do autor (só leitura — D-PR57: a tela mostra autor e motivo ao lado da data); NULL sem ato. */
+  transitionEndedByName: string | null
+  /** Motivo do ato, como gravado (aparado — D-PR53); NULL junto com `transitionEndedAt`. */
+  transitionEndReason: string | null
 }
 
 /** O FATO do estabelecimento sem a cadeia (leituras do interruptor da chave e do ato — D-PR47/D-PR48). */
