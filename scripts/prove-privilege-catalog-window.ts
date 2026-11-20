@@ -26,6 +26,7 @@ import {
   CATALOG_PAIRS_SQL, PRIVILEGES_SQL, SCREEN_INTERFACES_SQL, CONFIGURABLE_INTERFACES_SQL, INTERFACE_KEYS_SQL, privilegeCatalogAlarms,
 } from '../src/shared/auth/assert-privilege-catalog'
 import { consumedPrivileges, privilegeCatalogProblems, RESERVED_PRIVILEGES } from '../src/shared/auth/privilege-catalog'
+import { stripCatalogUnique, copyCatalogRows } from './catalog-probe-copy'
 
 void router                                                     // montar o gateway registra as guardas (a tabela da D-PV14)
 
@@ -72,8 +73,9 @@ async function main(): Promise<void> {
     await conn.query(`CREATE DATABASE \`${PROBE}\` CHARACTER SET ${cs[0].c} COLLATE ${cs[0].k}`)
     for (const t of TABLES) {
       await conn.query(`CREATE TABLE \`${PROBE}\`.\`${t}\` LIKE setes_central.\`${t}\``)
-      await conn.query(`INSERT INTO \`${PROBE}\`.\`${t}\` SELECT * FROM setes_central.\`${t}\``)
     }
+    await stripCatalogUnique(conn, PROBE)   // script 77: a coluna gerada sai da cópia e as linhas vêm pelas colunas não geradas
+    for (const t of TABLES) await copyCatalogRows(conn, PROBE, t)
   }
   try {
     await conn.query(`SET NAMES utf8mb4`)

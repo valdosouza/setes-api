@@ -254,15 +254,16 @@ export async function softDeleteInterfaceConfig(
 }
 
 /**
- * Ids das interfaces VIVAS com a chave — pela colação da coluna (sem caixa, sem acento, sem espaço no fim), a MESMA comparação
- * da guarda `require-privilege` (D-PV15: chave repetida torna ambígua a resolução por `LIMIT 1`).
+ * As interfaces — VIVAS E EXCLUÍDAS — com esta chave, comparadas na colação da coluna (a MESMA do UNIQUE `uq_interface_i18n_key_live` do
+ * script 77: sem caixa, sem acento, sem espaço no fim). A excluída não colide no banco, mas a tela também a recusa (A-PV28: nunca revive nem
+ * reaproveita a chave de uma excluída).
  */
-export async function liveInterfaceIdsWithKey(i18nKey: string): Promise<number[]> {
+export async function interfaceIdsWithKey(i18nKey: string): Promise<{ id: number; deleted: boolean }[]> {
   const [rows] = await pool.query<any[]>(
-    `SELECT id FROM setes_central.tb_interface WHERE deleted = 'N' AND i18n_key = ?`,
+    `SELECT id, deleted FROM setes_central.tb_interface WHERE i18n_key = ? ORDER BY id`,
     [i18nKey]
   )
-  return rows.map(r => Number(r.id))
+  return rows.map(r => ({ id: Number(r.id), deleted: String(r.deleted).toUpperCase() !== 'N' }))   // 'n' é viva para o banco (general_ci)
 }
 
 /**

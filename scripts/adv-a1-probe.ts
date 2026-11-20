@@ -12,6 +12,7 @@ import crypto from 'crypto'
 import mysql from 'mysql2/promise'
 import pool from '../src/shared/db/connection'
 import { accessVerdict, reachableKeys, grantedKeys, accessRows, iatAsUtcDatetime } from 'fiscal-api/access'
+import { stripCatalogUnique } from './catalog-probe-copy'
 
 const HOSTS = ['%', 'localhost', '127.0.0.1', '::1']
 const G_CENTRAL = 'setes_zadv_central'      // o "setes_central" do experimento de GRANT
@@ -130,6 +131,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     for (const t of ['tb_user', 'tb_institution', 'tb_institution_has_user', 'tb_interface', 'tb_privilege', 'tb_interface_has_privilege']) {
       await conn.query(`CREATE TABLE \`${V_CENTRAL}\`.\`${t}\` LIKE \`setes_central\`.\`${t}\``)
     }
+    await stripCatalogUnique(conn, V_CENTRAL)   // script 77: a prova planta 'FATURAR ' e renomeia para 'faturar' para medir as VIEWS
     for (const t of ['tb_institution_has_interface', 'tb_user_has_privilege']) {
       await conn.query(`CREATE TABLE \`${V_CLIENT}\`.\`${t}\` LIKE \`setes_setes\`.\`${t}\``)
     }

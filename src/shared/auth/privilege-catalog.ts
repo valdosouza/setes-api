@@ -566,7 +566,9 @@ const brief = (items: readonly string[], max = 3): string =>
   items.slice(0, max).join(' · ') + (items.length > max ? ` (e mais ${items.length - max})` : '')
 
 export interface CatalogViolation {
+  // os três últimos: o nome do catálogo é único no banco (script 77 — D-PV63/A-PV28); a tela nunca revive linha excluída
   code: 'CATALOG_PAIR_IN_USE' | 'INTERFACE_KEY_IN_USE' | 'PRIVILEGE_IN_USE'
+    | 'INTERFACE_KEY_RETIRED' | 'PRIVILEGE_NAME_TAKEN' | 'PRIVILEGE_NAME_RETIRED'
   field: string
   message: string
 }
@@ -664,7 +666,9 @@ export function privilegeCatalogViolations(
   return out
 }
 
-const VIOLATION_PRIORITY: readonly CatalogViolation['code'][] = ['INTERFACE_KEY_IN_USE', 'PRIVILEGE_IN_USE', 'CATALOG_PAIR_IN_USE']
+const VIOLATION_PRIORITY: readonly CatalogViolation['code'][] = [
+  'INTERFACE_KEY_IN_USE', 'INTERFACE_KEY_RETIRED', 'PRIVILEGE_IN_USE', 'PRIVILEGE_NAME_TAKEN', 'PRIVILEGE_NAME_RETIRED', 'CATALOG_PAIR_IN_USE',
+]
 
 /** 409 com TODAS as violações em `fields[]` (a tela mostra a primeira; o código do erro é o da mais grave). */
 export function assertNoCatalogViolation(violations: readonly CatalogViolation[]): void {

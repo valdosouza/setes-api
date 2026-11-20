@@ -17,6 +17,7 @@ import fs from 'fs'
 import path from 'path'
 import mysql from 'mysql2/promise'
 import { accessVerdict, accessRows } from 'fiscal-api/access'
+import { copyCatalogRows } from './catalog-probe-copy'
 
 const CENTRAL = 'prova_med_central'
 const CLIENT = 'setes_zprova_med'
@@ -72,9 +73,8 @@ async function main(): Promise<void> {
     for (const st of statementsOf(clientSql())) await conn.query(st)
 
     // o catálogo REAL do dev (só leitura do central)
-    for (const t of ['tb_interface', 'tb_privilege', 'tb_interface_has_privilege']) {
-      await conn.query(`INSERT INTO \`${CENTRAL}\`.\`${t}\` SELECT * FROM \`setes_central\`.\`${t}\``)
-    }
+    // script 77: a cópia tem a coluna gerada `i18n_key_live` — as linhas vêm pelas colunas NÃO geradas (o UNIQUE fica: o catálogo é o real)
+    for (const t of ['tb_interface', 'tb_privilege', 'tb_interface_has_privilege']) await copyCatalogRows(conn, CENTRAL, t)
     const [ifaces] = await conn.query<any[]>(`SELECT id FROM \`${CENTRAL}\`.tb_interface WHERE deleted = 'N'`)
     const [pairs] = await conn.query<any[]>(`SELECT tb_interface_id i, tb_privilege_id p FROM \`${CENTRAL}\`.tb_interface_has_privilege
       WHERE active = 'S' AND deleted = 'N'`)

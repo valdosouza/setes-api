@@ -15,6 +15,7 @@ import pool from '@shared/db/connection'
 import { runMigrationsForAllInstitutions } from './migrations/runner'
 import { assertF2aFreezeTriggers } from './migrations/f2a-freeze-triggers'
 import { assertPrivilegeCatalog } from '@shared/auth/assert-privilege-catalog'
+import { assertCatalogUniqueNames } from '@shared/auth/catalog-unique'
 import { assertAccessViews, assertAccessSchemaViews } from '@shared/access'
 import { assertInviteSchema, assertPasswordAuthorSchema } from '@shared/user/invite'
 import { grantStructuralInterfacesToActive } from '@shared/institution-interfaces'
@@ -38,6 +39,7 @@ async function bootstrap() {
     logger.info(`Limite por conta do login (script 74): ${await assertLoginLockReady()}`)      // D-EA1/D-EA2/D-EA3
     logger.info(`Convite no vínculo (script 75): ${await assertInviteSchema()}`)                // D-UC14/D-UC15 · A-UC8
     logger.info(`Papel de quem definiu a senha (script 76): ${await assertPasswordAuthorSchema()}`)   // D-UC19
+    logger.info(`Nomes únicos do catálogo (script 77): ${await assertCatalogUniqueNames()}`)          // D-PV43/D-PV63
   logger.info(`Política de senha: lista de senhas comuns com ${assertPasswordPolicyReady()} entradas`)   // D-EA5/A-EA9
     // Costura A1 da auth-api (D-AU3/D-UC9): as views centrais do veredito (script 70) — sem elas NENHUMA rota autentica
     logger.info(`Veredito de acesso (script 70): ${await assertAccessViews(SETES_INSTITUTION_ID, DELEGABLE_SUPER_INTERFACES)}`)

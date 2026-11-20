@@ -81,7 +81,9 @@ router.get('/:id', controller.getById)
  *         description: >-
  *           D-PV15 (Q-PV17): a mudança recriaria o C1 — INTERFACE_KEY_IN_USE (chave repetida em outra interface viva) ou
  *           CATALOG_PAIR_IN_USE (a tela nasce sem o VISUALIZAR — toda tela, inclusive do grupo Super, D-GE19);
- *           fields[] nomeia cada consumidor
+ *           INTERFACE_KEY_RETIRED (D-PV63/A-PV28 — a chave é de uma interface EXCLUÍDA, nomeada pelo id: a tela não a revive nem a
+ *           reaproveita; a volta é por entrega); fields[] nomeia cada consumidor. A chave repetida numa corrida (UNIQUE do script 77)
+ *           também responde INTERFACE_KEY_IN_USE
  */
 router.post('/', controller.create)
 
@@ -99,7 +101,8 @@ router.post('/', controller.create)
  *           técnico — mudar é código + seed), tela do cliente que o código usa não vira recurso nem vai ao grupo Super, ou chave
  *           repetida em outra interface viva; CATALOG_PAIR_IN_USE — sairia do catálogo um par que o código opera (guarda por roteador,
  *           lista à mão — D-PV14), o VISUALIZAR de uma tela, o CONFIGURAR de interface com config/campo (D-PV25) ou um par reservado
- *           (D-PV51), inclusive pelo PUT sem privilegeIds; fields[] nomeia cada consumidor
+ *           (D-PV51), inclusive pelo PUT sem privilegeIds; INTERFACE_KEY_RETIRED (D-PV63/A-PV28) — a 1ª chave dada a uma interface
+ *           sem chave é a de uma EXCLUÍDA; fields[] nomeia cada consumidor. A corrida no UNIQUE do script 77 responde INTERFACE_KEY_IN_USE
  */
 router.put('/:id', controller.update)
 

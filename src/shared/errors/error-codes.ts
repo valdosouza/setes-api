@@ -191,6 +191,10 @@ export const ErrorCodes = {
   CATALOG_PAIR_IN_USE: 'CATALOG_PAIR_IN_USE',
   INTERFACE_KEY_IN_USE: 'INTERFACE_KEY_IN_USE',
   PRIVILEGE_IN_USE:    'PRIVILEGE_IN_USE',
+  // D-PV63/A-PV28 (setes-api:PRIV.E7.P1): o nome do catálogo é único NO BANCO (script 77) — a tela nunca revive linha excluída
+  INTERFACE_KEY_RETIRED:  'INTERFACE_KEY_RETIRED',
+  PRIVILEGE_NAME_TAKEN:   'PRIVILEGE_NAME_TAKEN',
+  PRIVILEGE_NAME_RETIRED: 'PRIVILEGE_NAME_RETIRED',
   UNAUTHORIZED:        'UNAUTHORIZED',
   // Costura A1 da auth-api (D-UC9/D-AU3): a sessão viva a cada requisição
   SESSION_REVOKED:     'SESSION_REVOKED',
@@ -404,6 +408,9 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   CATALOG_PAIR_IN_USE: 'Par interface × privilégio usado pelo código não pode sair do catálogo (o botão sumiria até do admin)',
   INTERFACE_KEY_IN_USE: 'A chave de uma interface é identificador TÉCNICO (D-PV42): não se renomeia; não se exclui nem sai do menu enquanto o código a usa; e não se repete — mudar chave é código + seed coordenados',
   PRIVILEGE_IN_USE:    'Privilégio consumido pelo nome — não pode ser renomeado, excluído nem ter o nome repetido em outra linha',
+  INTERFACE_KEY_RETIRED:  'A chave é de uma interface EXCLUÍDA — a tela não a revive nem a reaproveita (contratos e concessões estão presos ao id dela): a volta é por entrega, mostrando antes quem volta a ter o quê (D-PV63/A-PV28)',
+  PRIVILEGE_NAME_TAKEN:   'Já existe outro privilégio com este nome — o nome do verbo é único, sem distinção de maiúsculas, de acento nem de espaço no fim (script 77)',
+  PRIVILEGE_NAME_RETIRED: 'O nome é de um privilégio EXCLUÍDO — a tela não o revive nem cria outro com o mesmo nome (as concessões estão presas ao id dele): a volta é por entrega, mostrando antes quem volta a ter o verbo (D-PV63/A-PV28)',
   UNAUTHORIZED:        'Não autenticado — token ausente, inválido ou expirado',
   SESSION_REVOKED:     'O acesso deste usuário a este estabelecimento não vale mais (vínculo, credencial ou estabelecimento inativo — D-UC9); entre de novo',
   SESSION_UNAVAILABLE: 'A sessão não pôde ser conferida agora (banco indisponível) — tente de novo; o login segue valendo',

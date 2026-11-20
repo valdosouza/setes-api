@@ -11,6 +11,7 @@ import path from 'path'
 import mysql from 'mysql2/promise'
 import pool from '../src/shared/db/connection'
 import { accessVerdict, reachableKeys, grantedKeys, accessRows, sessionOf } from 'fiscal-api/access'
+import { stripCatalogUnique, copyCatalogRows } from './catalog-probe-copy'
 
 const SQL_DIR = process.env.SQL_DIR ?? path.resolve(__dirname, '../../sql')
 const V_CENTRAL = 'prova_adv2_central'
@@ -50,6 +51,7 @@ async function viewsExperiment(conn: mysql.PoolConnection): Promise<void> {
     for (const t of ['tb_user', 'tb_institution', 'tb_institution_has_user', 'tb_interface', 'tb_privilege', 'tb_interface_has_privilege']) {
       await conn.query(`CREATE TABLE \`${V_CENTRAL}\`.\`${t}\` LIKE \`setes_central\`.\`${t}\``)
     }
+    await stripCatalogUnique(conn, V_CENTRAL)   // script 77: a prova planta verbos e chaves tortos para medir as VIEWS
     for (const t of ['tb_institution_has_interface', 'tb_user_has_privilege']) {
       await conn.query(`CREATE TABLE \`${V_CLIENT}\`.\`${t}\` LIKE \`setes_setes\`.\`${t}\``)
     }
@@ -197,6 +199,7 @@ async function upsertExperiment(conn: mysql.PoolConnection): Promise<void> {
     for (const t of ['tb_interface', 'tb_privilege', 'tb_interface_has_privilege', 'tb_interface_has_config']) {
       await conn.query(`CREATE TABLE \`${UP_DB}\`.\`${t}\` LIKE setes_central.\`${t}\``)
     }
+    await stripCatalogUnique(conn, UP_DB)   // script 77: o retrato desta prova é o de antes do UNIQUE (o UNIQUE é provado à parte)
     // as FKs reais (o LIKE não copia)
     await conn.query(`ALTER TABLE \`${UP_DB}\`.tb_interface_has_config ADD CONSTRAINT fk_ihc_interface FOREIGN KEY (tb_interface_id) REFERENCES \`${UP_DB}\`.tb_interface (id)`)
     await conn.query(`ALTER TABLE \`${UP_DB}\`.tb_interface_has_privilege ADD CONSTRAINT fk_ihp_i FOREIGN KEY (tb_interface_id) REFERENCES \`${UP_DB}\`.tb_interface (id),
@@ -311,12 +314,19 @@ async function seedsExperiment(): Promise<void> {
       await c.query(`CREATE DATABASE \`${CAT_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci`)
       for (const t of TABLES) {
         await c.query(`CREATE TABLE \`${CAT_DB}\`.\`${t}\` LIKE setes_central.\`${t}\``)
-        await c.query(`INSERT INTO \`${CAT_DB}\`.\`${t}\` SELECT * FROM setes_central.\`${t}\``)
       }
+      // script 77 (gate socrático do PRIV.E7.P1, M3 + re-gate L1): o replay dos seeds roda COM os UNIQUE — o 77 é aplicado na cópia
+      // (idempotente: se o setes_central já o tem, o LIKE o trouxe e o 77 não muda nada); as linhas vêm pelas colunas não geradas
+      for (const t of TABLES) await copyCatalogRows(c, CAT_DB, t)
+      await c.query(seed('77_catalog_unique_names_ddl.sql'))
       const errs: string[] = []
       for (const f of order) {
         try { await c.query(seed(f)) } catch (e: any) { errs.push(`${f.slice(0, 2)}: ${e.message}`) }
       }
+      // o INSERT IGNORE dos seeds cala também a colisão no NOME: os verbos dos seeds têm de estar lá, no id e no nome esperados, vivos
+      const [verbs] = await c.query<any[]>(`SELECT COUNT(*) n FROM \`${CAT_DB}\`.tb_privilege
+        WHERE deleted = 'N' AND (id, description) IN ((11, 'CONFIGURAR'), (12, 'CONSULTAR'))`)
+      if (Number(verbs[0].n) !== 2) errs.push(`verbos 11/12 ausentes ou trocados (${verbs[0].n} de 2)`)
       const a = await alarms()
       const [retired] = await c.query<any[]>(`SELECT i.i18n_key k, ihp.tb_privilege_id p, ihp.active, ihp.deleted FROM \`${CAT_DB}\`.tb_interface_has_privilege ihp
         JOIN \`${CAT_DB}\`.tb_interface i ON i.id = ihp.tb_interface_id

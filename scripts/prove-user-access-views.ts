@@ -29,6 +29,7 @@ import crypto from 'crypto'
 import mysql from 'mysql2/promise'
 import pool from '../src/shared/db/connection'
 import { accessVerdict, reachableKeys, accessRows } from 'fiscal-api/access'
+import { stripCatalogUnique } from './catalog-probe-copy'
 
 const CENTRAL = 'prova_ua_central'
 const CLIENT = 'setes_zprova_ua'
@@ -217,6 +218,8 @@ async function main(): Promise<void> {
     for (const t of ['tb_user', 'tb_institution', 'tb_institution_has_user', 'tb_interface', 'tb_privilege', 'tb_interface_has_privilege']) {
       await conn.query(`CREATE TABLE \`${CENTRAL}\`.\`${t}\` LIKE \`setes_central\`.\`${t}\``)
     }
+    // script 77 (PRIV.E7.P1): esta prova planta 'orders ' e 'FATURAR ' para medir a defesa das VIEWS — os UNIQUE saem da cópia
+    await stripCatalogUnique(conn, CENTRAL)
     // D-GE3 (gate socrático do GRUPO.E3.P1): hoje `schema_name` é ÚNICO no central (uma institution por schema); a matriz e a filial no
     // MESMO schema só existem a partir da onda 3 do grupo. Só no central DESCARTÁVEL a chave única sai, para provar o grupo.
     await conn.query(`ALTER TABLE \`${CENTRAL}\`.tb_institution DROP INDEX IF EXISTS \`schema_name\``)
