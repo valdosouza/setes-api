@@ -5,6 +5,8 @@
  * interpreta é a composição @shared/bank-slip-registration.
  */
 
+import type { FederalId } from '@shared/validation'
+
 export type ChannelEnvironment = 'S' | 'P'
 
 export interface BankChannelRow {
@@ -49,8 +51,13 @@ export interface ChannelSecretsStatus {
 // ---------------------------------------------------------------------------
 
 export interface ChargePayer {
-  document:     string          // CPF/CNPJ na forma CANÔNICA (D-CJ10: nunca mutilado; CNPJ só numérico até a sonda do banco)
-  personType:   'F' | 'J'
+  /**
+   * A inscrição federal do pagador como a PEÇA a entrega (D-CJ2 — `fiscal-api/federal-id`): `kind` diz CPF × CNPJ (física × jurídica) e
+   * `value` é a forma CANÔNICA, nunca mutilada — o CNPJ pode ter letras (12 alfanuméricos maiúsculos + 2 DV). O banco recebe o valor como
+   * está: a sonda D-CJ10 no sandbox do Inter (2026-11-19, `scripts/sonda-inter-cnpj-alfa.ts`) aceitou a forma canônica com letra e
+   * recusou forma errada.
+   */
+  federalId:    FederalId
   name:         string
   street:       string          // endereço (logradouro + número)
   neighborhood: string | null

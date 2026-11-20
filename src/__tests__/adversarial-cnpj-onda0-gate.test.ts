@@ -177,7 +177,6 @@ describe('D-CJ10 — buildPayer: a inscrição vai como está ou não vai (RESIS
     ['CPF sentinela "0" (antes ia "0" ao banco)', { person: { cpf: '0' } }, /inválido no cadastro/],
     ['CPF gravado com máscara', { person: { cpf: '529.982.247-25' } }, /inválido no cadastro/],
     ['CNPJ minúsculo', { company: { cnpj: 'pc3d315k000193' } }, /inválido no cadastro/],
-    ['CNPJ com 3 letras (antes: 11 dígitos como JURÍDICA)', { company: { cnpj: 'ABC12345000110' } }, /CNPJ alfanumérico/],
   ])('%s → 422 BANK_PAYER_INCOMPLETE no payer.document', async (_l, over, msg) => {
     ;(entity.getEntityFiscalFull as jest.Mock).mockResolvedValue(fullEntity(over))
     const err: any = await buildPayer('setes_setes', 1, 262).then(() => null, e => e)
@@ -186,9 +185,15 @@ describe('D-CJ10 — buildPayer: a inscrição vai como está ou não vai (RESIS
   })
   it('CPF e CNPJ numéricos válidos saem intactos com o tipo do LUGAR', async () => {
     ;(entity.getEntityFiscalFull as jest.Mock).mockResolvedValue(fullEntity({ person: { cpf: '52998224725' } }))
-    expect(await buildPayer('setes_setes', 1, 262)).toMatchObject({ document: '52998224725', personType: 'F' })
+    expect(await buildPayer('setes_setes', 1, 262)).toMatchObject({ federalId: { kind: 'cpf', value: '52998224725' } })
     ;(entity.getEntityFiscalFull as jest.Mock).mockResolvedValue(fullEntity({ company: { cnpj: '12345678000195' } }))
-    expect(await buildPayer('setes_setes', 1, 262)).toMatchObject({ document: '12345678000195', personType: 'J' })
+    expect(await buildPayer('setes_setes', 1, 262)).toMatchObject({ federalId: { kind: 'cnpj', value: '12345678000195' } })
+  })
+  // CNPJ.E5.P1 (D-CJ10): a sonda no sandbox do Inter ACEITOU a forma canônica com letra — a recusa provisória da D-CJ20 saiu. Antes da
+  // onda 0 este CNPJ virava 11 dígitos como JURÍDICA; até a sonda, 422 legível; agora vai INTACTO, com o tipo pelo kind.
+  it('CNPJ alfanumérico válido sai intacto na forma canônica como jurídica (sonda D-CJ10 aceitou)', async () => {
+    ;(entity.getEntityFiscalFull as jest.Mock).mockResolvedValue(fullEntity({ company: { cnpj: 'ABC12345000110' } }))
+    expect(await buildPayer('setes_setes', 1, 262)).toMatchObject({ federalId: { kind: 'cnpj', value: 'ABC12345000110' } })
   })
 })
 

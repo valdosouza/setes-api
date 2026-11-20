@@ -70,7 +70,7 @@ describe('token OAuth', () => {
 function payer() {
   return {
     reference: '262', amount: 250, dueDate: '2026-10-10',
-    payer: { document: '12345678000199', personType: 'J' as const, name: 'Cliente Ltda', street: 'Rua A, 10', neighborhood: 'Centro', city: 'Curitiba', state: 'PR', zipCode: '80000000' },
+    payer: { federalId: { kind: 'cnpj' as const, value: '12345678000199' }, name: 'Cliente Ltda', street: 'Rua A, 10', neighborhood: 'Centro', city: 'Curitiba', state: 'PR', zipCode: '80000000' },
     messages: ['linha um', 'linha dois'], finePercent: 2, interestMonthly: 1, discountPercent: null, discountDays: null,
   }
 }
@@ -89,6 +89,18 @@ describe('emitir (POST /cobrancas)', () => {
     })
     expect(body.desconto).toBeUndefined()
     expect(INTER_NUM_DIAS_AGENDA).toBe(60)
+  })
+
+  // CNPJ.E5.P1 (D-CJ10): a sonda no sandbox do Inter aceitou a forma canônica com letra — o pagador vai como a PEÇA o entrega
+  it.each([
+    ['CNPJ alfanumérico', { kind: 'cnpj' as const, value: '12ABC34501DE35' }, 'JURIDICA'],
+    ['CPF', { kind: 'cpf' as const, value: '52998224725' }, 'FISICA'],
+  ])('%s → cpfCnpj intacto e tipoPessoa pelo kind', async (_l, federalId, tipoPessoa) => {
+    mockHttp.mockResolvedValueOnce(tokenResp).mockResolvedValueOnce(ok({ codigoSolicitacao: 'uuid-2' }))
+    const input = payer()
+    await interAdapter.register(ctx, { ...input, payer: { ...input.payer, federalId } })
+    const body = JSON.parse(mockHttp.mock.calls[1][0].body)
+    expect(body.pagador).toMatchObject({ cpfCnpj: federalId.value, tipoPessoa })
   })
 
   it('banco recusa (400 com violacoes) → 422 BANK_REJECTED com a mensagem do banco', async () => {

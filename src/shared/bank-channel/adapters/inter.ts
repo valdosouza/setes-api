@@ -144,8 +144,8 @@ function registerBody(input: ChargeRegisterInput) {
     dataVencimento: input.dueDate,
     numDiasAgenda:  INTER_NUM_DIAS_AGENDA,
     pagador: {
-      cpfCnpj:    input.payer.document,
-      tipoPessoa: input.payer.personType === 'J' ? 'JURIDICA' : 'FISICA',
+      cpfCnpj:    input.payer.federalId.value,                                   // forma canônica, com letra se tiver (D-CJ10)
+      tipoPessoa: input.payer.federalId.kind === 'cnpj' ? 'JURIDICA' : 'FISICA',
       nome:       input.payer.name.slice(0, 100),
       endereco:   input.payer.street.slice(0, 100),
       ...(input.payer.neighborhood ? { bairro: input.payer.neighborhood.slice(0, 60) } : {}),
