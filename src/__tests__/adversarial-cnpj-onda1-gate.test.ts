@@ -45,7 +45,8 @@ describe('promessa 1 — a porta de ESCRITA dos 5 papéis (create E update) abre
   const pj = (cnpj: unknown, extra: Record<string, unknown> = {}) => ({
     personType: 'J', company: { cnpj }, entity: { nameCompany: 'Empresa Nova LTDA', nickTrade: 'Nova' }, ...extra,
   })
-  const instCreateExtra = { schemaName: 'setes_nova', admin: { nameCompany: 'Adm', nickTrade: 'Adm', email: 'a@b.com', password: '12345' } }
+  // senha do admin pela política vigente (D-EA5: mín. 8, fora da lista de comuns) — a de 5 caracteres da onda 1 caiu no rebase de 2026-11-21
+  const instCreateExtra = { schemaName: 'setes_nova', admin: { nameCompany: 'Adm', nickTrade: 'Adm', email: 'a@b.com', password: 'Vx9-cnpj-Rq4t' } }
   const DTOS: Array<[string, z.ZodTypeAny, Record<string, unknown>]> = [
     ['customerCreate', customerCreateDto, {}], ['customerUpdate', customerUpdateDto, {}],
     ['carrierCreate', carrierCreateDto, {}], ['carrierUpdate', carrierUpdateDto, {}],
