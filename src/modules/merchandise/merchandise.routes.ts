@@ -66,6 +66,8 @@ const catalogar = requirePrivilege('merchandise', PRIVILEGE_CATALOGAR)
  *               cest: { type: string, nullable: true, description: "7 dígitos; a ST é DERIVADA da presença do CEST" }
  *               origin: { type: string, description: "0–8 (tabela A do CST)" }
  *               purpose: { type: string, description: "0–7 (finalidade)" }
+ *               scaleRelevance: { type: string, enum: [S, N], nullable: true, description: "indEscala (D-PR60): S relevante · N NÃO relevante · null não informado. Anda JUNTO com manufacturerCnpj (A-PR6): ausentes no POST = não informado; no PUT = o gravado não muda" }
+ *               manufacturerCnpj: { type: string, nullable: true, description: "CNPJFab (D-PR65): 14 posições canônicas [0-9A-Z]{12}[0-9]{2} com DV (alfanumérico aceito — D-PR64); obrigatório com scaleRelevance N e proibido nos demais (D-PR62); máscara/minúscula = 400" }
  *               baseUnit: { type: object, description: "Nível 1, fator 1: { measureId, packageId?, gtin? } — GTIN 8/12/13/14 com DV GS1" }
  *               prices: { type: array, items: { type: object }, description: "[{ priceListId, priceTag (null = remove), aliqKickback? }]" }
  *     responses:
@@ -251,10 +253,10 @@ router.post('/packages', catalogar, controller.createPackage)
  *         required: true
  *         schema: { type: integer }
  *     responses:
- *       200: { description: "{ ok, data } — st é DERIVADO do CEST; baseUnit null = produto sem nível base (veio do legado)" }
+ *       200: { description: "{ ok, data } — st é DERIVADO do CEST; baseUnit null = produto sem nível base (veio do legado); scaleRelevance (S/N/null) e manufacturerCnpj (linha viva de tb_merchandise_factory, null = sem fabricante — D-PR65)" }
  *       404: { description: Não encontrado (ou é serviço) }
  *   put:
- *     summary: Atualiza a mercadoria (mesmo corpo do POST; publicado/promoção/destaque não são tocados — D-PR27)
+ *     summary: Atualiza a mercadoria (mesmo corpo do POST; publicado/promoção/destaque não são tocados — D-PR27; scaleRelevance + manufacturerCnpj ausentes = o fabricante gravado não muda — A-PR6)
  *     tags: [merchandise]
  *     security: [{ BearerAuth: [] }]
  *     parameters:

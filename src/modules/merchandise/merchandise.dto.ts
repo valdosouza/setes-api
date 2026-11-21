@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { TAX_RULE_ORIGINS, TAX_RULE_PURPOSES } from '@shared/tax-rule'
-import { decimalField, isCest, isGtin, isNcm } from '@shared/validation'
+import { decimalField, isCest, isGtin, isNcm, isValidCnpj } from '@shared/validation'
 import { productPriceInputDto } from '@shared/price'
 
 /**
@@ -19,7 +19,18 @@ const baseUnitDto = z.object({
   gtin:      gtinField.nullable().optional(),
 })
 
-export const merchandiseDto = z.object({
+/**
+ * FABRICANTE da mercadoria (D-PR10, D-PR60…D-PR65, A-PR6 — Rodada 9; passo PROD.E9.P1; RF-NFE-32/33). `scaleRelevance` = o indEscala
+ * (`tb_merchandise.manuf_sign_ind_scale`): 'S' relevante, 'N' não relevante, null = não informado (três estados — D-SY5).
+ * `manufacturerCnpj` = o CNPJFab (`tb_merchandise_factory`): canônico pela FederalId — 14 posições `[0-9A-Z]{12}[0-9]{2}` com o DV módulo 11
+ * (ASCII − 48); o ALFANUMÉRICO é aceito (D-PR64). Forma não canônica (máscara, minúscula, espaço) é RECUSADA, nunca limpa (cerca D-CJ12).
+ * Coerência: 'N' exige o CNPJ (rej. 879); CNPJ só com 'N' (D-PR62 — nunca zerar em silêncio); as duas chaves andam JUNTAS (A-PR6).
+ */
+const manufacturerCnpjField = z.string().refine(v => isValidCnpj(v), {
+  message: 'CNPJ do fabricante inválido (14 posições sem máscara, letras maiúsculas e dígito verificador)',
+})
+
+const merchandiseShape = z.object({
   identifier:       z.string().max(50).nullable().optional(),
   description:      z.string().min(1).max(100),
   kind:             z.enum(['P', 'M']).optional().default('P'),
@@ -32,10 +43,36 @@ export const merchandiseDto = z.object({
   cest:             z.string().refine(isCest, { message: 'O CEST deve ter 7 dígitos' }).nullable().optional(),
   origin:           z.enum(TAX_RULE_ORIGINS).optional().default('0'),
   purpose:          z.enum(TAX_RULE_PURPOSES).optional().default('1'),
+  // AUSENTES = o PUT não mexe no gravado; o POST grava "não informado" (A-PR6). Presentes = as duas juntas.
+  scaleRelevance:   sn.nullable().optional(),
+  manufacturerCnpj: manufacturerCnpjField.nullable().optional(),
   baseUnit:         baseUnitDto,
   prices:           z.array(productPriceInputDto).optional().default([])
                      .refine(arr => new Set(arr.map(p => p.priceListId)).size === arr.length,
                        { message: 'Tabela de preço duplicada na grade' }),
+})
+
+export const merchandiseDto = merchandiseShape.superRefine((v, ctx) => {
+  const hasScale = v.scaleRelevance !== undefined, hasCnpj = v.manufacturerCnpj !== undefined
+  if (hasScale !== hasCnpj) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: [hasScale ? 'manufacturerCnpj' : 'scaleRelevance'],
+      message: 'scaleRelevance e manufacturerCnpj andam juntos (A-PR6)',
+    })
+    return
+  }
+  if (v.scaleRelevance === 'N' && v.manufacturerCnpj == null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: ['manufacturerCnpj'],
+      message: 'Produzido em escala NÃO relevante exige o CNPJ do fabricante (rejeição 879 da NF-e)',
+    })
+  }
+  if (v.scaleRelevance !== 'N' && v.manufacturerCnpj != null) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom, path: ['manufacturerCnpj'],
+      message: 'O CNPJ do fabricante só vale para produto em escala NÃO relevante — limpe o campo (D-PR62)',
+    })
+  }
 })
 
 export type MerchandiseDto = z.infer<typeof merchandiseDto>

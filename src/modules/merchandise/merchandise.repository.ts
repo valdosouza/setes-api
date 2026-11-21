@@ -103,6 +103,8 @@ export async function getMerchandise(
             COALESCE(m.kind_tributary, '1') AS purpose,
             m.taxable_trade_level      AS taxableTradeLevel,
             m.default_sale_trade_level AS defaultSaleTradeLevel,
+            CASE WHEN m.manuf_sign_ind_scale COLLATE utf8mb4_bin IN ('S', 'N') THEN m.manuf_sign_ind_scale END AS scaleRelevance,
+            mfc.cnpj                AS manufacturerCnpj,
             tu.tb_measure_id AS buMeasureId,
             ms.abbreviation  AS buMeasureAbbreviation,
             ms.description   AS buMeasureDescription,
@@ -113,6 +115,8 @@ export async function getMerchandise(
      LEFT JOIN \`${schemaName}\`.tb_merchandise m
        ON m.id = p.id AND m.tb_institution_id = p.tb_institution_id
      LEFT JOIN setes_central.tb_brand b ON b.id = m.tb_brand_id
+     LEFT JOIN \`${schemaName}\`.tb_merchandise_factory mfc
+       ON mfc.tb_institution_id = m.tb_institution_id AND mfc.tb_merchandise_id = m.id AND mfc.deleted = 'N'
      LEFT JOIN \`${schemaName}\`.tb_merchandise_trade_unit tu
        ON tu.tb_institution_id = p.tb_institution_id AND tu.tb_merchandise_id = p.id AND tu.level = 1 AND tu.deleted = 'N'
      LEFT JOIN setes_central.tb_measure ms ON ms.id = tu.tb_measure_id
@@ -322,13 +326,47 @@ async function writeBaseUnit(
 async function upsertMerchandiseFacts(
   conn: PoolConnection, schemaName: string, institutionId: number, id: number, input: MerchandiseInput
 ): Promise<void> {
+  // indEscala (A-PR6): a LINHA que nasce leva sempre o valor do corpo, e AUSENTE nasce NULL ("não informado" — nunca o DEFAULT 'S' do
+  // baseline, que inventava "relevante" — D-SY5), inclusive quando um PUT cria a tb_merchandise que faltava. Na linha que JÁ existe, a
+  // coluna só entra no UPDATE quando a chave veio: ausente = o gravado (do sync, inclusive) não muda — a tela que ainda não manda o campo
+  // não o apaga.
+  const touchScale = input.scaleRelevance !== undefined
   await conn.query(
     `INSERT INTO \`${schemaName}\`.tb_merchandise
-       (id, tb_institution_id, ncm, cest, kind_tributary, source, tb_brand_id, created_at, updated_at, deleted)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
+       (id, tb_institution_id, ncm, cest, kind_tributary, source, tb_brand_id, manuf_sign_ind_scale, created_at, updated_at, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
      ON DUPLICATE KEY UPDATE ncm = VALUES(ncm), cest = VALUES(cest), kind_tributary = VALUES(kind_tributary),
-                             source = VALUES(source), tb_brand_id = VALUES(tb_brand_id), deleted = 'N', updated_at = NOW()`,
-    [id, institutionId, input.ncm ?? null, input.cest ?? null, input.purpose, input.origin, input.brandId])
+                             source = VALUES(source), tb_brand_id = VALUES(tb_brand_id),${
+                               touchScale ? ' manuf_sign_ind_scale = VALUES(manuf_sign_ind_scale),' : ''} deleted = 'N', updated_at = NOW()`,
+    [id, institutionId, input.ncm ?? null, input.cest ?? null, input.purpose, input.origin, input.brandId, input.scaleRelevance ?? null])
+}
+
+/**
+ * FABRICANTE (D-PR65 — `tb_merchandise_factory`, especialização 1:1 opcional; A-PR6). Chave AUSENTE = não toca (o DTO garante que, na
+ * criação, ausente só vem com o indEscala também ausente — não há fabricante a gravar). CNPJ = upsert pela PK (o ÚNICO UNIQUE da tabela —
+ * PADROES §9 regra 10): troca o CNPJ na mesma linha e, se a linha estava morta, revive com o CNPJ NOVO (nunca herda o velho). null = soft
+ * delete da linha viva (PADROES §3.1 — nunca DELETE). Roda DEPOIS do upsert de `tb_merchandise` (FK `fk_mf_merchandise`).
+ */
+async function writeManufacturer(
+  conn: PoolConnection, schemaName: string, institutionId: number, id: number, input: MerchandiseInput, isNew: boolean
+): Promise<void> {
+  if (input.manufacturerCnpj === undefined) return
+  if (input.manufacturerCnpj === null) {
+    // Mercadoria que acabou de nascer não tem fabricante a limpar — e o UPDATE sem linha viraria trava de intervalo (PADROES §9 regra 12;
+    // gate adversarial do delta, LOW-3).
+    if (isNew) return
+    await conn.query(
+      `UPDATE \`${schemaName}\`.tb_merchandise_factory SET deleted = 'S', updated_at = NOW()
+        WHERE tb_institution_id = ? AND tb_merchandise_id = ? AND deleted = 'N'`,
+      [institutionId, id])
+    return
+  }
+  await conn.query(
+    `INSERT INTO \`${schemaName}\`.tb_merchandise_factory
+       (tb_institution_id, tb_merchandise_id, cnpj, created_at, updated_at, deleted)
+     VALUES (?, ?, ?, NOW(), NOW(), 'N')
+     ON DUPLICATE KEY UPDATE cnpj = VALUES(cnpj), deleted = 'N', updated_at = NOW()`,
+    [institutionId, id, input.manufacturerCnpj])
 }
 
 export async function insertMerchandise(
@@ -353,6 +391,7 @@ export async function insertMerchandise(
       [id, identifier, institutionId, input.description, input.kind, input.categoryId, input.financialPlansId ?? null,
        input.active ?? 'S', input.note ?? null])
     await upsertMerchandiseFacts(conn, schemaName, institutionId, id, input)
+    await writeManufacturer(conn, schemaName, institutionId, id, input, true)
     await writeBaseUnit(conn, schemaName, institutionId, id, input, null)
     await syncProductPrices(conn, schemaName, institutionId, id, input.prices ?? [])
 
@@ -434,6 +473,7 @@ export async function updateMerchandise(
       [identifier, input.description, input.kind, input.categoryId, input.financialPlansId ?? null,
        input.active ?? 'S', input.note ?? null, id, institutionId])
     await upsertMerchandiseFacts(conn, schemaName, institutionId, id, input)
+    await writeManufacturer(conn, schemaName, institutionId, id, input, false)
     await writeBaseUnit(conn, schemaName, institutionId, id, input, current)
     await syncProductPrices(conn, schemaName, institutionId, id, input.prices ?? [])
 
