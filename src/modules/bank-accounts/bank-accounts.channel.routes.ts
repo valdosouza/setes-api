@@ -4,11 +4,11 @@ import { adminGuard } from '@gateway/admin.guard'
 
 /**
  * Rotas do CANAL API da conta bancária (Onda 2 do Banco Inter — D-I3/D-I4) — montadas em /api/bank-accounts ANTES do roteador
- * guardado do cadastro (`router.use('/bank-accounts', bankAccountsChannelRoutes)` e só depois
- * `router.use('/bank-accounts', catalogOwnerGuard, bankAccountsRoutes)`). O canal (`tb_bank_account_channel`, segredos, token do webhook)
- * é fato que o LEGADO não produz — a web é a única escritora, em qualquer modo do estabelecimento (W/L/P); o CADASTRO da conta
- * (`tb_bank_account`) é o que o legado envia e, em L, fica só consulta (D-PR51, Rodada 7 de produtos — mesmo princípio da D-PR45:
- * cada fato com o seu escritor). Só os caminhos `/:id/channel…` vivem aqui; o resto cai no roteador guardado.
+ * do cadastro (`router.use('/bank-accounts', bankAccountsChannelRoutes)` e só depois
+ * `router.use('/bank-accounts', bankAccountsRoutes)`). O canal (`tb_bank_account_channel`, segredos, token do webhook)
+ * é fato que o LEGADO não produz — a web é a única escritora, em qualquer modo do estabelecimento (W/D); o CADASTRO da conta
+ * (`tb_bank_account`) é o que o ERP Desktop também envia (D-PR51, Rodada 7 de produtos — mesmo princípio da D-PR45:
+ * cada fato com o seu escritor). Só os caminhos `/:id/channel…` vivem aqui; o resto cai no roteador do cadastro.
  */
 const router = Router()
 

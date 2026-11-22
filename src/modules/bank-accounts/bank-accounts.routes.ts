@@ -3,8 +3,8 @@ import * as controller from './bank-accounts.controller'
 
 /**
  * Rotas do CADASTRO do módulo bank-accounts — montadas em /api/bank-accounts SOB a guarda do dono do catálogo
- * (`catalogOwnerGuard` — D-PR51, Rodada 7 de produtos: o legado envia as contas bancárias e a web cunha o id por MAX+1 no mesmo
- * espaço; em modo L o cadastro é só consulta). Cadastro de CLIENTE, grupo Financeiro (sem superGuard — escopo por institution do
+ * (o ERP Desktop também envia as contas bancárias — D-PR51 — e a web cunha o id por MAX+1 no mesmo espaço; sem guarda desde a D-PR77:
+ * com origem D a escrita passa e o app orienta o usuário). Cadastro de CLIENTE, grupo Financeiro (sem superGuard — escopo por institution do
  * JWT); gate técnico = flag 'bank-accounts'. As rotas do CANAL API (`/:id/channel…`) vivem em `bank-accounts.channel.routes.ts`,
  * montadas ANTES desta guarda: o canal é fato que o legado não produz (a web é a única escritora — mesmo princípio da D-PR45).
  * Espelho no app: apps/web/lib/app/modules/bank_accounts/.

@@ -1,5 +1,4 @@
 import { EntityFiscalInput, EntityFiscalFull } from '@shared/entity'
-import { CategoryKind } from '@shared/category-kind'
 import { SourceKind } from '@shared/catalog-owner'
 
 /**
@@ -13,9 +12,9 @@ import { SourceKind } from '@shared/catalog-owner'
 /** Cadeia completa + campos do concreto enviados no POST/PUT. */
 export interface InstitutionInput extends EntityFiscalInput {
   active?: 'S' | 'N'
-  /** D-PR47: o TIPO DA FONTE EXTERNA que alimenta o estabelecimento (W nativo web · L transição do desktop legado · P PDV) — declarado
-   *  pelo Super no cadastro (obrigatório no POST), IMUTÁVEL na edição (409 SOURCE_KIND_IMMUTABLE se vier diferente): só muda pelo ato
-   *  "encerrar a transição" (D-PR48/D-PR49). */
+  /** D-PR47: o TIPO DA FONTE EXTERNA que alimenta o estabelecimento (W a web é dona do catálogo · D o ERP Desktop é dono — D-OI10) — declarado
+   *  pelo Super no cadastro (obrigatório no POST). Na edição: igual ao gravado passa; D → W é a TROCA (só com a chave do sincronizador
+   *  bloqueada — D-PR73/D-PR76); W → D = 409 SOURCE_KIND_IMMUTABLE. */
   sourceKind?: SourceKind
 }
 
@@ -34,7 +33,7 @@ export interface InstitutionFull extends EntityFiscalFull {
   schemaName:        string
   active:            'S' | 'N' | null
   sourceKind:        SourceKind
-  /** Instante do ato "encerrar a transição" (write-once); NULL = nunca foi L ou ainda é. */
+  /** Instante do ato "encerrar a transição" (write-once); NULL = nunca foi D ou ainda é. */
   transitionEndedAt: string | null
   /** Autor do ato (tb_user.id do Super que o executou — D-PR53/D-PR57); NULL junto com `transitionEndedAt`. */
   transitionEndedBy: number | null
@@ -49,16 +48,6 @@ export interface InstitutionFact {
   schemaName:        string
   sourceKind:        SourceKind
   transitionEndedAt: string | null
-}
-
-/** Resposta do ato "encerrar a transição" (POST /api/institutions/:id/end-legacy-transition — D-PR48/D-PR49). */
-export interface LegacyTransitionResult {
-  sourceKind:          SourceKind
-  transitionEndedAt:   string | null
-  /** id da categoria padrão criada por natureza (null = já havia uma viva). */
-  defaultCategories:   Record<CategoryKind, number | null>
-  /** Destino W: chaves do sincronizador inativadas em definitivo; destino P: 0 (os PDVs seguem com a chave — A-PR4/Q-PR60). */
-  syncKeysInactivated: number
 }
 
 /**

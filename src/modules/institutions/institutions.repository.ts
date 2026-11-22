@@ -165,8 +165,8 @@ export async function insertInstitutionCascade(
 
     // D-PR47: a origem dos cadastros é DECLARADA no cadastro (o DTO exige; aqui é o cinto — a coluna é NOT NULL sem default)
     if (!isSourceKind(input.sourceKind)) {
-      throw new HttpError(400, 'Informe a origem dos cadastros do estabelecimento (W, L ou P)',
-        [{ field: 'sourceKind', message: 'W = nativo web · L = transição do desktop legado · P = PDV' }])
+      throw new HttpError(400, 'Informe a origem dos cadastros do estabelecimento (W ou D)',
+        [{ field: 'sourceKind', message: 'W = a web é dona do catálogo · D = o ERP Desktop é dono' }])
     }
     await conn.query(
       `INSERT INTO setes_central.tb_institution (id, schema_name, source_kind, active, created_at, updated_at)
@@ -197,26 +197,92 @@ export async function insertInstitutionCascade(
   }
 }
 
-/** PUT: mesma cascade em transação única. schema_name é IMUTÁVEL. */
+/** O cache da chave no setes-sync (D-SY13: até 5 min) — a troca D → W só aceita a chave bloqueada há mais que isso (D-PR78). */
+export const SYNC_KEY_CACHE_TTL_SECONDS = 300
+
+/** Desfecho do PUT: a troca D → W da origem dos cadastros aconteceu nesta edição? (D-PR73/D-PR76) */
+export interface InstitutionUpdateOutcome {
+  sourceKindChanged: boolean
+  defaultCategories: Record<CategoryKind, number | null> | null
+}
+
+/**
+ * PUT: mesma cascade em transação única. schema_name é IMUTÁVEL. A ORIGEM DOS CADASTROS (D-PR47) muda só pela TROCA D → W (D-PR73/D-PR76,
+ * Valdo 2026-11-22: "Trocar D por W" / "Só pelo cadastro" — o "virar Web" da D-PR72 deixou de ser ato irreversível com motivo):
+ *  - igual ao gravado passa; W → D = 409 SOURCE_KIND_IMMUTABLE (D-OI10: nunca de volta a D);
+ *  - D → W só com a chave do sincronizador BLOQUEADA (nenhuma chave viva ativa — o ERP Desktop parou de enviar) HÁ MAIS DE 5 MIN (o cache
+ *    do setes-sync — D-PR78): ativa ou bloqueada há menos = 409 SOURCE_KIND_SYNC_KEY_ACTIVE, nada gravado;
+ *  - a troca grava, no MESMO UPDATE condicionado (fato monotônico — PADROES §11 regra 10), `source_kind = 'W'`, `transition_ended_at` e o
+ *    autor (`transition_ended_by`), SEM motivo (D-PR75 — o CHECK do autor da 081), e cria as categorias padrão que faltarem (a mesma
+ *    peça do onboarding W);
+ *  - ORDEM DAS TRAVAS: com `sourceKind` no corpo, a trava da institution é o 1º statement (PADROES §9 regra 7 — a MESMA linha que o
+ *    interruptor da chave, a geração da chave e os cunhadores de id travam) e o fato é lido `FOR UPDATE` depois dela; a cadeia fiscal vem
+ *    depois. A FK do autor (079) põe trava S em `tb_user(autor)` depois da trava da institution.
+ */
 export async function updateInstitutionCascade(
   id: number, input: InstitutionInput, updatedBy: number | null = null
-): Promise<void> {
+): Promise<InstitutionUpdateOutcome> {
   const conn = await pool.getConnection()
+  const outcome: InstitutionUpdateOutcome = { sourceKindChanged: false, defaultCategories: null }
   try {
     await conn.beginTransaction()
 
-    await saveEntityFiscalChain(conn, id, input, updatedBy)
-
-    // D-PR47: a origem dos cadastros é IMUTÁVEL pela edição — só o ato "encerrar a transição" a muda (L → W/P). Igual ao gravado passa;
-    // diferente recusa (nunca descarte silencioso). Leitura travante: a linha é a que o ato trava.
+    // Só trava quando a origem do corpo DIFERE da gravada (leitura sem trava antes — gates da PROD.E10.P1): o PUT que manda o
+    // formulário inteiro, com a mesma origem, não concorre com os cunhadores de id. Diferente: a trava é o 1º statement que trava e o
+    // fato é RELIDO `FOR UPDATE` depois dela (a decisão vale pelo valor travado, nunca pelo da leitura sem trava).
+    let changing = false
     if (input.sourceKind !== undefined) {
+      const [peek] = await conn.query<any[]>(
+        `SELECT source_kind AS sourceKind FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'`, [id])
+      changing = !!peek[0] && peek[0].sourceKind !== input.sourceKind
+    }
+    if (changing) {
+      await lockInstitutionCounters(conn, id)
       const [cur] = await conn.query<any[]>(
-        `SELECT source_kind AS sourceKind FROM setes_central.tb_institution WHERE id = ? FOR UPDATE`, [id])
-      if (cur[0] && cur[0].sourceKind !== input.sourceKind) {
-        throw new HttpError(409, 'A origem dos cadastros não se edita — use o ato "encerrar a transição"',
-          [{ field: 'sourceKind', message: `gravado: ${cur[0].sourceKind}` }], ErrorCodes.SOURCE_KIND_IMMUTABLE)
+        `SELECT schema_name AS schemaName, source_kind AS sourceKind FROM setes_central.tb_institution
+          WHERE id = ? AND deleted = 'N' FOR UPDATE`, [id])
+      const recorded: SourceKind | undefined = cur[0]?.sourceKind
+      if (recorded && recorded !== input.sourceKind) {
+        if (!(recorded === 'D' && input.sourceKind === 'W')) {
+          throw new HttpError(409, 'A origem dos cadastros só troca de ERP Desktop para Web — nunca de volta (D-OI10)',
+            [{ field: 'sourceKind', message: `gravado: ${recorded}` }], ErrorCodes.SOURCE_KIND_IMMUTABLE)
+        }
+        // a rota passa por auth + superGuard: o token SEMPRE traz o usuário — sem ele a troca não grava pela metade (o CHECK da 081 recusaria)
+        if (updatedBy == null) throw new Error('trocar a origem dos cadastros: autor ausente — a rota exige o usuário do token (D-PR75)')
+        const [keys] = await conn.query<any[]>(
+          `SELECT id FROM setes_central.tb_sync_api_key
+            WHERE tb_institution_id = ? AND deleted = 'N' AND active = 'S' FOR UPDATE`, [id])
+        if ((keys as any[]).length > 0) {
+          throw new HttpError(409,
+            'Bloqueie a chave do sincronizador antes de trocar a origem dos cadastros para Web (o ERP Desktop precisa parar de enviar — D-PR73)',
+            [{ field: 'sourceKind', message: 'chave do sincronizador ativa' }], ErrorCodes.SOURCE_KIND_SYNC_KEY_ACTIVE)
+        }
+        // D-PR78: o setes-sync guarda a chave válida em cache por até 5 min (D-SY13) — bloqueada há menos que isso, o ERP Desktop ainda
+        // pode estar gravando: a troca espera o cache vencer (a pausa grava `updated_at` da chave — `switchSyncApiKeyTx`)
+        const [[recent]] = await conn.query<any[]>(
+          `SELECT TIMESTAMPDIFF(SECOND, MAX(updated_at), NOW()) AS pausedFor FROM setes_central.tb_sync_api_key
+            WHERE tb_institution_id = ? AND deleted = 'N' AND active = 'N'`, [id]) as any
+        const pausedFor = recent?.pausedFor == null ? null : Number(recent.pausedFor)
+        if (pausedFor !== null && pausedFor < SYNC_KEY_CACHE_TTL_SECONDS) {
+          const wait = SYNC_KEY_CACHE_TTL_SECONDS - pausedFor
+          throw new HttpError(409,
+            `A chave do sincronizador foi bloqueada há menos de 5 minutos — aguarde ${wait} s para trocar a origem dos cadastros para Web (D-PR78)`,
+            [{ field: 'sourceKind', message: `aguarde ${wait} s` }], ErrorCodes.SOURCE_KIND_SYNC_KEY_ACTIVE)
+        }
+        const [upd] = await conn.query<any>(
+          `UPDATE setes_central.tb_institution
+              SET source_kind = 'W', transition_ended_at = NOW(), transition_ended_by = ?, updated_at = NOW()
+            WHERE id = ? AND source_kind = 'D' AND transition_ended_at IS NULL`,
+          [updatedBy, id])
+        if (Number(upd.affectedRows) !== 1) {
+          throw new Error(`trocar a origem dos cadastros: o fato da institution ${id} mudou por baixo da trava (affectedRows = ${upd.affectedRows})`)
+        }
+        outcome.sourceKindChanged = true
+        outcome.defaultCategories = await ensureDefaultCategories(conn, assertSchema(cur[0].schemaName), id)
       }
     }
+
+    await saveEntityFiscalChain(conn, id, input, updatedBy)
 
     if (input.active !== undefined) {
       await conn.query(
@@ -226,6 +292,7 @@ export async function updateInstitutionCascade(
     }
 
     await conn.commit()
+    return outcome
   } catch (err) {
     await conn.rollback()
     throw err
@@ -376,10 +443,10 @@ export type SyncKeySwitchOutcome =
 /**
  * Pausa/retoma a chave VIVA do estabelecimento NUMA transação (D-PR43; Rodada 7 — D-PR48 item 1): NÃO muda o dono do catálogo, não cria
  * categoria, não confere linhas (a Rodada 6 fazia isso e caiu: o dono é o fato `source_kind`, nunca a chave). Nunca apaga (PADROES §3.1).
- *  - 1º statement: a trava da institution (PADROES §9 regra 7) — serializa com o ato "encerrar a transição" (que lê e muda o fato) e
+ *  - 1º statement: a trava da institution (PADROES §9 regra 7) — serializa com a troca D → W do PUT (que lê e muda o fato) e
  *    com outro interruptor; depois o FATO (leitura consistente DEPOIS da trava — o retrato já vê o ato comitado) e as chaves vivas
  *    `FOR UPDATE`.
- *  - RETOMAR ('S') em W é recusado: W não tem sincronizador — nativo web, ou transição encerrada para W (a chave inativada pelo ato
+ *  - RETOMAR ('S') em W é recusado: W não tem sincronizador — nativo web, ou trocado de D para W (a chave já estava bloqueada na troca — D-PR73
  *    nunca reativa — D-PR48). Pausar em W (nada vivo) cai em `unchanged`.
  *  - estado já é o pedido → nada muda.
  */
@@ -413,75 +480,6 @@ export async function switchSyncApiKeyTx(institutionId: number, active: 'S' | 'N
   }
 }
 
-/** Desfecho do ato "encerrar a transição" (D-PR48/D-PR49). */
-export type LegacyTransitionOutcome =
-  | { kind: 'missing' }
-  | { kind: 'not-applicable'; sourceKind: SourceKind; transitionEndedAt: string | null }
-  | { kind: 'ended'; schemaName: string; defaultCategories: Record<CategoryKind, number | null>; syncKeysInactivated: number }
-
-/**
- * ENCERRAR A TRANSIÇÃO do desktop legado (D-PR48/D-PR49 — ato ÚNICO e IRREVERSÍVEL do Super), NUMA transação, na linha do FATO:
- *  1. trava da institution (PADROES §9 regra 7 — a MESMA linha que todo cunhador de id e o interruptor da chave travam: quem esperar
- *     por ela lê o fato novo) e o fato `FOR UPDATE` (regra 2 do §9 — leitura que decide trava);
- *  2. só `source_kind = 'L'` passa (não-L = `not-applicable`: repetir o ato cai aqui — não há 2º código, depois do ato a institution
- *     simplesmente não é L);
- *  3. `UPDATE … SET source_kind = destino, transition_ended_at = NOW(), transition_ended_by = autor, transition_end_reason = motivo
- *     WHERE id = ? AND source_kind = 'L' AND transition_ended_at IS NULL` — as QUATRO marcas do ato no MESMO comando (D-PR53: write-once,
- *     nascem juntas; o CHECK `ck_institution_transition_author` da 079 recusa o ato pela metade) e a condição NO COMANDO (PADROES §11
- *     regra 10: fato monotônico); 0 linhas = alguém mudou o fato por baixo → falha alto;
- *  4. destino W: as chaves vivas do sincronizador ficam INATIVAS em definitivo (W nunca reativa — `switchSyncApiKeyTx`); destino P: a
- *     chave fica — é a MESMA que os PDVs usam (D-PR49/D-TM11; A-PR4 — Q-PR60 ao Valdo); o servidor desktop passa a ser recusado pelo
- *     FATO, lido pelo setes-sync (contrato `SYNC_TRANSITION_ENDED` — grupo do sync);
- *  5. as categorias padrão que faltarem ("Produtos" P / "Serviços" S — `ensureDefaultCategories`, a MESMA regra da migration 073).
- * Falha em qualquer passo desfaz TUDO (o fato segue L). Quem chama reexecuta em deadlock (o passo 5 cunha id).
- * ORDEM DAS TRAVAS (gate adversarial da PROD.E6.P2): a FK do autor (079) põe trava S em `tb_user(autor)` DEPOIS da trava da institution —
- * transação nova que trave `tb_user` e depois o contador/linha de uma institution inverte a ordem e pode dar deadlock com o ato.
- */
-export async function endLegacyTransitionTx(
-  institutionId: number, destination: 'W' | 'P', actorUserId: number, reason: string
-): Promise<LegacyTransitionOutcome> {
-  const conn = await pool.getConnection()
-  try {
-    await conn.beginTransaction()
-    await lockInstitutionCounters(conn, institutionId)
-    const [rows] = await conn.query<any[]>(
-      `SELECT schema_name AS schemaName, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt
-         FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N' FOR UPDATE`,
-      [institutionId])
-    if ((rows as any[]).length === 0) { await conn.rollback(); return { kind: 'missing' } }
-    const { schemaName, sourceKind, transitionEndedAt } = rows[0]
-    if (sourceKind !== 'L') {
-      await conn.rollback()
-      return { kind: 'not-applicable', sourceKind, transitionEndedAt: toIso(transitionEndedAt) }
-    }
-    const s = assertSchema(schemaName)
-    const [upd] = await conn.query<any>(
-      `UPDATE setes_central.tb_institution
-          SET source_kind = ?, transition_ended_at = NOW(), transition_ended_by = ?, transition_end_reason = ?, updated_at = NOW()
-        WHERE id = ? AND source_kind = 'L' AND transition_ended_at IS NULL`,
-      [destination, actorUserId, reason, institutionId])
-    if (Number(upd.affectedRows) !== 1) {
-      throw new Error(`encerrar a transição: o fato da institution ${institutionId} mudou por baixo da trava (affectedRows = ${upd.affectedRows})`)
-    }
-    let syncKeysInactivated = 0
-    if (destination === 'W') {
-      const [k] = await conn.query<any>(
-        `UPDATE setes_central.tb_sync_api_key SET active = 'N', updated_at = NOW()
-          WHERE tb_institution_id = ? AND deleted = 'N' AND active = 'S'`,
-        [institutionId])
-      syncKeysInactivated = Number(k.affectedRows)
-    }
-    const defaultCategories = await ensureDefaultCategories(conn, s, institutionId)
-    await conn.commit()
-    return { kind: 'ended', schemaName: s, defaultCategories, syncKeysInactivated }
-  } catch (err) {
-    await conn.rollback()
-    throw err
-  } finally {
-    conn.release()
-  }
-}
-
 /** Desfecho de gerar a chave (D12 + D-PR47). */
 export type SyncKeyCreateOutcome =
   | { kind: 'missing' }
@@ -491,8 +489,8 @@ export type SyncKeyCreateOutcome =
 
 /**
  * Uma chave por estabelecimento; id sem auto_increment → MAX+1 na transação. As DECISÕES ficam DENTRO da transação (gate adversarial
- * R7, ADV-R7-03 — TOCTOU): trava da institution 1º (PADROES §9 regra 7 — a MESMA linha que o ato "encerrar a transição" trava) → o fato
- * `FOR UPDATE` (W não tem chave — nativo web, ou L encerrado para W; lido FORA da transação, o ato podia comitar no meio e nascer uma
+ * R7, ADV-R7-03 — TOCTOU): trava da institution 1º (PADROES §9 regra 7 — a MESMA linha que a troca D → W do PUT trava) → o fato
+ * `FOR UPDATE` (W não tem chave — nativo web, ou trocado de D para W; lido FORA da transação, a troca podia comitar no meio e nascer uma
  * chave ATIVA numa institution W: dois escritores) → "já existe chave viva" na mesma transação (dois POSTs simultâneos) → INSERT.
  */
 export async function insertSyncApiKey(

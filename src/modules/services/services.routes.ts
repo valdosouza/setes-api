@@ -238,7 +238,6 @@ router.get('/:id', controller.getOne)
  *     responses:
  *       201: { description: "{ ok, data: { id } }" }
  *       400: { description: "Validação/FK inexistente; categoria que não serve ao serviço (fields[categoryId])" }
- *       409: { description: "CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro de serviços é só consulta na web (D-PR47); o enquadramento fiscal tem rota própria (D-PR45)" }
  *       422: { description: "Classificação IBS/CBS inválida (IBSCBS_* em code; campo em fields[])" }
  */
 router.post('/', controller.create)
@@ -260,7 +259,6 @@ router.post('/', controller.create)
  *       200: { description: "{ ok }" }
  *       400: { description: "Validação/FK inexistente; categoria TROCADA que não serve ao serviço (fields[categoryId])" }
  *       404: { description: Não encontrado }
- *       409: { description: "CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro de serviços é só consulta na web (D-PR47); o enquadramento fiscal tem rota própria (D-PR45)" }
  *       422: { description: "Classificação IBS/CBS inválida (IBSCBS_* em code; campo em fields[])" }
  *   delete:
  *     summary: Exclui (soft delete) — usos históricos permanecem
@@ -274,7 +272,6 @@ router.post('/', controller.create)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrado }
- *       409: { description: "CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro de serviços é só consulta na web (D-PR47); o enquadramento fiscal tem rota própria (D-PR45)" }
  */
 router.put('/:id', controller.update)
 router.delete('/:id', controller.remove)

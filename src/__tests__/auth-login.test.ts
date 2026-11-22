@@ -16,7 +16,7 @@ const mockExistsSalesman   = sessionRepo.existsSalesman      as jest.Mock
 mockExistsSalesman.mockResolvedValue(false)
 // D-PR47 (Rodada 7 de produtos): o contexto carrega a origem dos cadastros e o dono do catálogo derivado (UX; a guarda decide)
 const mockReadSourceKind   = sessionRepo.readSourceKind      as jest.Mock
-mockReadSourceKind.mockResolvedValue('L')
+mockReadSourceKind.mockResolvedValue('D')
 
 // D-F13 (F2a, etapa A2): os tokens saem em RS256 com o kid de assinatura — conferidos com a chave PÚBLICA de teste
 const PUBLIC = createPublicKey(createPrivateKey(fs.readFileSync(process.env.JWT_PRIVATE_KEY_PATH!, 'utf8')))
@@ -63,7 +63,7 @@ describe('auth.service — login', () => {
     expect(payload.role).toBe('super')
     expect(payload.schemaName).toBe('setes_setes')
     // decisão 17: bloco context acompanha o token final — e NÃO entra no JWT (D-PR47: + origem dos cadastros e dono do catálogo)
-    expect(result.context).toEqual({ isSalesman: false, sourceKind: 'L', catalogOwner: 'legacy' })
+    expect(result.context).toEqual({ isSalesman: false, sourceKind: 'D', catalogOwner: 'desktop' })
     expect(payload.isSalesman).toBeUndefined()
     expect(payload.sourceKind).toBeUndefined()
   })
@@ -105,7 +105,7 @@ describe('auth.service — select/switch institution', () => {
     expect(payload.institutionId).toBe(2)
     expect(payload.schemaName).toBe('setes_alpha')
     expect(payload.role).toBe('admin')
-    expect(issued.context).toEqual({ isSalesman: false, sourceKind: 'L', catalogOwner: 'legacy' })
+    expect(issued.context).toEqual({ isSalesman: false, sourceKind: 'D', catalogOwner: 'desktop' })
   })
 
   it('seleção de institution sem vínculo retorna 403', async () => {

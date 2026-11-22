@@ -37,7 +37,7 @@ const router = Router()
  *         schema: { type: string }
  *         description: 'Pesquisa avançada (D-BA1) — JSON { chave: valor } com as chaves de GET /search-criteria; texto = contém, faixa = { from, to }, lookup = id, options = [valores], bool = true|false. Soma em E com filter. Desconhecida/malformada = 400 SEARCH_CRITERIA_INVALID; valor inválido = 422 SEARCH_CRITERION_INVALID com fields[]'
  *     responses:
- *       200: { description: 'Envelope paginado { ok, data, page, pageSize, total } — data lista { id, nickTrade, nameCompany, schemaName, active, sourceKind (W|L|P — D-PR47) }' }
+ *       200: { description: 'Envelope paginado { ok, data, page, pageSize, total } — data lista { id, nickTrade, nameCompany, schemaName, active, sourceKind (W|D — D-PR47/D-OI10) }' }
  *       401: { description: Não autenticado }
  *       403: { description: Restrito à equipe Setes }
  *       500: { description: Erro interno }
@@ -94,7 +94,7 @@ router.get('/fiscal-exists', controller.fiscalExists)
  * /api/institutions/{id}:
  *   get:
  *     summary: Retorna o estabelecimento COMPLETO (entity + fiscal + endereços/fones/redes + institution)
- *     description: "Além da cadeia: schemaName, active, sourceKind (W nativo web · L transição do desktop legado · P PDV — D-PR47) e transitionEndedAt (instante do ato encerrar a transição, ou null — D-PR48), transitionEndedBy (id do usuário que executou o ato, ou null), transitionEndedByName (nome de exibição desse usuário, ou null — D-PR57) e transitionEndReason (o motivo, ou null — D-PR53; nascem juntos)."
+ *     description: "Além da cadeia: schemaName, active, sourceKind (W a web é dona do catálogo · D o ERP Desktop é dono — D-PR47/D-OI10) e transitionEndedAt (instante da troca D → W, ou null — D-PR73), transitionEndedBy (id de quem fez a troca, ou null), transitionEndedByName (nome de exibição desse usuário, ou null — D-PR57) e transitionEndReason (só em linha do ato antigo, anterior à 081; null na troca — D-PR75)."
  *     tags: [Institutions]
  *     responses:
  *       200: { description: '{ ok, data: { …cadeia, schemaName, active, sourceKind, transitionEndedAt, transitionEndedBy, transitionEndedByName, transitionEndReason } }' }
@@ -126,8 +126,8 @@ router.get('/:id', controller.getById)
  *               schemaName: { type: string, example: setes_alpha, description: 'Padrão setes_<nome>; IMUTÁVEL depois' }
  *               sourceKind:
  *                 type: string
- *                 enum: [W, L, P]
- *                 description: 'ORIGEM DOS CADASTROS (D-PR47): W nativo web · L transição do desktop legado (catálogo de base do legado, web só consulta) · P PDV (catálogo da web). Declarado pelo Super — SEM default; imutável depois (só o ato encerrar a transição muda L → W/P).'
+ *                 enum: [W, D]
+ *                 description: 'ORIGEM DOS CADASTROS (D-PR47/D-OI10): W a web é dona do catálogo · D o ERP Desktop é dono (não é trava — D-PR77: o app orienta o usuário). Declarado pelo Super — SEM default; depois só a troca D → W no PUT, com a chave do sincronizador bloqueada (D-PR73/D-PR76).'
  *               admin:
  *                 type: object
  *                 required: [nameCompany, nickTrade, email, password]
@@ -138,7 +138,7 @@ router.get('/:id', controller.getById)
  *                   password:    { type: string, minLength: 5, description: 'Texto puro; o hash MD5 é aplicado no service' }
  *     responses:
  *       201: { description: '{ ok, data: { id, schemaName, active, adminUserId } }' }
- *       400: { description: 'Validação — inclusive sourceKind ausente/fora de W,L,P (fields[sourceKind])' }
+ *       400: { description: 'Validação — inclusive sourceKind ausente/fora de W,D (fields[sourceKind])' }
  *       409: { description: 'schemaName em uso, CPF/CNPJ duplicado ou e-mail já usado como login' }
  *       500: { description: 'Provisionamento ou admin falhou — institution permanece INATIVA' }
  */
@@ -148,13 +148,16 @@ router.post('/', controller.create)
  * @swagger
  * /api/institutions/{id}:
  *   put:
- *     summary: Atualiza a cadeia do estabelecimento (schema_name e sourceKind são imutáveis)
- *     description: "`sourceKind` no corpo é só CONFERÊNCIA: igual ao gravado passa; diferente = 409 SOURCE_KIND_IMMUTABLE (a origem dos cadastros só muda pelo ato encerrar a transição — D-PR47/D-PR48)."
+ *     summary: Atualiza a cadeia do estabelecimento (schema_name imutável; sourceKind só troca de D para W)
+ *     description: >
+ *       `sourceKind` no corpo: igual ao gravado passa; **D → W é a troca da origem dos cadastros** (D-PR73/D-PR76 — virar Web): só com a
+ *       chave do sincronizador BLOQUEADA, grava quem trocou e quando (`transitionEndedBy`/`transitionEndedAt`, sem motivo — D-PR75) e cria
+ *       as categorias padrão que faltarem; a partir daí a web é a dona do catálogo de base. W → D nunca (D-OI10).
  *     tags: [Institutions]
  *     responses:
  *       200: { description: '{ ok }' }
  *       404: { description: Estabelecimento não encontrado }
- *       409: { description: 'SOURCE_KIND_IMMUTABLE — sourceKind diferente do gravado; CPF/CNPJ duplicado' }
+ *       409: { description: 'SOURCE_KIND_IMMUTABLE — W → D (nunca volta); SOURCE_KIND_SYNC_KEY_ACTIVE — D → W com a chave do sincronizador ativa ou bloqueada há menos de 5 min (o cache do setes-sync — D-PR78; fields[sourceKind] traz o tempo que falta); CPF/CNPJ duplicado' }
  */
 router.put('/:id', controller.update)
 
@@ -243,44 +246,5 @@ router.post('/:id/sync-api-key', controller.createSyncKey)
  *         description: "SYNC_KEY_NOT_FOR_SOURCE — retomar em estabelecimento W (sem sincronizador por construção)"
  */
 router.put('/:id/sync-api-key/active', controller.setSyncKeyActive)
-
-/**
- * @swagger
- * /api/institutions/{id}/end-legacy-transition:
- *   post:
- *     summary: "ENCERRA a transição do desktop legado (D-PR48/D-PR49) — ato ÚNICO e IRREVERSÍVEL do Super: L → W (sem PDV) ou L → P (com PDV)"
- *     description: >
- *       Só para estabelecimento com origem dos cadastros L. Numa transação: grava `transitionEndedAt`, o autor (usuário do token) e o
- *       motivo (aparado) no MESMO comando que muda `sourceKind` para o destino (D-PR53 — o GET /:id devolve autor e motivo),
- *       cria as categorias padrão que faltarem ("Produtos"/"Serviços") e, no destino W, inativa a chave do sincronizador em definitivo
- *       (nunca reativa); no destino P a chave fica — é a dos PDVs, que passam a receber o catálogo da web (grupo do sync / frente
- *       tb_terminal). A partir daí a web é a dona do catálogo de base (D-PR47/D-PR52). Motivo e autor também vão ao log.
- *     tags: [Institutions]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [destination, reason]
- *             properties:
- *               destination: { type: string, enum: [W, P] }
- *               reason:      { type: string, minLength: 5, maxLength: 255 }
- *     responses:
- *       200:
- *         description: "{ ok: true, data: { sourceKind, transitionEndedAt, defaultCategories: { P, S }, syncKeysInactivated } }"
- *       400:
- *         description: destino fora de W/P ou motivo ausente/curto
- *       404:
- *         description: Estabelecimento não encontrado
- *       409:
- *         description: "LEGACY_TRANSITION_NOT_APPLICABLE — a origem não é L (inclusive transição já encerrada: o ato é único; fields[transitionEndedAt] traz o instante) / LEGACY_TRANSITION_DESTINATION_PENDING — destino P indisponível até o setes-sync honrar o fato (barreira interina A-PR5/Q-PR62; roteiro: parar o servidor desktop ANTES do ato)"
- */
-router.post('/:id/end-legacy-transition', controller.endTransition)
 
 export default router

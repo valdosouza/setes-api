@@ -1,15 +1,15 @@
 /// <reference types="jest" />
 // GATE ADVERSARIAL — delta da Rodada 7 do cadastro de produtos (2026-10-20; skill testar-adversarial.md; prompt_modulo_products.md
-// "Rodada 7"). CERCAS ESTÁTICAS por varredura do `src` (quem escreve nas tabelas que o legado alimenta; quem chama as peças escritoras;
+// "Rodada 7"). CERCAS ESTÁTICAS por varredura do `src` (quem escreve nas tabelas que o ERP Desktop alimenta; quem chama as peças escritoras;
 // quem escreve o enquadramento fiscal do serviço) + os achados da Rodada 6 que a Rodada 7 RESOLVEU por decisão:
-//   · o ex-ACHADO HIGH (Q-PR52 → D-PR45): a Setes (L) enquadra o serviço do legado pelas rotas próprias — provado em
+//   · o ex-ACHADO HIGH (Q-PR52 → D-PR45): a Setes (D, era L) enquadra o serviço do legado pelas rotas próprias — provado em
 //     `adversarial-catalog-owner-r7.test.ts`;
 //   · os ex-ACHADOS MEDIUM do religar e da 1ª ligação (Q-PR54/Q-PR55/Q-PR56) ficaram SEM OBJETO: não há religar — o dono é o fato
 //     monotônico `source_kind` (D-PR47/D-PR48); o onboarding W/P recebe as categorias padrão da 073 e o L as recebe no ato.
 // `it('[RESISTIU] …')` = a promessa vale. Substitui `adversarial-r6-gate.test.ts`.
 import fs from 'fs'
 import path from 'path'
-import { LEGACY_OWNED_TABLES } from '../shared/catalog-owner'
+import { DESKTOP_OWNED_TABLES } from '../shared/catalog-owner'
 
 const SRC = path.join(__dirname, '..')
 const walk = (dir: string, out: string[] = []): string[] => {
@@ -24,9 +24,9 @@ const rel = (p: string) => path.relative(SRC, p).split(path.sep).join('/')
 const FILES = walk(SRC)
 const read = (p: string) => fs.readFileSync(p, 'utf8')
 
-describe('cerca por varredura — quem ESCREVE nas tabelas que o legado alimenta (LEGACY_OWNED_TABLES) e em tb_service_ibscbs', () => {
-  it('[RESISTIU] só os 6 módulos guardados e as peças deles escrevem; nenhuma rota, controller, service de outro módulo ou script do src', () => {
-    const T = '(' + [...LEGACY_OWNED_TABLES, 'tb_service_ibscbs'].join('|') + ')'
+describe('cerca por varredura — quem ESCREVE nas tabelas que o ERP Desktop alimenta (DESKTOP_OWNED_TABLES) e em tb_service_ibscbs', () => {
+  it('[RESISTIU] só os 6 módulos desses cadastros e as peças deles escrevem; nenhuma rota, controller, service de outro módulo ou script do src', () => {
+    const T = '(' + [...DESKTOP_OWNED_TABLES, 'tb_service_ibscbs'].join('|') + ')'
     const direct = new RegExp('(INSERT\\s+(?:IGNORE\\s+)?INTO|UPDATE|DELETE\\s+FROM|REPLACE\\s+INTO)\\s+[^\\s(]*\\b' + T + '\\b', 'gi')
     // ADV-R7-07: formas que a `direct` não vê — UPDATE multi-tabela (`UPDATE tb_x a JOIN tb_y b … SET b.…`), `DELETE b FROM tb_y b`,
     // lista de tabelas — qualquer literal SQL que COMEÇA com UPDATE/DELETE e cita a tabela antes de SET/WHERE
@@ -88,13 +88,13 @@ describe('cerca por varredura — quem ESCREVE nas tabelas que o legado alimenta
     expect(importers.every(f => f.startsWith('modules/merchandise/'))).toBe(true)
   })
 
-  it('[RESISTIU] as peças escritoras só são chamadas por quem deve: syncProductPrices pelos 2 cadastros guardados; ensureDefaultCategory(s) só pelo ato (institutions) e pela própria peça; nada chama a chave para decidir dono', () => {
+  it('[RESISTIU] as peças escritoras só são chamadas por quem deve: syncProductPrices pelos 2 cadastros (mercadoria e serviço); ensureDefaultCategory(s) só pelo ato (institutions) e pela própria peça; nada chama a chave para decidir dono', () => {
     const importers = (needle: RegExp) => FILES.filter(p => needle.test(read(p))).map(rel).sort()
     expect(importers(/\bsyncProductPrices\b/)).toEqual(['modules/merchandise/merchandise.repository.ts', 'modules/services/services.repository.ts', 'shared/price/index.ts'])
     expect(importers(/\bensureDefaultCategor(y|ies)\b/)).toEqual(['modules/institutions/institutions.repository.ts', 'shared/category-kind/index.ts'])
     // em CÓDIGO (não em comentário): nenhuma chamada/importação das peças da Rodada 6 sobrou
     expect(importers(/\b(hasActiveSyncKey|assertNoActiveSyncKey|webBornSince)\(|@shared\/sync-key|sync-write\.guard|ErrorCodes\.(SYNC_MANAGED_CATALOG|SYNC_KEY_WEB_ROWS)/)).toEqual([])
-    // a chave do sincronizador só é LIDA/ESCRITA (SQL) pelo módulo institutions, que a administra — nunca por guarda ou cadastro (D-PR47: é só autenticação)
+    // a chave do sincronizador só é LIDA/ESCRITA (SQL) pelo módulo institutions, que a administra — nunca por cadastro (D-PR47: é só autenticação)
     expect(importers(/setes_central\.tb_sync_api_key/)).toEqual(['modules/institutions/institutions.repository.ts'])
   })
 })
@@ -113,7 +113,7 @@ describe('D-PR45 — cerca do ENQUADRAMENTO FISCAL do serviço: um escritor por 
     expect(repo).not.toMatch(/export async function (upsertServiceRule|syncServiceClassification)/)
   })
 
-  it('[RESISTIU] os dois escritores são chamados de exatamente 4 lugares: insertService, updateService (PUT guardado) e as duas rotas próprias', () => {
+  it('[RESISTIU] os dois escritores são chamados de exatamente 4 lugares: insertService, updateService (PUT do cadastro) e as duas rotas próprias', () => {
     const calls = (name: string) => (repo.match(new RegExp('\\bawait ' + name + '\\(', 'g')) ?? []).length
     expect([calls('upsertServiceRule'), calls('syncServiceClassification')]).toEqual([3, 3])
     for (const fn of ['insertService', 'updateService', 'updateServiceTaxRule', 'updateServiceFiscalClassification']) {
@@ -126,7 +126,7 @@ describe('D-PR45 — cerca do ENQUADRAMENTO FISCAL do serviço: um escritor por 
     expect(body('updateServiceFiscalClassification')).not.toMatch(/upsertServiceRule|tb_product\s+SET/)
   })
 
-  it('[RESISTIU] as rotas próprias vivem SÓ em services.fiscal.routes.ts (2 PUT, cada uma com o privilégio ALTERAR) e o gateway as monta ANTES da guarda', () => {
+  it('[RESISTIU] as rotas próprias vivem SÓ em services.fiscal.routes.ts (2 PUT, cada uma com o privilégio ALTERAR) e o gateway as monta ANTES do cadastro; nenhuma guarda do dono do catálogo (D-PR77)', () => {
     const fiscal = read(path.join(SRC, 'modules', 'services', 'services.fiscal.routes.ts'))
     expect(fiscal.match(/router\.(get|post|put|delete|patch)\(/g)).toEqual(['router.put(', 'router.put('])
     expect(fiscal).toMatch(/requirePrivilege\('services', PRIVILEGE_ALTERAR\)/)
@@ -136,34 +136,37 @@ describe('D-PR45 — cerca do ENQUADRAMENTO FISCAL do serviço: um escritor por 
     expect(mainRoutes).not.toMatch(/tax-rule'|ibscbs'/)
     const gateway = read(path.join(SRC, 'gateway', 'router.ts'))
     const a = gateway.indexOf("router.use('/services', servicesFiscalRoutes)")
-    const b = gateway.indexOf("router.use('/services', catalogOwnerGuard, servicesRoutes)")
+    const b = gateway.indexOf("router.use('/services', servicesRoutes)")
     expect(a).toBeGreaterThan(-1); expect(b).toBeGreaterThan(a)
     const c = gateway.indexOf("router.use('/bank-accounts', bankAccountsChannelRoutes)")
-    const d = gateway.indexOf("router.use('/bank-accounts', catalogOwnerGuard, bankAccountsRoutes)")
+    const d = gateway.indexOf("router.use('/bank-accounts', bankAccountsRoutes)")
     expect(c).toBeGreaterThan(-1); expect(d).toBeGreaterThan(c)
-    expect(gateway.match(/catalogOwnerGuard,/g)).toHaveLength(6)
+    expect(gateway).not.toMatch(/catalogOwnerGuard|catalog-owner\.guard/)                // a guarda saiu (D-PR77)
+    expect(fs.existsSync(path.join(SRC, 'gateway', 'catalog-owner.guard.ts'))).toBe(false)
   })
 })
 
 describe('o fato é MONOTÔNICO e só o ato o muda — cercas no código do módulo institutions e na migration', () => {
   const repo = read(path.join(SRC, 'modules', 'institutions', 'institutions.repository.ts'))
 
-  it('[RESISTIU] só UM UPDATE de source_kind em todo o src (o ato), com `source_kind = L AND transition_ended_at IS NULL` NO COMANDO e affectedRows conferido; a sonda do boot só INSERE linhas de prova desfeitas', () => {
+  it('[RESISTIU] só UM UPDATE de source_kind em todo o src (a troca D → W do PUT — D-PR73/D-PR76), com `source_kind = D AND transition_ended_at IS NULL` NO COMANDO e affectedRows conferido; a sonda do boot só INSERE linhas de prova desfeitas', () => {
     const files = FILES.filter(p => /SET\s+source_kind\s*=/.test(read(p))).map(rel).sort()
     expect(files).toEqual(['modules/institutions/institutions.repository.ts'])
     const piece = read(path.join(SRC, 'shared', 'catalog-owner', 'index.ts'))
     const probeFn = piece.slice(piece.indexOf('export async function assertInstitutionSourceKindSchema'))
     expect(probeFn).toMatch(/finally \{\s*await conn\.rollback\(\)/)                                                     // sempre desfeita
-    expect(repo.match(/SET source_kind = \?/g)).toHaveLength(1)
-    expect(repo).toMatch(/SET source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
+    expect(repo.match(/SET source_kind = /g)).toHaveLength(1)
+    expect(repo).toMatch(/SET source_kind = 'W', transition_ended_at = NOW\(\), transition_ended_by = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'D' AND transition_ended_at IS NULL/)
+    expect(repo).not.toMatch(/transition_end_reason = \?/)                                          // D-PR75: a troca não pede motivo
+    expect(repo).toMatch(/SOURCE_KIND_SYNC_KEY_ACTIVE/)                                               // D-PR73: só com a chave bloqueada
     expect(repo).toMatch(/Number\(upd\.affectedRows\) !== 1/)
-    // o INSERT da institution leva o fato declarado; a edição só CONFERE (409), nunca grava
+    // o INSERT da institution leva o fato declarado; a edição só grava a troca D → W (condicionada) — W → D = 409
     expect(repo).toMatch(/INSERT INTO setes_central\.tb_institution \(id, schema_name, source_kind, active, created_at, updated_at\)/)
     expect(repo).toMatch(/SOURCE_KIND_IMMUTABLE/)
     expect(repo).not.toMatch(/UPDATE setes_central\.tb_institution SET [^\n]*source_kind/)
   })
 
-  it('[RESISTIU] a migration 072 é re-executável por schema (guardas information_schema + ADD CONSTRAINT IF NOT EXISTS), backfill só nas NULL, NOT NULL sem DEFAULT, CHECK binário nomeado; a 073 cria categorias só para W/P', () => {
+  it('[RESISTIU] a migration 072 é re-executável por schema (guardas information_schema + ADD CONSTRAINT IF NOT EXISTS), backfill só nas NULL, NOT NULL sem DEFAULT, CHECK binário nomeado; a 073 cria categorias só para W/P (P não existe desde a 081); a 081 troca o domínio para W/D, re-executável', () => {
     const m072 = read(path.join(SRC, 'migrations', 'sql', '072_institution_source_kind.sql'))
     // TODO DDL guardado (gate socrático R7): 2 ADD COLUMN + MODIFY por is_nullable + CHECKs por CHECK_CONSTRAINTS → zero ALTER no re-run
     expect(m072.match(/information_schema\.columns/g)).toHaveLength(3)
@@ -179,6 +182,20 @@ describe('o fato é MONOTÔNICO e só o ato o muda — cercas no código do mód
     expect(m073.match(/i\.source_kind COLLATE utf8mb4_bin IN \('W', 'P'\)/g)).toHaveLength(2)
     expect(m073).not.toMatch(/tb_sync_api_key/)
     expect(fs.existsSync(path.join(SRC, 'migrations', 'sql', '072_default_categories.sql'))).toBe(false)
+    // 081 (D-OI10 — setes-api:PROD.E10.P1): todo DDL guardado por information_schema; backfill L → D e P → W; CHECKs com o domínio novo;
+    // o MODIFY repete a colação APLICADA (lida, nunca presumida — revisar-ddl). Semântica no motor: scripts/prove-081-institution-source-kind-w-d.ts
+    const m081 = read(path.join(SRC, 'migrations', 'sql', '081_institution_source_kind_w_d.sql'))
+    expect(m081.match(/PREPARE stmt_\w+ FROM @(ddl|dml)/g)).toHaveLength(4)
+    expect(m081).not.toMatch(/^ALTER TABLE/m)
+    expect(m081.match(/information_schema\.CHECK_CONSTRAINTS/g)).toHaveLength(4)
+    expect(m081).toMatch(/ADD CONSTRAINT `ck_institution_transition_author` CHECK \(\(`transition_ended_at` IS NULL AND `transition_ended_by` IS NULL AND `transition_end_reason` IS NULL\) OR \(`transition_ended_at` IS NOT NULL AND `transition_ended_by` IS NOT NULL\)\)/)   // D-PR75
+    expect(m081).toMatch(/SET `source_kind` = IF\(`source_kind` COLLATE utf8mb4_bin = ''L'', ''D'', ''W''\) WHERE `source_kind` COLLATE utf8mb4_bin IN \(''L'', ''P''\)/)
+    expect(m081).toMatch(/SET @dml := IF\(@to_convert > 0,/)                                       // sem UPDATE no re-run (gate socrático M1)
+    expect(m081).not.toMatch(/^UPDATE/m)
+    expect(m081).toMatch(/ADD CONSTRAINT IF NOT EXISTS `ck_institution_source_kind` CHECK \(`source_kind` COLLATE utf8mb4_bin IN \(''W'', ''D''\)\)/)
+    expect(m081).toMatch(/ADD CONSTRAINT IF NOT EXISTS `ck_institution_transition_ended` CHECK \(`transition_ended_at` IS NULL OR `source_kind` COLLATE utf8mb4_bin <> ''D''\)/)
+    expect(m081).toMatch(/SELECT COLLATION_NAME FROM information_schema\.COLUMNS/)
+    expect(m081).not.toMatch(/NOT NULL DEFAULT/)
   })
 
   it('[RESISTIU] o boot confere a coluna, os CHECKs pelo NOME e sonda o motor (PADROES §11 regra 11) DEPOIS das migrations', () => {
@@ -191,8 +208,10 @@ describe('o fato é MONOTÔNICO e só o ato o muda — cercas no código do mód
     expect(piece).toMatch(/CK_INSTITUTION_SOURCE_KIND = 'ck_institution_source_kind'/)
     expect(piece).toMatch(/CK_INSTITUTION_TRANSITION_ENDED = 'ck_institution_transition_ended'/)
     expect(piece).toMatch(/refuses\('X', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)            // fora do domínio
-    expect(piece).toMatch(/refuses\('l', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)            // a minúscula de um válido
-    expect(piece).toMatch(/refuses\('L', 'NOW\(\)', true, CK_INSTITUTION_TRANSITION_ENDED\)/)     // "L com data" (com autor e motivo — isola a 072)
+    expect(piece).toMatch(/refuses\('d', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)            // a minúscula de um válido
+    expect(piece).toMatch(/refuses\('L', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)            // a letra antiga: a 081 rodou (D-OI10)
+    expect(piece).toMatch(/refuses\('P', 'NULL', false, CK_INSTITUTION_SOURCE_KIND\)/)
+    expect(piece).toMatch(/refuses\('D', 'NOW\(\)', true, CK_INSTITUTION_TRANSITION_ENDED\)/)     // "D com data" (com autor e motivo — isola a 072)
     expect(piece).toMatch(/refuses\('W', 'NOW\(\)', false, CK_INSTITUTION_TRANSITION_AUTHOR\)/)   // o ato sem autor nem motivo (079 — D-PR53)
     expect(piece).toMatch(/BOOT_PROBE_ID = -1/)                                                   // PK própria — nunca a linha da Setes
     expect(piece).not.toMatch(/UPDATE setes_central\.tb_institution/)

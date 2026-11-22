@@ -15,9 +15,10 @@ export interface SessionContext {
    * (herança por PK: tb_user.id = tb_entity.id = tb_salesman.id — decisão 15).
    */
   isSalesman: boolean
-  /** D-PR47 (Rodada 7 de produtos): a ORIGEM DOS CADASTROS do estabelecimento (W nativo web · L transição do desktop legado · P PDV) e
-   *  quem é o DONO do catálogo de base derivado dela — o app trava o cadastro em L e libera só o enquadramento fiscal do serviço
-   *  (D-PR45). UX apenas: quem recusa é a `catalogOwnerGuard` (409 CATALOG_LEGACY_OWNED). null = fato ilegível (institution excluída). */
+  /** D-PR47 revista pela D-OI10: a ORIGEM DOS CADASTROS do estabelecimento (W a web é dona · D o ERP Desktop é dono) e o DONO do
+   *  catálogo de base derivado dela ('web' | 'desktop' — D-PR70) — o app ORIENTA o usuário quando o dono é o ERP Desktop.
+   *  UX apenas: nada recusa (D-PR77 — a guarda saiu).
+   *  null = fato ilegível (institution excluída). */
   sourceKind:   SourceKind | null
   catalogOwner: CatalogOwner | null
 }

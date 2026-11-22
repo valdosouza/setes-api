@@ -1,12 +1,14 @@
 /// <reference types="jest" />
-// GATE ADVERSARIAL — Rodada 7 do cadastro de produtos (2026-10-20; skill testar-adversarial.md; prompt_modulo_products.md "Rodada 7").
-// Alvo: os DOIS atos do cadastro de Institutions sobre o sincronizador — o interruptor `PUT /api/institutions/:id/sync-api-key/active`
-// (D-PR43 + D-PR48 item 1: só PAUSA, reversível, não decide dono) e o ato ÚNICO e IRREVERSÍVEL `POST /api/institutions/:id/
-// end-legacy-transition` (D-PR48/D-PR49: L → W ou L → P) — e o efeito deles na guarda do dono do catálogo (D-PR47), pelo app REAL
-// (auth RS256 de teste → feature flag → rate limit → router → superGuard → controller → service → repository), com o banco num MODELO em
-// memória (fato por institution, chaves, categorias) e o serviço do merchandise MOCKADO (o que se prova é se a ESCRITA chega).
-// `it('[RESISTIU] …')` = o ataque foi barrado / a promessa vale; `it('[ACHADO] …')` = fixa o comportamento observado que vira questão.
-// Rodada 6 → 7: caíram a "Serviços" do desligar, o 409 SYNC_KEY_WEB_ROWS do religar e a reconferência na transação (não há religar).
+// GATE ADVERSARIAL — Rodada 7 do cadastro de produtos (2026-10-20; skill testar-adversarial.md; prompt_modulo_products.md "Rodada 7"),
+// revisto pelas Rodadas 10 e 11 (2026-11-22 — D-OI10, D-PR70, D-PR73, D-PR75, D-PR76, D-PR77).
+// Alvo: os DOIS atos do cadastro de Institutions sobre a origem dos cadastros — o interruptor `PUT /api/institutions/:id/sync-api-key/
+// active` (D-PR43 + D-PR48 item 1: só PAUSA, reversível, não decide dono) e a TROCA D → W no próprio `PUT /api/institutions/:id` com
+// `sourceKind: 'W'` (D-PR73/D-PR76: só com a chave do sincronizador BLOQUEADA; grava data e autor, sem motivo — D-PR75; cria as
+// categorias padrão que faltarem; nunca volta a D). O ato "encerrar a transição" e as rotas end-legacy-transition/end-desktop-transition
+// SAÍRAM (D-PR76 — 404); a guarda do dono do catálogo também (D-PR77 — a escrita do catálogo passa em D e em W).
+// Pelo app REAL (auth RS256 de teste → feature flag → rate limit → router → superGuard → controller → service → repository), com o banco
+// num MODELO em memória (fato por institution, chaves, categorias), a cadeia fiscal dublada e o serviço do merchandise MOCKADO (o que
+// se prova é se a ESCRITA chega). `it('[RESISTIU] …')` = o ataque foi barrado / a promessa vale.
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
 
@@ -36,6 +38,13 @@ jest.mock('../modules/merchandise/merchandise.service', () => ({
   createPackage: jest.fn().mockResolvedValue({ id: 902, reused: false }),
 }))
 
+// a cadeia fiscal do PUT não é o alvo: grava "nada" (o que se prova é a troca da origem na MESMA transação)
+jest.mock('../shared/entity', () => ({
+  ...jest.requireActual('../shared/entity'),
+  getEntityFiscalFull: jest.fn(async (id: number) => ({ id, nickTrade: 'SETES' })),
+  saveEntityFiscalChain: jest.fn(async (_c: unknown, id: number) => ({ id })),
+}))
+
 import pool from '../shared/db/connection'
 import logger from '../shared/logger/logger'
 import * as merch from '../modules/merchandise/merchandise.service'
@@ -47,9 +56,9 @@ const MERCH_IFACE = 40
 const KEY = 'k'.repeat(48)
 
 // ---- modelo do banco (só o que o delta toca) ----
-const NOW = new Date(Date.UTC(2026, 9, 20, 12, 0, 0))
-type Inst = { schemaName: string; kind: 'W' | 'L' | 'P'; endedAt: Date | null }
-type Key = { active: 'S' | 'N'; deleted: 'S' | 'N' }
+const NOW = new Date(Date.UTC(2026, 10, 22, 12, 0, 0))
+type Inst = { schemaName: string; kind: 'W' | 'D'; endedAt: Date | null; by: number | null }
+type Key = { active: 'S' | 'N'; deleted: 'S' | 'N'; pausedSecondsAgo?: number }   // relógio simulado da pausa (D-PR78)
 type Cat = { id: number; kind: 'P' | 'S'; deleted: 'S' | 'N'; active: 'S' | 'N' }
 let institutions: Map<number, Inst>
 let keys: Map<number, Key[]>        // institution → chaves (sem UNIQUE por institution no DDL real)
@@ -76,20 +85,30 @@ function db(sql: string, params: any[] = []): any {
   if (/SELECT source_kind AS sourceKind FROM setes_central\.tb_institution WHERE id = \? AND deleted = 'N'/.test(s)) {
     const i = institutions.get(Number(params[0])); return [i ? [{ sourceKind: i.kind }] : []]
   }
+  // a troca do PUT: o fato travado (2º statement, depois da trava da institution)
+  if (/SELECT schema_name AS schemaName, source_kind AS sourceKind FROM setes_central\.tb_institution\s+WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(s)) {
+    const i = institutions.get(Number(params[0])); return [i ? [{ schemaName: i.schemaName, sourceKind: i.kind }] : []]
+  }
   if (/SELECT schema_name AS schemaName, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt/.test(s)) {
     const i = institutions.get(Number(params[0]))
     return [i ? [{ schemaName: i.schemaName, sourceKind: i.kind, transitionEndedAt: i.endedAt }] : []]
   }
-  if (/SELECT i\.schema_name AS schemaName, i\.active, i\.source_kind AS sourceKind, i\.transition_ended_at/.test(s)) {
-    const i = institutions.get(Number(params[0]))
-    return [i ? [{ schemaName: i.schemaName, active: 'S', sourceKind: i.kind, transitionEndedAt: i.endedAt }] : []]
-  }
-  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?/.test(s)) {
-    instUpdates.push(params)                                  // [destino, autor, motivo, id] — as quatro marcas no MESMO UPDATE (D-PR53)
-    const i = institutions.get(Number(params[3]))
-    if (!i || i.kind !== 'L' || i.endedAt) return [{ affectedRows: 0 }]
-    i.kind = params[0]; i.endedAt = NOW
+  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = 'W', transition_ended_at = NOW\(\), transition_ended_by = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'D' AND transition_ended_at IS NULL/.test(s)) {
+    instUpdates.push(params)                                  // [autor, id] — data e autor no MESMO UPDATE condicionado, sem motivo (D-PR75)
+    const i = institutions.get(Number(params[1]))
+    if (!i || i.kind !== 'D' || i.endedAt) return [{ affectedRows: 0 }]
+    i.kind = 'W'; i.endedAt = NOW; i.by = params[0]
     return [{ affectedRows: 1 }]
+  }
+  if (/UPDATE setes_central\.tb_institution SET active = \?/.test(s)) return [{ affectedRows: 1 }]
+  // a troca do PUT: chave ATIVA trava a troca (D-PR73) — lida FOR UPDATE, nunca escrita
+  if (/SELECT id FROM setes_central\.tb_sync_api_key\s+WHERE tb_institution_id = \? AND deleted = 'N' AND active = 'S' FOR UPDATE/.test(s)) {
+    return [(keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N' && k.active === 'S').map((_k, i) => ({ id: i + 1 }))]
+  }
+  // D-PR78: há quanto tempo a chave está bloqueada (a pausa grava updated_at) — null = nenhuma chave bloqueada
+  if (/SELECT TIMESTAMPDIFF\(SECOND, MAX\(updated_at\), NOW\(\)\) AS pausedFor FROM setes_central\.tb_sync_api_key/.test(s)) {
+    const paused = (keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N' && k.active === 'N')
+    return [[{ pausedFor: paused.length === 0 ? null : Math.min(...paused.map(k => k.pausedSecondsAgo ?? 3600)) }]]
   }
   if (/FROM setes_central\.tb_sync_api_key\s+WHERE tb_institution_id = \? AND deleted = 'N' FOR UPDATE/.test(s)) {
     return [(keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N').map((k, i) => ({ id: i + 1, active: k.active }))]
@@ -98,13 +117,7 @@ function db(sql: string, params: any[] = []): any {
     keyUpdates.push(params)
     const [active, inst] = params
     const hit = (keys.get(Number(inst)) ?? []).filter(k => k.deleted === 'N' && k.active !== active)
-    hit.forEach(k => { k.active = active })
-    return [{ affectedRows: hit.length }]
-  }
-  if (/UPDATE setes_central\.tb_sync_api_key SET active = 'N', updated_at = NOW\(\)/.test(s)) {
-    keyUpdates.push(['N(ato)', params[0]])
-    const hit = (keys.get(Number(params[0])) ?? []).filter(k => k.deleted === 'N' && k.active === 'S')
-    hit.forEach(k => { k.active = 'N' })
+    hit.forEach(k => { k.active = active; k.pausedSecondsAgo = 0 })
     return [{ affectedRows: hit.length }]
   }
   if (/api_key AS apiKey/.test(s)) {
@@ -117,7 +130,7 @@ function db(sql: string, params: any[] = []): any {
     keys.set(inst, [...(keys.get(inst) ?? []), { active: 'S', deleted: 'N' }])
     return [{}]
   }
-  // @shared/category-kind (o ato "encerrar a transição")
+  // @shared/category-kind (a troca D → W cria as categorias padrão que faltarem)
   if (/tb_category\s+WHERE tb_institution_id = \? AND kind = \? AND deleted = 'N' AND active = 'S' LIMIT 1 FOR UPDATE/.test(s)) {
     return [(cats.get(Number(params[0])) ?? []).filter(c => c.kind === params[1] && c.deleted === 'N' && c.active === 'S').slice(0, 1).map(c => ({ id: c.id }))]
   }
@@ -164,24 +177,36 @@ function routeDb(): void {
 }
 
 const SUPER = { institutionId: 1, userId: 1, role: 'super', schemaName: 'setes_setes' }
+const SUPER_B = { institutionId: 1, userId: 3, role: 'super', schemaName: 'setes_setes' }   // outro Super da Setes
 const SETES_ADMIN = { institutionId: 1, userId: 2, role: 'admin', schemaName: 'setes_setes' }
 const ADMIN2 = { institutionId: 2, userId: 9, role: 'admin', schemaName: 'setes_x' }
 const USER2 = { institutionId: 2, userId: 10, role: 'user', schemaName: 'setes_x' }
 const FAKE_SUPER2 = { institutionId: 2, userId: 11, role: 'super', schemaName: 'setes_x' }   // "super" fora da Setes
 const bearer = (p: object) => `Bearer ${testToken(p)}`
 const switchUrl = (id: string | number) => `/api/institutions/${id}/sync-api-key/active`
-const endUrl = (id: string | number) => `/api/institutions/${id}/end-legacy-transition`
-const end = (id: number | string, body: object, who: object = SUPER) => request(app).post(endUrl(id)).set('Authorization', bearer(who)).send(body)
+// corpo do PUT que passa no institutionUpdateDto (a cadeia fiscal é dublada)
+const BODY = {
+  entity: { nameCompany: 'SETES LTDA', nickTrade: 'SETES' }, personType: 'J', company: { cnpj: '11222333000181' },
+  addresses: [], phones: [], socialMedia: [],
+}
+const put = (id: number | string, extra: object, who: object = SUPER) =>
+  request(app).put(`/api/institutions/${id}`).set('Authorization', bearer(who)).send({ ...BODY, ...extra })
+const toWeb = (id: number | string = 1, who: object = SUPER) => put(id, { sourceKind: 'W' }, who)
+const blockKey = (id: number = 1) => request(app).put(switchUrl(id)).set('Authorization', bearer(SUPER)).send({ active: 'N' })
+/** O relógio passa do cache do setes-sync (5 min — D-PR78): as chaves bloqueadas ficam 'velhas'. */
+const ageKeys = (seconds = 301) => { for (const list of keys.values()) for (const k of list) if (k.active === 'N') k.pausedSecondsAgo = seconds }
 const brandWrite = (who: object = SETES_ADMIN) => request(app).post('/api/merchandise/brands').set('Authorization', bearer(who)).send({ description: 'MARCA' })
+const txSql = (c: any): string[] => c.query.mock.calls.map((x: any[]) => String(x[0]))
+const trocaTx = () => txConns.find(c => txSql(c).some(s => /SELECT schema_name AS schemaName, source_kind AS sourceKind FROM/.test(s)))
 
 beforeEach(() => {
   jest.clearAllMocks()
   resetPrivilegeCache()
-  // fato do dev (2026-10-20): a Setes é L (chave ativa); 2 = cliente nativo web; 3 = cliente PDV
-  institutions = new Map([[1, { schemaName: 'setes_setes', kind: 'L', endedAt: null }], [2, { schemaName: 'setes_x', kind: 'W', endedAt: null }],
-    [3, { schemaName: 'setes_pdv', kind: 'P', endedAt: null }]])
+  // fato do dev (2026-11-22): a Setes é D (chave ativa); 2 = cliente nativo web; 3 = outro cliente do ERP Desktop (chave ativa)
+  institutions = new Map([[1, { schemaName: 'setes_setes', kind: 'D', endedAt: null, by: null }],
+    [2, { schemaName: 'setes_x', kind: 'W', endedAt: null, by: null }], [3, { schemaName: 'setes_y', kind: 'D', endedAt: null, by: null }]])
   keys = new Map([[1, [{ active: 'S', deleted: 'N' }]], [3, [{ active: 'S', deleted: 'N' }]]])
-  // dev: só 2 categorias na Setes, ambas kind 'P' (ids 8 e 9 do gerador do legado); nenhuma 'S'
+  // dev: só 2 categorias na Setes, ambas kind 'P' (ids 8 e 9 do gerador do ERP Desktop); nenhuma 'S'
   cats = new Map([[1, [{ id: 8, kind: 'P', deleted: 'N', active: 'S' }, { id: 9, kind: 'P', deleted: 'N', active: 'S' }]]])
   keyUpdates = []; instUpdates = []
   failOn = null; deadlockOnce = false
@@ -189,43 +214,63 @@ beforeEach(() => {
   routeDb()
 })
 
-describe('quem alcança os dois atos (superGuard do módulo)', () => {
-  it('[RESISTIU] sem token 401; usuário, admin do PRÓPRIO estabelecimento, admin da Setes e "super" fora da Setes = 403 — nada chega ao UPDATE (interruptor E ato)', async () => {
-    const anon = await Promise.all([request(app).put(switchUrl(1)).send({ active: 'N' }), request(app).post(endUrl(1)).send({ destination: 'W', reason: 'sem token' })])
+describe('quem alcança o interruptor e a troca (superGuard do módulo)', () => {
+  it('[RESISTIU] sem token 401; usuário, admin do PRÓPRIO estabelecimento, admin da Setes e "super" fora da Setes = 403 — nada chega ao UPDATE (interruptor E troca)', async () => {
+    const anon = await Promise.all([
+      request(app).put(switchUrl(1)).send({ active: 'N' }), request(app).put('/api/institutions/1').send({ ...BODY, sourceKind: 'W' })])
     expect(anon.map(r => r.status)).toEqual([401, 401])
     for (const [who, target] of [[USER2, 2], [ADMIN2, 2], [ADMIN2, 1], [SETES_ADMIN, 1], [FAKE_SUPER2, 1]] as const) {
       const a = await request(app).put(switchUrl(target)).set('Authorization', bearer(who)).send({ active: 'N' })
-      const b = await end(target, { destination: 'W', reason: 'tentativa' }, who)
+      const b = await toWeb(target, who)
       expect([who.role, who.institutionId, target, a.status, b.status]).toEqual([who.role, who.institutionId, target, 403, 403])
     }
     expect(keyUpdates).toEqual([]); expect(instUpdates).toEqual([])
-    expect(institutions.get(1)!.kind).toBe('L')
+    expect(institutions.get(1)!.kind).toBe('D')
   })
 
-  it('[RESISTIU] forma da URL (caixa, barra final, barra dupla) não contorna o superGuard para o admin', async () => {
+  it('[RESISTIU] forma da URL (caixa, barra final, barra dupla) não contorna o superGuard para o admin — interruptor, PUT e as rotas velhas do ato', async () => {
     const auth = bearer(SETES_ADMIN)
     const res = await Promise.all([
       request(app).put('/api/INSTITUTIONS/1/SYNC-API-KEY/ACTIVE').set('Authorization', auth).send({ active: 'N' }),
       request(app).put('/api/institutions/1/sync-api-key/active/').set('Authorization', auth).send({ active: 'N' }),
+      request(app).put('/api/INSTITUTIONS/1').set('Authorization', auth).send({ ...BODY, sourceKind: 'W' }),
+      request(app).put('/api/institutions//1/').set('Authorization', auth).send({ ...BODY, sourceKind: 'W' }),
       request(app).post('/api/INSTITUTIONS/1/END-LEGACY-TRANSITION').set('Authorization', auth).send({ destination: 'W', reason: 'caixa alta' }),
-      request(app).post('/api/institutions//1/end-legacy-transition').set('Authorization', auth).send({ destination: 'W', reason: 'barra' }),
+      request(app).post('/api/institutions//1/end-desktop-transition').set('Authorization', auth).send({ reason: 'barra' }),
     ])
     for (const r of res) expect([403, 404]).toContain(r.status)
     expect(keyUpdates).toEqual([]); expect(instUpdates).toEqual([])
+    expect(institutions.get(1)!.kind).toBe('D')
   })
 
-  it('[RESISTIU] método errado e override por cabeçalho não acionam nenhum dos atos — nem para o super', async () => {
+  it('[RESISTIU] método errado e override por cabeçalho não acionam o interruptor nem a troca — nem para o super', async () => {
     const auth = bearer(SUPER)
     const res = await Promise.all([
       request(app).post(switchUrl(1)).set('Authorization', auth).send({ active: 'N' }),
       request(app).patch(switchUrl(1)).set('Authorization', auth).send({ active: 'N' }),
-      request(app).put(endUrl(1)).set('Authorization', auth).send({ destination: 'W', reason: 'put em vez de post' }),
-      request(app).get(endUrl(1)).set('Authorization', auth),
-      request(app).put(switchUrl(1)).set('Authorization', auth).set('X-HTTP-Method-Override', 'POST').send({ destination: 'W', reason: 'override' }),
+      request(app).patch('/api/institutions/1').set('Authorization', auth).send({ ...BODY, sourceKind: 'W' }),
+      request(app).post('/api/institutions/1').set('Authorization', auth).set('X-HTTP-Method-Override', 'PUT').send({ ...BODY, sourceKind: 'W' }),
+      request(app).put(switchUrl(1)).set('Authorization', auth).set('X-HTTP-Method-Override', 'POST').send({ sourceKind: 'W' }),
     ])
     expect(res.map(r => r.status)).toEqual([404, 404, 404, 404, 400])      // o último é o PUT do interruptor sem `active` = 400
     expect(instUpdates).toEqual([])
-    expect(institutions.get(1)!.kind).toBe('L')
+    expect(institutions.get(1)!.kind).toBe('D')
+  })
+
+  it('[RESISTIU] D-PR76: o ato saiu — end-legacy-transition e end-desktop-transition = 404 para o super (POST, PUT, GET; caixa alta e barra dupla); nada gravado', async () => {
+    const auth = bearer(SUPER)
+    const res = await Promise.all([
+      request(app).post('/api/institutions/1/end-legacy-transition').set('Authorization', auth).send({ destination: 'W', reason: 'rota velha' }),
+      request(app).post('/api/institutions/1/end-desktop-transition').set('Authorization', auth).send({ reason: 'rota velha' }),
+      request(app).post('/api/INSTITUTIONS/1/END-DESKTOP-TRANSITION').set('Authorization', auth).send({ reason: 'caixa alta' }),
+      request(app).post('/api/institutions//1/end-legacy-transition').set('Authorization', auth).send({ destination: 'W', reason: 'barra dupla' }),
+      request(app).put('/api/institutions/1/end-desktop-transition').set('Authorization', auth).send({ reason: 'put' }),
+      request(app).get('/api/institutions/1/end-legacy-transition').set('Authorization', auth),
+    ])
+    expect(res.map(r => r.status)).toEqual([404, 404, 404, 404, 404, 404])
+    expect(instUpdates).toEqual([]); expect(keyUpdates).toEqual([])
+    expect(institutions.get(1)).toMatchObject({ kind: 'D', endedAt: null })
+    expect(keys.get(1)![0].active).toBe('S')
   })
 })
 
@@ -241,25 +286,26 @@ describe('bordas do corpo e do id (super)', () => {
     expect(keyUpdates).toEqual([['N', 1, 'N']])
   })
 
-  it('[RESISTIU] ato: destino fora de W/P (inclusive L e minúscula), motivo ausente/curto/branco, corpo-lista = 400 sem tocar no fato', async () => {
-    const bodies: any[] = [{ destination: 'L', reason: 'voltar ao legado' }, { destination: 'w', reason: 'minúscula' }, { destination: 'W' },
-      { destination: 'W', reason: '   ' }, { destination: 'W', reason: 'abc' }, { destination: 'W', reason: 'x'.repeat(256) }, [{ destination: 'W', reason: 'lista' }], {}]
-    for (const b of bodies) {
-      const r = await end(1, b)
-      expect([JSON.stringify(b).slice(0, 40), r.status]).toEqual([JSON.stringify(b).slice(0, 40), 400])
+  it("[RESISTIU] troca: sourceKind fora de W/D (as letras antigas 'L' e 'P' — D-OI10 —, minúscula, espaço, lista, null, número) = 400 sem tocar no fato, nem com a chave bloqueada", async () => {
+    await blockKey()
+    for (const sk of ['L', 'P', 'w', 'd', ' W', ['W'], null, 0] as any[]) {
+      const r = await put(1, { sourceKind: sk })
+      expect([JSON.stringify(sk), r.status]).toEqual([JSON.stringify(sk), 400])
     }
     expect(instUpdates).toEqual([])
-    expect(institutions.get(1)).toMatchObject({ kind: 'L', endedAt: null })
+    expect(institutions.get(1)).toMatchObject({ kind: 'D', endedAt: null, by: null })
+    expect(cats.get(1)!.map(c => c.id)).toEqual([8, 9])
   })
 
-  it('[RESISTIU] id inválido = 400; estabelecimento inexistente = 404 (nos dois atos); existente sem chave = 404 só no interruptor', async () => {
+  it('[RESISTIU] id inválido = 400; estabelecimento inexistente = 404 (interruptor e troca); existente sem chave = 404 só no interruptor', async () => {
     const bad = await Promise.all(['abc', '-1', '1.5'].flatMap(id => [
-      request(app).put(switchUrl(id)).set('Authorization', bearer(SUPER)).send({ active: 'N' }), end(id, { destination: 'W', reason: 'id ruim' })]))
+      request(app).put(switchUrl(id)).set('Authorization', bearer(SUPER)).send({ active: 'N' }), toWeb(id)]))
     expect(bad.map(r => r.status)).toEqual([400, 400, 400, 400, 400, 400])
-    const missing = await Promise.all([request(app).put(switchUrl(999)).set('Authorization', bearer(SUPER)).send({ active: 'N' }), end(999, { destination: 'W', reason: 'não existe' })])
+    const missing = await Promise.all([request(app).put(switchUrl(999)).set('Authorization', bearer(SUPER)).send({ active: 'N' }), toWeb(999)])
     expect(missing.map(r => r.status)).toEqual([404, 404])
     const noKey = await request(app).put(switchUrl(2)).set('Authorization', bearer(SUPER)).send({ active: 'N' })
     expect([noKey.status, noKey.body.code]).toEqual([404, 'SYNC_KEY_MISSING'])
+    expect(instUpdates).toEqual([])
   })
 })
 
@@ -279,16 +325,17 @@ describe('D-PR48 item 1 — o interruptor é PAUSA: reversível, idempotente, e 
     expect(cats.get(1)!.map(x => x.id)).toEqual([8, 9])
   })
 
-  it('[RESISTIU] pausar NÃO libera a escrita do catálogo em L (o dono é o fato, não a chave) — antes 409, pausado 409, retomado 409', async () => {
+  it('[RESISTIU] o interruptor não mexe no dono nem na escrita do catálogo: em D a escrita passa antes, pausada e retomada (sem guarda — D-PR77); o fato segue D', async () => {
     const sup = bearer(SUPER)
     const before = await brandWrite()
     await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'N' })
     const paused = await brandWrite()
     await request(app).put(switchUrl(1)).set('Authorization', sup).send({ active: 'S' })
     const resumed = await brandWrite()
-    expect([before.status, paused.status, resumed.status].concat([before.body.code, paused.body.code, resumed.body.code]))
-      .toEqual([409, 409, 409, 'CATALOG_LEGACY_OWNED', 'CATALOG_LEGACY_OWNED', 'CATALOG_LEGACY_OWNED'])
-    expect((merch.createBrand as jest.Mock).mock.calls).toHaveLength(0)
+    expect([before.status, paused.status, resumed.status]).toEqual([201, 201, 201])
+    expect((merch.createBrand as jest.Mock).mock.calls).toHaveLength(3)
+    expect(institutions.get(1)).toMatchObject({ kind: 'D', endedAt: null })
+    expect(instUpdates).toEqual([])
   })
 
   it('[RESISTIU] chave soft-deletada não é retomada pelo interruptor (404); duas chaves vivas: pausa TODAS; o log leva autor e estabelecimento — nunca a chave', async () => {
@@ -303,7 +350,7 @@ describe('D-PR48 item 1 — o interruptor é PAUSA: reversível, idempotente, e 
     expect(JSON.stringify((logger.info as jest.Mock).mock.calls)).not.toContain(KEY)
   })
 
-  it('[RESISTIU] retomar em W = 409 SYNC_KEY_NOT_FOR_SOURCE (nativo web não tem sincronizador); gerar chave em W = 409 pelo mesmo código; em P gera', async () => {
+  it('[RESISTIU] retomar em W = 409 SYNC_KEY_NOT_FOR_SOURCE (nativo web não tem sincronizador); gerar chave em W = 409 pelo mesmo código; em D gera', async () => {
     keys.set(2, [{ active: 'N', deleted: 'N' }])
     const resume = await request(app).put(switchUrl(2)).set('Authorization', bearer(SUPER)).send({ active: 'S' })
     expect([resume.status, resume.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
@@ -313,41 +360,59 @@ describe('D-PR48 item 1 — o interruptor é PAUSA: reversível, idempotente, e 
     expect([gen.status, gen.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
     expect(keys.has(2)).toBe(false)
     keys.delete(3)
-    const pdv = await request(app).post('/api/institutions/3/sync-api-key').set('Authorization', bearer(SUPER)).send({})
-    expect(pdv.status).toBe(201)
+    const desktop = await request(app).post('/api/institutions/3/sync-api-key').set('Authorization', bearer(SUPER)).send({})
+    expect(desktop.status).toBe(201)
     expect(keys.get(3)).toEqual([{ active: 'S', deleted: 'N' }])
   })
 })
 
-describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível, com destino', () => {
-  it('[RESISTIU] L → W: o fato vira W com a data, a chave fica INATIVA, "Produtos" (já havia P viva: nada) e "Serviços" (10) nascem; a resposta diz tudo; log com autor e motivo', async () => {
-    const r = await end(1, { destination: 'W', reason: 'servidor desktop desligado em 20/10' })
+describe('D-PR73/D-PR75/D-PR76 — virar Web é a TROCA D → W no PUT do estabelecimento: só com a chave bloqueada, irreversível', () => {
+  it('[RESISTIU] D-PR78: logo depois de bloquear a chave (dentro do cache de 5 min do setes-sync) = 409 SOURCE_KIND_SYNC_KEY_ACTIVE com o tempo que falta; passado o cache, a troca passa', async () => {
+    await blockKey()
+    const early = await toWeb()
+    expect([early.status, early.body.code]).toEqual([409, 'SOURCE_KIND_SYNC_KEY_ACTIVE'])
+    expect(early.body.fields).toEqual([{ field: 'sourceKind', message: 'aguarde 300 s' }])
+    expect(institutions.get(1)).toMatchObject({ kind: 'D', endedAt: null })
+    ageKeys(299)
+    expect((await toWeb()).status).toBe(409)
+    ageKeys(300)
+    expect((await toWeb()).status).toBe(200)
+    expect(institutions.get(1)!.kind).toBe('W')
+  })
+
+  it('[RESISTIU] D → W com a chave bloqueada: 200; o fato vira W com data e autor, SEM motivo; "Produtos" (já havia P viva: nada) e "Serviços" (10) nascem; a chave NÃO é tocada; log com autor', async () => {
+    await blockKey(); ageKeys()
+    const r = await toWeb()
     expect(r.status).toBe(200)
-    expect(r.body.data).toEqual({ sourceKind: 'W', transitionEndedAt: NOW.toISOString(), defaultCategories: { P: null, S: 10 }, syncKeysInactivated: 1 })
-    expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'W', endedAt: NOW })
+    expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'W', endedAt: NOW, by: 1 })
+    expect(instUpdates).toEqual([[1, 1]])                                                   // [autor = userId do SUPER, id] (D-PR53/D-PR75)
+    expect(trocaTx() && txSql(trocaTx()).filter(s => /SET source_kind/.test(s)).every(s => !/transition_end_reason/.test(s))).toBe(true)
+    expect(cats.get(1)!.map(c => [c.id, c.kind])).toEqual([[8, 'P'], [9, 'P'], [10, 'S']])
     expect(keys.get(1)![0].active).toBe('N')
-    expect(cats.get(1)!.find(c => c.id === 10)).toMatchObject({ kind: 'S', active: 'S' })
-    expect(instUpdates).toEqual([['W', 1, 'servidor desktop desligado em 20/10', 1]])   // autor = userId do SUPER (D-PR53)
-    const log = (logger.info as jest.Mock).mock.calls.find(c => /ENCERRADA/.test(c[0]))
-    expect(log?.[1]).toMatchObject({ institutionId: 1, destination: 'W', reason: 'servidor desktop desligado em 20/10', actorUserId: 1, syncKeysInactivated: 1 })
+    expect(keyUpdates).toEqual([['N', 1, 'N']])                                             // só o bloqueio do interruptor; a troca não escreve na chave
+    const log = (logger.info as jest.Mock).mock.calls.find(c => /TROCADA/.test(c[0]))
+    expect(log?.[1]).toEqual({ institutionId: 1, actorUserId: 1, defaultCategories: { P: null, S: 10 } })
     expect(JSON.stringify((logger.info as jest.Mock).mock.calls)).not.toContain(KEY)
   })
 
-  it('[RESISTIU] L → P: barreira INTERINA (A-PR5/Q-PR62) — 409 LEGACY_TRANSITION_DESTINATION_PENDING, nada gravado, nenhuma transação aberta (o desktop ainda autentica pela chave viva: dois escritores)', async () => {
-    const r = await end(1, { destination: 'P', reason: 'servidor desktop desativado; ficam os PDVs' })
-    expect([r.status, r.body.code]).toEqual([409, 'LEGACY_TRANSITION_DESTINATION_PENDING'])
-    expect(r.body.fields).toEqual([{ field: 'destination', message: 'destinos abertos: W' }])
-    expect(institutions.get(1)).toMatchObject({ kind: 'L', endedAt: null })
+  it('[RESISTIU] D → W com a chave ATIVA = 409 SOURCE_KIND_SYNC_KEY_ACTIVE: nada gravado (fato, autor, categorias), a transação desfeita, a chave segue S', async () => {
+    const r = await toWeb()
+    expect([r.status, r.body.code]).toEqual([409, 'SOURCE_KIND_SYNC_KEY_ACTIVE'])
+    expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'D', endedAt: null, by: null })
+    expect(instUpdates).toEqual([])
+    expect(cats.get(1)!.map(c => c.id)).toEqual([8, 9])
     expect(keys.get(1)![0].active).toBe('S')
-    expect(instUpdates).toEqual([]); expect(keyUpdates).toEqual([])
-    expect(txConns).toHaveLength(0)
+    expect(trocaTx().rollback).toHaveBeenCalled()
+    expect(trocaTx().commit).not.toHaveBeenCalled()
+    expect((logger.info as jest.Mock).mock.calls.some(c => /TROCADA/.test(c[0]))).toBe(false)
   })
 
-  it('[RESISTIU] depois do ato a web escreve NA HORA (sem cache) e o interruptor em W recusa retomar: a chave de L encerrado nunca reativa', async () => {
+  it('[RESISTIU] depois da troca o interruptor em W recusa retomar e a geração recusa: a chave de quem virou Web nunca reativa; a escrita do catálogo segue passando', async () => {
+    await blockKey(); ageKeys()
     const before = await brandWrite()
-    await end(1, { destination: 'W', reason: 'encerrando a transição' })
+    await toWeb()
     const after = await brandWrite()
-    expect([before.status, after.status]).toEqual([409, 201])
+    expect([before.status, after.status]).toEqual([201, 201])
     const resume = await request(app).put(switchUrl(1)).set('Authorization', bearer(SUPER)).send({ active: 'S' })
     expect([resume.status, resume.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
     expect(keys.get(1)![0].active).toBe('N')
@@ -355,61 +420,81 @@ describe('D-PR48/D-PR49 — "encerrar a transição": ato único e irreversível
     expect([gen.status, gen.body.code]).toEqual([409, 'SYNC_KEY_NOT_FOR_SOURCE'])
   })
 
-  it('[RESISTIU] irreversível: repetir o ato (W → W de novo) = 409 LEGACY_TRANSITION_NOT_APPLICABLE "já foi encerrada" (instante em fields[], não na prosa); W nativo = 409 "só vale para L"; nada gravado', async () => {
-    await end(1, { destination: 'W', reason: 'primeira vez' })
-    const again = await end(1, { destination: 'W', reason: 'segunda vez' })
-    expect([again.status, again.body.code]).toEqual([409, 'LEGACY_TRANSITION_NOT_APPLICABLE'])
-    expect(again.body.error).toMatch(/já foi encerrada/)
-    expect(again.body.error).not.toMatch(/\d{4}-\d{2}-\d{2}T/)                                   // nenhum instante UTC na prosa (PADROES §10)
-    expect(again.body.fields).toEqual([{ field: 'destination', message: 'origem atual: W' }, { field: 'transitionEndedAt', message: NOW.toISOString() }])
-    const native = await end(2, { destination: 'W', reason: 'nativo web' })
-    expect([native.status, native.body.code]).toEqual([409, 'LEGACY_TRANSITION_NOT_APPLICABLE'])
-    expect(native.body.error).toMatch(/só vale para estabelecimento em transição/)
-    expect(instUpdates).toEqual([['W', 1, 'primeira vez', 1]])
-    expect(institutions.get(1)!.kind).toBe('W'); expect(institutions.get(2)!.kind).toBe('W')
+  it('[RESISTIU] irreversível: W → D = 409 SOURCE_KIND_IMMUTABLE (nativo e trocado); repetir W não reescreve o autor; igual ao gravado passa sem trava de chave; PUT sem sourceKind não trava nem lê o fato', async () => {
+    const native = await put(2, { sourceKind: 'D' })
+    expect([native.status, native.body.code]).toEqual([409, 'SOURCE_KIND_IMMUTABLE'])
+    expect(native.body.fields).toEqual([{ field: 'sourceKind', message: 'gravado: W' }])
+    await blockKey(); ageKeys()
+    await toWeb()
+    const again = await toWeb(1, SUPER_B)
+    expect(again.status).toBe(200)
+    const back = await put(1, { sourceKind: 'D' }, SUPER_B)
+    expect([back.status, back.body.code]).toEqual([409, 'SOURCE_KIND_IMMUTABLE'])
+    expect(instUpdates).toEqual([[1, 1]])
+    expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'W', endedAt: NOW, by: 1 })
+    expect(institutions.get(2)!.kind).toBe('W')
+    txConns = []
+    const same = await put(3, { sourceKind: 'D' })                                         // 3 é D com chave ATIVA: igual ao gravado, sem troca
+    expect(same.status).toBe(200)
+    expect(txConns.flatMap(txSql).some(s => /tb_sync_api_key/.test(s))).toBe(false)
+    txConns = []
+    const plain = await put(3, {})
+    expect(plain.status).toBe(200)
+    expect(txConns.flatMap(txSql).some(s => /source_kind|FOR UPDATE/.test(s))).toBe(false)
+    expect(institutions.get(3)).toMatchObject({ kind: 'D', endedAt: null })
   })
 
-  it('[RESISTIU] falha ao criar a categoria padrão desfaz o ato INTEIRO: 500 com ref, o fato segue L, a chave segue S, a guarda segue travando', async () => {
+  it('[RESISTIU] falha ao criar a categoria padrão desfaz a troca INTEIRA: 500 com ref, o fato segue D sem data nem autor, nada de log', async () => {
+    await blockKey(); ageKeys()
     failOn = /INSERT INTO `\w+`\.tb_category/
-    const r = await end(1, { destination: 'W', reason: 'schema sem tb_category' })
+    const r = await toWeb()
     expect([r.status, r.body.ref]).toEqual([500, 'REFADVSW'])
-    expect(txConns.some(c => c.rollback.mock.calls.length > 0)).toBe(true)
-    expect(txConns.every(c => c.commit.mock.calls.length === 0)).toBe(true)
-    expect(institutions.get(1)).toMatchObject({ kind: 'L', endedAt: null })
-    expect(keys.get(1)![0].active).toBe('S')
-    expect((logger.info as jest.Mock).mock.calls.some(c => /ENCERRADA/.test(c[0]))).toBe(false)
-    const w = await brandWrite()
-    expect([w.status, w.body.code]).toEqual([409, 'CATALOG_LEGACY_OWNED'])
+    expect(trocaTx().rollback).toHaveBeenCalled()
+    expect(trocaTx().commit).not.toHaveBeenCalled()
+    expect(institutions.get(1)).toEqual({ schemaName: 'setes_setes', kind: 'D', endedAt: null, by: null })
+    expect(instUpdates).toEqual([])
+    expect(cats.get(1)!.map(c => c.id)).toEqual([8, 9])
+    expect(keys.get(1)![0].active).toBe('N')
+    expect((logger.info as jest.Mock).mock.calls.some(c => /TROCADA/.test(c[0]))).toBe(false)
   })
 
-  it('[RESISTIU] deadlock na 1ª tentativa (o ato cunha id de categoria): reexecuta INTEIRO — 200, uma "Serviços", uma chave inativada', async () => {
+  it('[RESISTIU] deadlock na 1ª tentativa (a troca cunha id de categoria): reexecuta INTEIRA — 200, uma "Serviços", um UPDATE do fato', async () => {
+    await blockKey(); ageKeys()
+    txConns = []
     deadlockOnce = true
-    const r = await end(1, { destination: 'W', reason: 'com deadlock no meio' })
+    const r = await toWeb()
     expect(r.status).toBe(200)
-    expect(r.body.data).toMatchObject({ sourceKind: 'W', syncKeysInactivated: 1, defaultCategories: { P: null, S: 10 } })
     expect(cats.get(1)!.filter(c => c.kind === 'S')).toHaveLength(1)
-    expect(instUpdates).toEqual([['W', 1, 'com deadlock no meio', 1]])                 // a 1ª tentativa foi desfeita
+    expect(instUpdates).toEqual([[1, 1]])                                                   // a 1ª tentativa foi desfeita
+    expect(institutions.get(1)).toMatchObject({ kind: 'W', by: 1 })
     expect(txConns.length).toBeGreaterThanOrEqual(2)
     expect(txConns[0].rollback).toHaveBeenCalled()
     expect(txConns[0].commit).not.toHaveBeenCalled()
     expect(txConns[txConns.length - 1].commit).toHaveBeenCalled()
   })
 
-  it('[RESISTIU] a transação do ato: trava da institution 1º, o fato FOR UPDATE 2º, o UPDATE com `source_kind = L` NO COMANDO, e só depois chave e categorias', async () => {
-    await end(1, { destination: 'W', reason: 'ordem das travas' })
-    const tx = txConns.find(c => c.query.mock.calls.some((x: any[]) => /UPDATE setes_central\.tb_institution/.test(x[0])))!
-    const calls = tx.query.mock.calls.map((x: any[]) => String(x[0]))
-    expect(calls[0]).toMatch(/FROM setes_central\.tb_institution WHERE id = \? FOR UPDATE/)
-    expect(calls[1]).toMatch(/transition_ended_at AS transitionEndedAt[\s\S]*FOR UPDATE/)
-    expect(calls[2]).toMatch(/UPDATE setes_central\.tb_institution[\s\S]*WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
-    expect(calls.findIndex((s: string) => /tb_sync_api_key/.test(s))).toBeGreaterThan(2)
-    expect(calls.findIndex((s: string) => /tb_category/.test(s))).toBeGreaterThan(calls.findIndex((s: string) => /tb_sync_api_key/.test(s)))
+  it("[RESISTIU] a transação da troca: leitura sem trava, depois trava da institution 1º, o fato FOR UPDATE 2º, a chave ativa FOR UPDATE 3º, o UPDATE com `source_kind = 'D'` NO COMANDO 4º, e só depois as categorias", async () => {
+    await blockKey(); ageKeys()
+    await toWeb()
+    const all = txSql(trocaTx())
+    // 0º: a leitura SEM trava que decide se a origem muda (gates da PROD.E10.P1) — só então a trava é o 1º statement que trava
+    expect(all[0]).toMatch(/^SELECT source_kind AS sourceKind FROM setes_central\.tb_institution WHERE id = \? AND deleted = 'N'$/)
+    const calls = all.slice(1)
+    expect(calls[0]).toMatch(/SELECT id FROM setes_central\.tb_institution WHERE id = \? FOR UPDATE/)
+    expect(calls[1]).toMatch(/SELECT schema_name AS schemaName, source_kind AS sourceKind FROM setes_central\.tb_institution\s+WHERE id = \? AND deleted = 'N' FOR UPDATE/)
+    expect(calls[2]).toMatch(/SELECT id FROM setes_central\.tb_sync_api_key\s+WHERE tb_institution_id = \? AND deleted = 'N' AND active = 'S' FOR UPDATE/)
+    expect(calls[3]).toMatch(/SELECT TIMESTAMPDIFF\(SECOND, MAX\(updated_at\), NOW\(\)\) AS pausedFor/)            // D-PR78: há quanto tempo está bloqueada
+    expect(calls[4]).toMatch(/UPDATE setes_central\.tb_institution[\s\S]*WHERE id = \? AND source_kind = 'D' AND transition_ended_at IS NULL/)
+    const firstCat = calls.findIndex(s => /tb_category/.test(s))
+    expect(firstCat).toBeGreaterThan(4)
+    expect(calls.filter(s => /UPDATE setes_central\.tb_sync_api_key/.test(s))).toEqual([])
   })
 
-  it('[RESISTIU] Q-PR49 (a) segue: o lookup do serviço vai pelo FATO — antes do ato as P do legado (8, 9); depois SÓ a "Serviços" (10); nunca pela chave', async () => {
+  it('[RESISTIU] Q-PR49 (a) segue: o lookup do serviço vai pelo FATO das categorias — antes da troca as P do ERP Desktop (8, 9); depois SÓ a "Serviços" (10); nunca pela chave', async () => {
     const admin = bearer(SETES_ADMIN)
+    await blockKey(); ageKeys()
     const before = await request(app).get('/api/services/categories').set('Authorization', admin)
-    await end(1, { destination: 'W', reason: 'lookup pelo fato' })
+    await toWeb()
     const after = await request(app).get('/api/services/categories').set('Authorization', admin)
     expect(before.body.data.map((c: any) => c.id)).toEqual([8, 9])
     expect(after.body.data.map((c: any) => c.id)).toEqual([10])

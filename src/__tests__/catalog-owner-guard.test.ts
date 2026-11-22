@@ -1,14 +1,13 @@
 /// <reference types="jest" />
-// Rodada 7 do cadastro de produtos (D-PR47/D-PR48/D-PR51/D-PR52, Valdo 2026-10-20 — prompt_modulo_products.md "Rodada 7"): a guarda
-// de escrita dos cadastros que o legado alimenta pergunta "quem é o DONO do catálogo?" lendo o FATO `tb_institution.source_kind`
-// (peça `@shared/catalog-owner`), nunca a chave do sincronizador (Rodada 6 — caiu). L = só consulta; W/P = a web escreve.
-// Substitui `sync-write-guard.test.ts` (D-PR32/D-PR41 revista).
+// O DONO DO CATÁLOGO (peça `@shared/catalog-owner`) — Rodada 7 do cadastro de produtos (D-PR47/D-PR52), revista pela D-OI10 (só W e D)
+// e pelas D-PR77/D-PR70 (2026-11-22, prompt_modulo_products.md Rodadas 10 e 11): o dono deixou de ser trava — a `catalogOwnerGuard`
+// saiu do gateway; o fato segue para o contexto da sessão, o ato D → W e a chave do sincronizador.
 import pool from '../shared/db/connection'
-import { catalogOwnerGuard } from '../gateway/catalog-owner.guard'
 import {
-  BASE_CATALOG_TABLES, LEGACY_OWNED_TABLES, LEGACY_OWNED_MODULES, catalogOwnerOf, sourceKindHasSync, isSourceKind,
+  BASE_CATALOG_TABLES, DESKTOP_OWNED_TABLES, catalogOwnerOf, sourceKindHasSync, isSourceKind, sourceKindOf, SOURCE_KINDS,
 } from '../shared/catalog-owner'
 import { allocateProductId } from '../shared/product-id'
+import * as catalogOwner from '../shared/catalog-owner'
 
 jest.mock('../shared/db/connection', () => ({ __esModule: true, default: { query: jest.fn(), getConnection: jest.fn() } }))
 const mockQuery = (pool as any).query as jest.Mock
@@ -21,69 +20,35 @@ function res() {
 }
 const req = (method: string, role = 'admin') =>
   ({ method, institution: { institutionId: 1, schemaName: 'setes_setes', userId: 9, role } }) as any
-const factIs = (kind: string | null) => mockQuery.mockImplementation(async (sql: string) => {
-  if (/SELECT source_kind AS kind FROM setes_central\.tb_institution/.test(sql)) return [kind === null ? [] : [{ kind }]]
-  throw new Error(`SQL inesperado: ${String(sql).slice(0, 80)}`)
-})
 
 beforeEach(() => { jest.clearAllMocks(); mockQuery.mockReset() })
 
-describe('catalogOwnerGuard (D-PR47) — o dono do catálogo decide, nunca a chave', () => {
-  it('leitura passa SEM consultar o banco (GET/HEAD/OPTIONS)', async () => {
-    for (const m of ['GET', 'HEAD', 'OPTIONS']) {
-      const r = res(); const next = jest.fn()
-      await catalogOwnerGuard(req(m), r, next)
-      expect([m, next.mock.calls.length, mockQuery.mock.calls.length]).toEqual([m, 1, 0])
+describe('a peça do dono do catálogo (D-OI10: só W e D; D-PR70: "desktop", nunca "legacy")', () => {
+  it('regras puras: dono por fato; chave só para D (D-PR69); domínio fechado em W/D', () => {
+    expect([...SOURCE_KINDS]).toEqual(['W', 'D'])
+    expect(['W', 'D'].map(k => catalogOwnerOf(k as any))).toEqual(['web', 'desktop'])
+    expect(['W', 'D'].map(k => sourceKindHasSync(k as any))).toEqual([false, true])
+    expect(['W', 'D', 'L', 'P', 'w', 'd', 'X', '', null, undefined, 1].map(isSourceKind))
+      .toEqual([true, true, false, false, false, false, false, false, false, false, false])
+  })
+
+  it('sourceKindOf lê o fato da institution do pedido; letra fora do domínio (L/P de antes da 081) = null', async () => {
+    for (const [kind, expected] of [['W', 'W'], ['D', 'D'], ['L', null], ['P', null]] as const) {
+      mockQuery.mockResolvedValueOnce([[{ kind }]])
+      await expect(sourceKindOf(1)).resolves.toBe(expected)
     }
+    mockQuery.mockResolvedValueOnce([[]])
+    await expect(sourceKindOf(1)).resolves.toBeNull()
+    expect(mockQuery.mock.calls[0][1]).toEqual([1])
   })
 
-  it('L (transição do desktop legado) = 409 CATALOG_LEGACY_OWNED em toda escrita — admin E super (o problema é o 2º escritor)', async () => {
-    factIs('L')
-    for (const role of ['admin', 'super', 'user']) {
-      for (const m of ['POST', 'PUT', 'DELETE', 'PATCH']) {
-        const r = res(); const next = jest.fn()
-        await catalogOwnerGuard(req(m, role), r, next)
-        expect([role, m, r.statusCode, r.body?.code, next.mock.calls.length]).toEqual([role, m, 409, 'CATALOG_LEGACY_OWNED', 0])
-      }
-    }
-    expect(mockQuery.mock.calls.every(c => /tb_sync_api_key/.test(c[0]) === false)).toBe(true)   // nunca a chave
-    expect(mockQuery.mock.calls[0][1]).toEqual([1])                                                 // a institution do JWT
-  })
-
-  it('W (nativo web) e P (PDV — a web é a dona, os PDVs recebem) escrevem', async () => {
-    for (const kind of ['W', 'P']) {
-      factIs(kind)
-      const r = res(); const next = jest.fn()
-      await catalogOwnerGuard(req('POST'), r, next)
-      expect([kind, next.mock.calls.length, r.statusCode]).toEqual([kind, 1, 200])
-    }
-  })
-
-  it('falha FECHADO: institution sem fato legível = 409; erro do banco vai ao handler (nunca libera); sem sessão = 401', async () => {
-    factIs(null)
-    const r1 = res(); const n1 = jest.fn()
-    await catalogOwnerGuard(req('POST'), r1, n1)
-    expect([r1.statusCode, n1.mock.calls.length]).toEqual([409, 0])
-
-    mockQuery.mockRejectedValue(new Error('pool esgotado'))
-    const r2 = res(); const n2 = jest.fn()
-    await catalogOwnerGuard(req('PUT'), r2, n2)
-    expect(n2).toHaveBeenCalledWith(expect.any(Error))
-    expect(r2.status).not.toHaveBeenCalled()
-
-    const r3 = res(); const n3 = jest.fn()
-    await catalogOwnerGuard({ method: 'POST' } as any, r3, n3)
-    expect([r3.statusCode, n3.mock.calls.length]).toEqual([401, 0])
-  })
-
-  it('regras puras da peça: dono por tipo da fonte; chave só para L e P; domínio fechado', () => {
-    expect(['W', 'L', 'P'].map(k => catalogOwnerOf(k as any))).toEqual(['web', 'legacy', 'web'])
-    expect(['W', 'L', 'P'].map(k => sourceKindHasSync(k as any))).toEqual([false, true, true])
-    expect(['W', 'L', 'P', 'w', 'l', 'X', '', null, undefined, 1].map(isSourceKind)).toEqual([true, true, true, false, false, false, false, false, false, false])
+  it('a guarda e o que só existia para ela saíram da peça (D-PR77)', () => {
+    const exported = Object.keys(catalogOwner)
+    for (const gone of ['CATALOG_LEGACY_OWNED_MESSAGE', 'LEGACY_OWNED_TABLES', 'LEGACY_OWNED_MODULES', 'DESKTOP_OWNED_MODULES', 'CATALOG_DESKTOP_OWNED_MESSAGE']) expect(exported).not.toContain(gone)
   })
 })
 
-describe('as listas da peça (D-PR52 catálogo de base · D-PR51 guarda)', () => {
+describe('as listas da peça (D-PR52 catálogo de base · D-PR51 o que o ERP Desktop também envia)', () => {
   it('BASE_CATALOG_TABLES = a lista literal do Valdo (unidade/medida/embalagem/categorias/produtos/serviços/tabela de preço/preço/lista e saldo de estoque)', () => {
     expect([...BASE_CATALOG_TABLES]).toEqual([
       'tb_merchandise_trade_unit',
@@ -97,57 +62,53 @@ describe('as listas da peça (D-PR52 catálogo de base · D-PR51 guarda)', () =>
     ])
   })
 
-  it('LEGACY_OWNED_TABLES = catálogo de base + plano de contas + contas bancárias (D-PR51); tb_service_ibscbs e tb_service_tax_rule NUNCA entram (D-PR45: enquadramento é da web)', () => {
-    expect([...LEGACY_OWNED_TABLES]).toEqual([...BASE_CATALOG_TABLES, 'tb_financial_plans', 'tb_bank_account'])
-    expect(LEGACY_OWNED_TABLES as readonly string[]).not.toContain('tb_service_ibscbs')
-    expect(LEGACY_OWNED_TABLES as readonly string[]).not.toContain('tb_service_tax_rule')
-    expect(LEGACY_OWNED_TABLES as readonly string[]).not.toContain('tb_bank_account_channel')
-  })
-
-  it('LEGACY_OWNED_MODULES = os 6 cadastros montados com a guarda', () => {
-    expect([...LEGACY_OWNED_MODULES]).toEqual(['merchandise', 'services', 'price-lists', 'categories', 'financial-plans', 'bank-accounts'])
+  it('DESKTOP_OWNED_TABLES = catálogo de base + plano de contas + contas bancárias (D-PR51); tb_service_ibscbs e tb_service_tax_rule NUNCA entram (D-PR45: enquadramento é da web)', () => {
+    expect([...DESKTOP_OWNED_TABLES]).toEqual([...BASE_CATALOG_TABLES, 'tb_financial_plans', 'tb_bank_account'])
+    expect(DESKTOP_OWNED_TABLES as readonly string[]).not.toContain('tb_service_ibscbs')
+    expect(DESKTOP_OWNED_TABLES as readonly string[]).not.toContain('tb_service_tax_rule')
+    expect(DESKTOP_OWNED_TABLES as readonly string[]).not.toContain('tb_bank_account_channel')
   })
 })
 
-describe('montagem no gateway (cerca): a guarda em TODOS os módulos da lista, só neles; o que o legado não produz fica ANTES da guarda', () => {
-  it('o gateway monta catalogOwnerGuard exatamente nos LEGACY_OWNED_MODULES — e em nenhum outro cadastro', async () => {
+describe('montagem no gateway (cerca, D-PR77): NENHUM cadastro monta guarda do dono do catálogo', () => {
+  const MODULES = ['merchandise', 'services', 'price-lists', 'categories', 'financial-plans', 'bank-accounts']
+  const isGuardLayer = (l: any) => !l.handle?.stack && /catalogOwner|catalog_owner/i.test(String(l.handle?.name ?? ''))
+
+  it('nenhuma camada do roteador é a guarda; cada um dos 6 cadastros chega direto ao roteador do módulo', async () => {
     const router = (await import('../gateway/router')).default as any
-    const guarded = router.stack.filter((l: any) => l.handle === catalogOwnerGuard)
-    const probe = [...LEGACY_OWNED_MODULES.map(m => `/${m}`), '/orders', '/contracts', '/customers', '/service-tax-rules', '/tax-rules', '/payment-types']
-    const mounts = probe.filter(path => guarded.some((l: any) => l.regexp.test(path)))
-    expect(mounts).toEqual(LEGACY_OWNED_MODULES.map(m => `/${m}`))
-    expect(guarded).toHaveLength(LEGACY_OWNED_MODULES.length)
+    expect(router.stack.filter(isGuardLayer)).toEqual([])
+    for (const m of MODULES) {
+      const layers = router.stack.filter((l: any) => l.regexp.test(`/${m}`) && !l.regexp.test('/service-tax-rules') && !l.regexp.test('/bank-charge-agreements'))
+      expect([m, layers.every((l: any) => !!l.handle.stack)]).toEqual([m, true])
+    }
   })
 
-  it('D-PR45: /services tem o roteador FISCAL (só PUT /:id/tax-rule e /:id/ibscbs) montado ANTES da guarda; o roteador do cadastro vem depois', async () => {
+  it('D-PR45: /services segue com o roteador FISCAL (só PUT /:id/tax-rule e /:id/ibscbs) antes do roteador do cadastro', async () => {
     const router = (await import('../gateway/router')).default as any
     const layers = router.stack.filter((l: any) => l.regexp.test('/services') && !l.regexp.test('/service-tax-rules'))
-    const kinds = layers.map((l: any) => l.handle === catalogOwnerGuard ? 'guard' : (l.handle.stack ? 'router' : 'other'))
-    expect(kinds).toEqual(['router', 'guard', 'router'])
+    expect(layers.map((l: any) => (l.handle.stack ? 'router' : 'other'))).toEqual(['router', 'router'])
     const fiscal = layers[0].handle.stack.filter((l: any) => l.route).map((l: any) => [l.route.path, Object.keys(l.route.methods).join(',')])
     expect(fiscal).toEqual([['/:id/tax-rule', 'put'], ['/:id/ibscbs', 'put']])
-    // cada rota fiscal tem 2 handlers: o privilégio ALTERAR em services e o controller
     for (const l of layers[0].handle.stack.filter((x: any) => x.route)) expect(l.route.stack).toHaveLength(2)
-    const cadastro = layers[2].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
+    const cadastro = layers[1].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
     expect(cadastro).toEqual(expect.arrayContaining(['/', '/:id']))
     expect(cadastro).not.toContain('/:id/tax-rule')
   })
 
-  it('D-PR51: /bank-accounts tem o roteador do CANAL API (só /:id/channel…) montado ANTES da guarda; o cadastro da conta vem depois', async () => {
+  it('/bank-accounts segue com o roteador do CANAL API (só /:id/channel…) antes do cadastro da conta', async () => {
     const router = (await import('../gateway/router')).default as any
     const layers = router.stack.filter((l: any) => l.regexp.test('/bank-accounts') && !l.regexp.test('/bank-charge-agreements'))
-    const kinds = layers.map((l: any) => l.handle === catalogOwnerGuard ? 'guard' : (l.handle.stack ? 'router' : 'other'))
-    expect(kinds).toEqual(['router', 'guard', 'router'])
+    expect(layers.map((l: any) => (l.handle.stack ? 'router' : 'other'))).toEqual(['router', 'router'])
     const channel = layers[0].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
     expect(channel.length).toBeGreaterThan(0)
     expect(channel.every((p: string) => p.startsWith('/:id/channel'))).toBe(true)
-    const cadastro = layers[2].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
+    const cadastro = layers[1].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
     expect(cadastro).toEqual(expect.arrayContaining(['/', '/:id', '/banks']))
     expect(cadastro.some((p: string) => p.includes('channel'))).toBe(false)
   })
 })
 
-describe('quem cunha id no espaço do legado NÃO reconfere nada na transação (monotonia do fato — a assertNoActiveSyncKey morreu)', () => {
+describe('quem cunha id no espaço do ERP Desktop NÃO reconfere nada na transação (nem a chave nem o fato — D-PR77)', () => {
   it('allocateProductId: trava da institution → MAX (2 consultas; nenhuma à chave nem ao fato)', async () => {
     const calls: string[] = []
     const fake = {

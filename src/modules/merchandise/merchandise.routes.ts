@@ -73,7 +73,7 @@ const catalogar = requirePrivilege('merchandise', PRIVILEGE_CATALOGAR)
  *     responses:
  *       201: { description: "{ ok, data: { id } }" }
  *       400: { description: "Payload inválido ou referência inexistente (fields[])" }
- *       409: { description: "PRODUCT_IDENTIFIER_TAKEN / GTIN_TAKEN (fields[1] = id do outro produto) / CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
+ *       409: { description: "PRODUCT_IDENTIFIER_TAKEN / GTIN_TAKEN (fields[1] = id do outro produto)" }
  *       422: { description: CATALOG_ITEM_NOT_LINKED }
  */
 router.get('/', controller.list)
@@ -164,7 +164,7 @@ router.get('/price-lists', controller.priceListsLookup)
  *               description: { type: string }
  *     responses:
  *       201: { description: "{ ok, data: { id, reused } } — reused = já existia na central" }
- *       409: { description: "RESOURCE_BUSY — outro criador segura o catálogo central (trava nomeada) por mais de 10 s; tente de novo / CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
+ *       409: { description: "RESOURCE_BUSY — outro criador segura o catálogo central (trava nomeada) por mais de 10 s; tente de novo" }
  *       403: { description: "PRIVILEGE_REQUIRED — falta o ato CATALOGAR na interface merchandise (D-PR33) / INTERFACE_NOT_ALLOWED" }
  */
 router.get('/brands', controller.brandsLookup)
@@ -199,7 +199,7 @@ router.post('/brands', catalogar, controller.createBrand)
  *               abbreviation: { type: string, description: "1 a 5 caracteres" }
  *     responses:
  *       201: { description: "{ ok, data: { id, reused } }" }
- *       409: { description: "RESOURCE_BUSY — outro criador segura o catálogo central (trava nomeada) por mais de 10 s; tente de novo / CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
+ *       409: { description: "RESOURCE_BUSY — outro criador segura o catálogo central (trava nomeada) por mais de 10 s; tente de novo" }
  *       403: { description: "PRIVILEGE_REQUIRED — falta o ato CATALOGAR na interface merchandise (D-PR33) / INTERFACE_NOT_ALLOWED" }
  */
 router.get('/measures', controller.measuresLookup)
@@ -234,7 +234,7 @@ router.post('/measures', catalogar, controller.createMeasure)
  *               abbreviation: { type: string, nullable: true, description: "até 3 caracteres" }
  *     responses:
  *       201: { description: "{ ok, data: { id, reused } }" }
- *       409: { description: "RESOURCE_BUSY — outro criador segura o catálogo central (trava nomeada) por mais de 10 s; tente de novo / CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
+ *       409: { description: "RESOURCE_BUSY — outro criador segura o catálogo central (trava nomeada) por mais de 10 s; tente de novo" }
  *       403: { description: "PRIVILEGE_REQUIRED — falta o ato CATALOGAR na interface merchandise (D-PR33) / INTERFACE_NOT_ALLOWED" }
  */
 router.get('/packages', controller.packagesLookup)
@@ -267,7 +267,7 @@ router.post('/packages', catalogar, controller.createPackage)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrado }
- *       409: { description: "PRODUCT_IDENTIFIER_TAKEN / GTIN_TAKEN (fields[1] = id do dono) / TRADE_UNIT_BASE_LOCKED (trocar a unidade-base com outro nível vivo — D-PR40 — ou com preço gravado na grade / item em pedido aberto — D-PR42) / CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
+ *       409: { description: "PRODUCT_IDENTIFIER_TAKEN / GTIN_TAKEN (fields[1] = id do dono) / TRADE_UNIT_BASE_LOCKED (trocar a unidade-base com outro nível vivo — D-PR40 — ou com preço gravado na grade / item em pedido aberto — D-PR42)" }
  *   delete:
  *     summary: Soft delete (D-PR11) — os níveis saem junto (o GTIN volta a ficar livre); preços ficam como história
  *     tags: [merchandise]
@@ -280,7 +280,6 @@ router.post('/packages', catalogar, controller.createPackage)
  *     responses:
  *       200: { description: "{ ok }" }
  *       404: { description: Não encontrado }
- *       409: { description: "CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
  */
 router.get('/:id', controller.getOne)
 router.put('/:id', controller.update)
@@ -324,7 +323,7 @@ router.delete('/:id', controller.remove)
  *               defaultSaleTradeLevel: { type: integer, nullable: true, description: "AUSENTE = mantém a gravada (A-PR2); null = a unidade-base" }
  *     responses:
  *       200: { description: "{ ok }" }
- *       409: { description: "TRADE_UNIT_BASE_REQUIRED / TRADE_UNIT_DUPLICATE (D-PR31) / TRADE_UNIT_DESIGNATED (D-PR30) / GTIN_TAKEN (D-PR19) / MERCHANDISE_FACTS_MISSING (produto sem ficha fiscal — salve a ficha antes) / TRADE_UNIT_BASE_LOCKED (D-PR40; D-PR42: preço gravado ou item em pedido aberto) / CATALOG_LEGACY_OWNED (transição do legado, source_kind L — só consulta, D-PR32/D-PR47)" }
+ *       409: { description: "TRADE_UNIT_BASE_REQUIRED / TRADE_UNIT_DUPLICATE (D-PR31) / TRADE_UNIT_DESIGNATED (D-PR30) / GTIN_TAKEN (D-PR19) / MERCHANDISE_FACTS_MISSING (produto sem ficha fiscal — salve a ficha antes) / TRADE_UNIT_BASE_LOCKED (D-PR40; D-PR42: preço gravado ou item em pedido aberto)" }
  *       422: { description: "TRADE_UNIT_NOT_FOUND / CATALOG_ITEM_NOT_LINKED" }
  */
 router.get('/:id/trade-units', controller.getTradeUnits)

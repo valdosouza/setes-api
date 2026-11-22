@@ -274,14 +274,14 @@ async function apoio(): Promise<Apoio> {
 // ───────────────────────── P1..P7 — os processos ─────────────────────────
 
 async function p1_servico(a: Apoio): Promise<number | null> {
-  // D-PR47 (Rodada 7 de produtos, Valdo 2026-10-20): quem decide se a web cria o serviço é a ORIGEM DOS CADASTROS do estabelecimento
-  // (`tb_institution.source_kind`), nunca a chave do sincronizador. Em L (transição do desktop) o cadastro é do legado (o id é o
-  // PRO_CODIGO — o que a web criasse seria sobrescrito) e a régua não cria: usa um serviço VIVO e ativo do legado (prefere o que já tem
-  // a regra de ISS que a régua usa no faturamento; depois o menor id). D-PR45: o ENQUADRAMENTO FISCAL é da web mesmo em L — se o serviço
+  // D-PR47 (Rodada 7 de produtos; letras W/D pela D-OI10): a régua olha a ORIGEM DOS CADASTROS do estabelecimento
+  // (`tb_institution.source_kind`), nunca a chave do sincronizador. Em D o cadastro é do ERP Desktop (o id é o PRO_CODIGO — o que a web
+  // criasse cairia no espaço do gerador dele; a API não recusa desde a D-PR77, mas a régua não cria): usa um serviço VIVO e ativo do legado (prefere o que já tem
+  // a regra de ISS que a régua usa no faturamento; depois o menor id). D-PR45: o ENQUADRAMENTO FISCAL é da web mesmo em D — se o serviço
   // escolhido não tem regra de ISS ativa, a régua a vincula pela rota própria `PUT /services/:id/tax-rule` (a prova viva da D-PR45).
   // Sem serviço vivo nenhum = PENDENTE.
   const fato = await uma<any>(`SELECT source_kind AS kind FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'`, [INST])
-  if (fato?.kind === 'L') {
+  if (fato?.kind === 'D') {
     const legado = await uma<any>(
       `SELECT p.id, s.tb_service_tax_rule_id AS ruleId
          FROM \`${SCHEMA}\`.tb_product p
@@ -293,7 +293,7 @@ async function p1_servico(a: Apoio): Promise<number | null> {
         ORDER BY (s.tb_service_tax_rule_id = ?) DESC, (r.id IS NOT NULL) DESC, p.id LIMIT 1`, [INST, a.serviceTaxRuleId ?? 0])
     if (!legado) {
       reporta('P1', 'Cadastro de serviços', 'PENDENTE',
-        'origem dos cadastros L (D-PR47: web só consulta) e nenhum serviço vivo e ativo do legado para enquadrar')
+        'origem dos cadastros D (o ERP Desktop é dono — D-PR47/D-OI10) e nenhum serviço vivo e ativo do legado para enquadrar')
       return null
     }
     let ruleId: number | null = legado.ruleId == null ? null : Number(legado.ruleId)
@@ -310,7 +310,7 @@ async function p1_servico(a: Apoio): Promise<number | null> {
     if (r.status !== 200) { reporta('P1', 'Cadastro de serviços', 'FALHA', motivo(r)); return null }
     criados.servicoDoLegado = Number(legado.id)
     reporta('P1', 'Cadastro de serviços', 'OK',
-      `serviço do legado ${legado.id} com regra de ISS ${ruleId} — origem L (D-PR47): a web não cria, só enquadra (D-PR45)`)
+      `serviço do legado ${legado.id} com regra de ISS ${ruleId} — origem D (D-PR47/D-OI10): a régua não cria, só enquadra (D-PR45)`)
     return Number(legado.id)
   }
 

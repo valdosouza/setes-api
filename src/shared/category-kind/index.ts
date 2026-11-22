@@ -9,9 +9,9 @@ import { pathSegment } from '@shared/tree-path'
  * `Infra-IA/prompts/prompt_modulo_products.md`).
  *
  * Fato que decide: o legado não marca categoria de serviço — toda categoria sincronizada nasce 'P' (grupo do sync,
- * `setes-sync/verificacao-comissao-margem-mercadoria.md` §8) — e o estabelecimento cujo catálogo é da WEB (origem dos cadastros W ou P —
- * D-PR47) recebe "Produtos" (P) e "Serviços" (S): pela migration 072 (os que já existem), pelo onboarding (os que nascem W/P) e pelo ato
- * "encerrar a transição" (o L que vira W ou P — D-PR48). A regra do serviço é pelo FATO, nunca pelo modo: o estabelecimento que TEM
+ * `setes-sync/verificacao-comissao-margem-mercadoria.md` §8) — e o estabelecimento cujo catálogo é da WEB (origem dos cadastros W —
+ * D-PR47) recebe "Produtos" (P) e "Serviços" (S): pela migration 072 (os que já existem), pelo onboarding (os que nascem W) e pela
+ * troca D → W no cadastro (D-PR73). A regra do serviço é pelo FATO, nunca pelo modo: o estabelecimento que TEM
  * categoria S viva usa só as S; o que não tem (o do legado, até ele separar — D-SY11) usa as P.
  */
 
@@ -38,7 +38,7 @@ export const LIVE_SERVICE_CATEGORY_SQL = (alias: string) => `${alias}.kind = 'S'
 
 /**
  * Cria a categoria padrão do kind (`DEFAULT_CATEGORY_DESCRIPTION`) quando o estabelecimento não tem NENHUMA viva (não excluída e ativa)
- * daquele kind — peça do onboarding W/P e do ato "encerrar a transição" (D-PR48); a migration 072 faz o mesmo em SQL para os que já
+ * daquele kind — peça do onboarding W e da troca D → W no cadastro (D-PR73); a migration 072 faz o mesmo em SQL para os que já
  * existem. Raiz, `posit_level` = o próprio id em 3 dígitos (`@shared/tree-path`), id MAX+1 da institution contando as excluídas (o id
  * nunca volta com outro significado).
  * Protocolo de trava: a institution (PADROES §9 regra 7) e a faixa das categorias dela (`FOR UPDATE` — o mesmo do módulo `categories`,
@@ -67,7 +67,7 @@ export async function ensureDefaultCategory(
 }
 
 /** As DUAS categorias padrão de um catálogo da web ("Produtos" P e "Serviços" S) — o que falta nasce, o que existe vivo fica.
- *  Chamada pelo onboarding (origem W/P) e pelo ato "encerrar a transição" (D-PR48). Devolve o id criado por kind (null = já havia). */
+ *  Chamada pelo onboarding (origem W) e pela troca D → W no cadastro (D-PR73). Devolve o id criado por kind (null = já havia). */
 export async function ensureDefaultCategories(
   conn: PoolConnection, schemaName: string, institutionId: number
 ): Promise<Record<CategoryKind, number | null>> {

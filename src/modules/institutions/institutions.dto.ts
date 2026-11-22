@@ -10,12 +10,12 @@ import { entityFiscalBody, withFiscalRefinements } from '@shared/entity'
  * Saída: InstitutionListRow / InstitutionFull (institutions.interface.ts).
  */
 
-/** D-PR47: W nativo web · L transição do desktop legado · P PDV — as mesmas letras do `tb_terminal.kind` (D-TM9). */
-export const sourceKindDto = z.enum(['W', 'L', 'P'])
+/** D-PR47 revista pela D-OI10: W = a web é dona do catálogo · D = o ERP Desktop é dono (era L). A letra P saiu (o PDV nunca é dono). */
+export const sourceKindDto = z.enum(['W', 'D'])
 
 const institutionBase = entityFiscalBody.extend({
   active: z.enum(['S', 'N']).optional(),
-  // na edição é só conferência: igual ao gravado passa, diferente = 409 SOURCE_KIND_IMMUTABLE (nunca descarte silencioso)
+  // na edição: igual ao gravado passa; D → W é a TROCA (só com a chave bloqueada — D-PR73/D-PR76); W → D = 409 SOURCE_KIND_IMMUTABLE
   sourceKind: sourceKindDto.optional(),
 })
 
@@ -38,7 +38,7 @@ export const institutionCreateDto = withFiscalRefinements(
       .regex(/^setes_[a-z0-9_]+$/,
         'schemaName deve começar com "setes_" e conter apenas letras minúsculas, números e underscores'),
     admin: institutionAdminDto,
-    // D-PR47 (parecer do guardião): fato DECLARADO, nunca presumido — sem default (um cliente de legado cadastrado como W nunca
+    // D-PR47 (parecer do guardião): fato DECLARADO, nunca presumido — sem default (um cliente do ERP Desktop cadastrado como W nunca
     // conseguiria a chave do sincronizador, e W não volta atrás).
     sourceKind: sourceKindDto,
   })
@@ -51,15 +51,6 @@ export type InstitutionUpdateDto = z.infer<typeof institutionUpdateDto>
 
 /** Interruptor da chave do sincronizador (D-PR43 + D-PR48 item 1, Rodada 7): só PAUSA de emergência, reversível — 'N' = o setes-sync
  *  recusa a chave (D-SY13: sincronizador INATIVO até reativar; o cache dele leva até 5 min), 'S' = retoma a MESMA chave. NÃO muda o dono
- *  do catálogo, não cria categoria, não confere linhas (isso era a Rodada 6 e caiu). Em W (nativo web, ou L encerrado para W) não há o que
+ *  do catálogo, não cria categoria, não confere linhas (isso era a Rodada 6 e caiu). Em W (nativo web, ou trocado de D para W) não há o que
  *  retomar: 409 SYNC_KEY_NOT_FOR_SOURCE. */
 export const syncApiKeyActiveDto = z.object({ active: z.enum(['S', 'N']) })
-
-/** Ato "encerrar a transição" (D-PR48/D-PR49): único e IRREVERSÍVEL — o Super escolhe o DESTINO (W = cliente sem PDV · P = cliente com
- *  PDV; os PDVs passam a receber o catálogo da web) e confirma com o MOTIVO — gravado APARADO em `tb_institution.transition_end_reason`
- *  com o autor (D-PR53; o limite de 255 é conferido aqui, depois do trim: o modo de sessão do servidor truncaria antes do CHECK). */
-export const endLegacyTransitionDto = z.object({
-  destination: z.enum(['W', 'P']),
-  reason:      z.string().trim().min(5, 'Informe o motivo (mínimo 5 caracteres)').max(255),
-})
-export type EndLegacyTransitionDto = z.infer<typeof endLegacyTransitionDto>

@@ -32,7 +32,7 @@ async function bootstrap() {
     await runMigrationsForAllInstitutions()
     // D-F135 (F2a): os gatilhos de TRAVA da f2a_fiscal_passivo conferidos pelo NOME em cada schema — faltando, o setes-api NÃO sobe
     logger.info(`Gatilhos de TRAVA da F2a: ${await assertF2aFreezeTriggers()}`)
-    logger.info(`Origem dos cadastros (072, D-PR47): ${await assertInstitutionSourceKindSchema()}`)
+    logger.info(`Origem dos cadastros W/D (072 + 081, D-PR47, D-OI10): ${await assertInstitutionSourceKindSchema()}`)
     logger.info('Migrations concluidas. Subindo servidor...')
 
     app.listen(PORT, () => {

@@ -433,8 +433,8 @@ export async function updateService(
  * D-PR45 (Rodada 7 de produtos, Valdo 2026-10-20 — fecha a Q-PR52): o ENQUADRAMENTO FISCAL do serviço — o vínculo com a regra de ISS
  * (`tb_service.tb_service_tax_rule_id`) e a presunção IBS/CBS (`tb_service.nbs` + `tb_service_ibscbs`) — tem a WEB como ÚNICA escritora:
  * o legado não produz esses dois fatos. Por isso as duas gravações têm rota PRÓPRIA (`PUT /api/services/:id/tax-rule` e
- * `PUT /api/services/:id/ibscbs`, `services.fiscal.routes.ts`) FORA da guarda do dono do catálogo (`catalogOwnerGuard`) — o dono do
- * CADASTRO pode ser o legado (modo L), o dono do ENQUADRAMENTO é a web. Os dados do cadastro seguem pelo PUT guardado.
+ * `PUT /api/services/:id/ibscbs`, `services.fiscal.routes.ts`) num roteador próprio — o dono do
+ * CADASTRO pode ser o ERP Desktop (origem D), o dono do ENQUADRAMENTO é a web. Os dados do cadastro seguem pelo PUT do cadastro.
  * Mesmo protocolo do PUT: trava da linha do produto (kind S) 1º, FK/catálogo conferidos na transação, e os MESMOS escritores únicos
  * (`upsertServiceRule` / `syncServiceClassification`) — a cerca por varredura (`adversarial-r7-gate.test.ts`) confere que só eles existem.
  */

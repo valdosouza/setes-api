@@ -4,11 +4,11 @@ import { handleError, parseBody, parseId } from '@shared/http/controller-utils'
 import { parseListQuery, pagedEnvelope } from '@shared/list'
 import { findEntityIdByCpf, findEntityIdByCnpj } from '@shared/fiscal/fiscal.repository'
 import { isValidCpf, isValidCnpj, normalizeCpf, normalizeCnpj } from '@shared/validation'
-import { institutionCreateDto, institutionUpdateDto, syncApiKeyActiveDto, endLegacyTransitionDto } from './institutions.dto'
+import { institutionCreateDto, institutionUpdateDto, syncApiKeyActiveDto } from './institutions.dto'
 import {
   fetchInstitutions, fetchInstitution, createInstitution,
   editInstitution, removeInstitution,
-  fetchSyncApiKey, generateSyncApiKey, switchSyncApiKey, endLegacyTransition,
+  fetchSyncApiKey, generateSyncApiKey, switchSyncApiKey,
   INSTITUTION_SEARCH_CRITERIA, fetchInstitutionSearchCriteria,
 } from './institutions.service'
 
@@ -142,18 +142,5 @@ export async function setSyncKeyActive(req: Request, res: Response): Promise<voi
     res.json({ ok: true, data: await switchSyncApiKey(id, body.active, req.institution?.userId ?? null) })
   } catch (err) {
     handleError(res, err, 'institutions/:id/sync-api-key/active PUT')
-  }
-}
-
-/** D-PR48/D-PR49: o ato "encerrar a transição" (Super — o roteador do módulo já está sob superGuard). */
-export async function endTransition(req: Request, res: Response): Promise<void> {
-  const id = parseId(req, res)
-  if (id === null) return
-  const body = parseBody(endLegacyTransitionDto, req, res)
-  if (body === null) return
-  try {
-    res.json({ ok: true, data: await endLegacyTransition(id, body.destination, body.reason, req.institution?.userId ?? null) })
-  } catch (err) {
-    handleError(res, err, 'institutions/:id/end-legacy-transition POST')
   }
 }

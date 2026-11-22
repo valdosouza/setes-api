@@ -23,7 +23,7 @@ import { assertSchema } from '@shared/db/schema'
  */
 
 /** Trava a institution (1º lock da transação) e cunha o próximo id de `tb_product`. Chame ANTES de qualquer outra leitura. Quem decide se a
- *  web pode cunhar aqui é a guarda do dono do catálogo no gateway (`catalogOwnerGuard` — D-PR47); como o fato é monotônico (L → W/P,
+ *  web podia cunhar aqui era a guarda do dono do catálogo (saiu — D-PR77: o risco de colisão foi aceito); como o fato é monotônico (D → W,
  *  nunca de volta), não há reconferência dentro da transação (a `assertNoActiveSyncKey` da Rodada 6 morreu — Rodada 7). */
 export async function allocateProductId(
   conn: PoolConnection, schemaName: string, groupInstitutionId: number

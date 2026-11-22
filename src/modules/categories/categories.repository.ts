@@ -95,7 +95,7 @@ export async function insertCategory(
   try {
     await conn.beginTransaction()
     // PADROES §9 regra 7 (quem cunha por MAX+1 trava a institution ANTES). tb_category é ID LOCAL do legado: quem decide se a web pode
-    // cunhar aqui é a guarda do dono do catálogo no gateway (`catalogOwnerGuard` — D-PR47); o fato é monotônico, sem reconferência.
+    // sem guarda do dono do catálogo (D-PR77): com origem D a escrita passa — risco de colisão de id com o ERP Desktop aceito pelo Valdo.
     await lockInstitutionCounters(conn, institutionId)
 
     const parentPath = input.parentId != null

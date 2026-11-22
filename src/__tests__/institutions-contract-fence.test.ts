@@ -21,11 +21,16 @@ const appPayload = {
 }
 
 describe('D-PR47 — contrato do POST /api/institutions com o app', () => {
-  it('sem sourceKind (o app de hoje) = 400 em fields[sourceKind] — nunca default silencioso; com W/L/P passa', () => {
+  it('sem sourceKind (o app de hoje) = 400 em fields[sourceKind] — nunca default silencioso; com W/D passa; L e P (fora desde a D-OI10) = 400', () => {
     const r = institutionCreateDto.safeParse(appPayload)
     expect(r.success).toBe(false)
     if (!r.success) expect(zodToFields(r.error).map(f => f.field)).toEqual(['sourceKind'])
-    for (const k of ['W', 'L', 'P']) expect(institutionCreateDto.safeParse({ ...appPayload, sourceKind: k }).success).toBe(true)
+    for (const k of ['W', 'D']) expect(institutionCreateDto.safeParse({ ...appPayload, sourceKind: k }).success).toBe(true)
+    for (const k of ['L', 'P', 'd']) {
+      const bad = institutionCreateDto.safeParse({ ...appPayload, sourceKind: k })
+      expect([k, bad.success]).toEqual([k, false])
+      if (!bad.success) expect(zodToFields(bad.error).map(f => f.field)).toEqual(['sourceKind'])
+    }
     expect(institutionCreateDto.safeParse({ ...appPayload, sourceKind: 'w' }).success).toBe(false)
   })
 
@@ -39,7 +44,7 @@ const SQL_DIR = path.join(__dirname, '..', '..', '..', 'sql')
 const hasSqlRepo = fs.existsSync(path.join(SQL_DIR, '01_setes_central_ddl.sql')) && fs.existsSync(path.join(SQL_DIR, '02_setes_central_seed.sql'))
 
 ;(hasSqlRepo ? describe : describe.skip)('sql/01 × sql/02 — o seed da Setes carrega toda coluna NOT NULL sem DEFAULT de tb_institution', () => {
-  it('toda coluna NOT NULL sem DEFAULT do CREATE de tb_institution aparece no INSERT da Setes (source_kind = L: a Setes está em transição)', () => {
+  it('toda coluna NOT NULL sem DEFAULT do CREATE de tb_institution aparece no INSERT da Setes (source_kind = D: o ERP Desktop é o dono do catálogo da Setes — D-OI10; o espelho do repo sql é refeito na janela PROD.E7.P2)', () => {
     const ddl = fs.readFileSync(path.join(SQL_DIR, '01_setes_central_ddl.sql'), 'utf8')
     const seed = fs.readFileSync(path.join(SQL_DIR, '02_setes_central_seed.sql'), 'utf8')
     const start = ddl.indexOf('CREATE TABLE IF NOT EXISTS `tb_institution` (')
@@ -52,8 +57,8 @@ const hasSqlRepo = fs.existsSync(path.join(SQL_DIR, '01_setes_central_ddl.sql'))
     const cols = insert![1].replace(/`/g, '').split(',').map(s => s.trim())
     for (const c of required) expect(cols).toContain(c)
     const values = insert![2].split(',').map(s => s.trim())
-    expect(values[cols.indexOf('source_kind')]).toBe("'L'")
-    expect(table).toMatch(/CONSTRAINT `ck_institution_source_kind` CHECK \(`source_kind` COLLATE utf8mb4_bin IN \('W', 'L', 'P'\)\)/)
+    expect(values[cols.indexOf('source_kind')]).toBe("'D'")
+    expect(table).toMatch(/CONSTRAINT `ck_institution_source_kind` CHECK \(`source_kind` COLLATE utf8mb4_bin IN \('W', 'D'\)\)/)
     expect(table).toMatch(/CONSTRAINT `ck_institution_transition_ended` CHECK/)
   })
 })

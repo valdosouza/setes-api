@@ -1,9 +1,10 @@
 /// <reference types="jest" />
-// D-PR53/D-PR57 (setes-api:PROD.E6.P2, 2026-11-20) — AUTOR e MOTIVO do ato "encerrar a transição" viram FATO do objeto
-// (`tb_institution.transition_ended_by`/`transition_end_reason`, migration 079), gravados no MESMO UPDATE condicionado que muda
-// `source_kind` e grava `transition_ended_at`; o `GET /api/institutions/:id` devolve os dois; o boot confere colunas, constraints e FK
+// D-PR53/D-PR57 (setes-api:PROD.E6.P2, 2026-11-20), revistas pelas D-PR73/D-PR75/D-PR76 (setes-api:PROD.E10.P1, 2026-11-22) — QUEM e
+// QUANDO trocou a origem dos cadastros de D para W viram FATO do objeto (`tb_institution.transition_ended_by`, migration 079;
+// `transition_end_reason` fica nulo — sem motivo desde a D-PR75, CHECK refeito pela 081), gravados no MESMO UPDATE condicionado do PUT; o `GET /api/institutions/:id` devolve os dois; o boot confere colunas, constraints e FK
 // pelo NOME e sonda o motor. Pelo app REAL (auth RS256 de teste → superGuard → controller → service → repository), banco dublado.
-// A semântica das constraints no motor é provada em schema descartável: scripts/prove-079-institution-transition-author.ts.
+// A semântica das constraints no motor é provada em schema descartável: scripts/prove-079-institution-transition-author.ts e
+// scripts/prove-081-institution-source-kind-w-d.ts (domínio W/D — D-OI10; ato D → W com corpo só { reason } — D-PR70).
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
 
@@ -18,12 +19,12 @@ jest.mock('../feature-flags/flag.service', () => ({ __esModule: true, isModuleEn
 jest.mock('../shared/entity', () => ({
   ...jest.requireActual('../shared/entity'),
   getEntityFiscalFull: jest.fn(async (id: number) => ({ id, nickTrade: 'SETES' })),
+  saveEntityFiscalChain: jest.fn(async (_c: unknown, id: number) => ({ id })),
 }))
 
 import pool from '../shared/db/connection'
 import logger from '../shared/logger/logger'
 import app from '../app'
-import { endLegacyTransition } from '../modules/institutions/institutions.service'
 import {
   assertInstitutionSourceKindSchema, CK_INSTITUTION_SOURCE_KIND, CK_INSTITUTION_TRANSITION_ENDED,
   CK_INSTITUTION_TRANSITION_AUTHOR, CK_INSTITUTION_TRANSITION_REASON, FK_INSTITUTION_TRANSITION_ENDED_BY,
@@ -34,16 +35,21 @@ const ENDED = new Date(Date.UTC(2026, 10, 20, 13, 0, 0))
 const SUPER = { institutionId: 1, userId: 7, role: 'super', schemaName: 'setes_setes' }
 const bearer = (p: object) => `Bearer ${testToken(p)}`
 
-// ---- modelo: UMA institution L (a Setes) ----
-type Row = { kind: 'W' | 'L' | 'P'; endedAt: Date | null; by: number | null; reason: string | null }
+// ---- modelo: UMA institution D (a Setes) ----
+type Row = { kind: 'W' | 'D'; endedAt: Date | null; by: number | null; reason: string | null }
 let row: Row
+let activeKeys: number
 let instUpdates: any[][]
 let txSql: string[]
 function db(sql: string, params: any[] = []): any {
   const s = String(sql)
   if (/FROM setes_central\.tb_institution WHERE id = \? FOR UPDATE/.test(s)) return [[{ id: params[0] }]]
-  if (/SELECT schema_name AS schemaName, source_kind AS sourceKind, transition_ended_at AS transitionEndedAt\s+FROM setes_central\.tb_institution WHERE id = \? AND deleted = 'N'/.test(s)) {
-    return [[{ schemaName: 'setes_setes', sourceKind: row.kind, transitionEndedAt: row.endedAt }]]
+  if (/^SELECT source_kind AS sourceKind FROM setes_central\.tb_institution WHERE id = \? AND deleted = 'N'$/.test(s)) return [[{ sourceKind: row.kind }]]
+  if (/SELECT schema_name AS schemaName, source_kind AS sourceKind FROM setes_central\.tb_institution\s+WHERE id = \? AND deleted = 'N' FOR UPDATE/.test(s)) {
+    return [[{ schemaName: 'setes_setes', sourceKind: row.kind }]]
+  }
+  if (/SELECT id FROM setes_central\.tb_sync_api_key\s+WHERE tb_institution_id = \? AND deleted = 'N' AND active = 'S' FOR UPDATE/.test(s)) {
+    return [Array.from({ length: activeKeys }, (_, i) => ({ id: i + 1 }))]
   }
   if (/i\.transition_ended_by AS transitionEndedBy, i\.transition_end_reason AS transitionEndReason,\s+COALESCE\(NULLIF\(ea\.nick_trade, ''\), ea\.name_company\) AS transitionEndedByName\s+FROM setes_central\.tb_institution i\s+LEFT JOIN setes_central\.tb_entity ea ON ea\.id = i\.transition_ended_by/.test(s)) {
     return [[{
@@ -51,21 +57,22 @@ function db(sql: string, params: any[] = []): any {
       transitionEndReason: row.reason, transitionEndedByName: row.by === 7 ? 'VALDO' : null,
     }]]
   }
-  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/.test(s)) {
+  if (/UPDATE setes_central\.tb_institution\s+SET source_kind = 'W', transition_ended_at = NOW\(\), transition_ended_by = \?, updated_at = NOW\(\)\s+WHERE id = \? AND source_kind = 'D' AND transition_ended_at IS NULL/.test(s)) {
     instUpdates.push(params)
-    if (row.kind !== 'L' || row.endedAt) return [{ affectedRows: 0 }]
-    row = { kind: params[0], endedAt: ENDED, by: params[1], reason: params[2] }
+    if (row.kind !== 'D' || row.endedAt) return [{ affectedRows: 0 }]
+    row = { kind: 'W', endedAt: ENDED, by: params[0], reason: null }
     return [{ affectedRows: 1 }]
   }
-  if (/UPDATE setes_central\.tb_sync_api_key SET active = 'N'/.test(s)) return [{ affectedRows: 1 }]
+  if (/UPDATE setes_central\.tb_institution SET active = \?/.test(s)) return [{ affectedRows: 1 }]
   if (/tb_category\s+WHERE tb_institution_id = \? AND kind = \? AND deleted = 'N' AND active = 'S' LIMIT 1 FOR UPDATE/.test(s)) return [[{ id: 1 }]]
-  if (/^\s*SELECT/i.test(s)) return [[]]
+  if (/^\s*SELECT/i.test(s)) return [[{ id: 1 }]]
   throw new Error(`SQL inesperado: ${s.slice(0, 100)}`)
 }
 
 beforeEach(() => {
   jest.clearAllMocks()
-  row = { kind: 'L', endedAt: null, by: null, reason: null }
+  row = { kind: 'D', endedAt: null, by: null, reason: null }
+  activeKeys = 0
   instUpdates = []; txSql = []
   q.mockImplementation(async (sql: string, params: any[] = []) => db(sql, params))
   ;(pool as any).getConnection.mockImplementation(async () => ({
@@ -74,54 +81,68 @@ beforeEach(() => {
   }))
 })
 
-describe('D-PR53 — o ato grava as QUATRO marcas no MESMO UPDATE condicionado', () => {
-  it('POST com motivo cercado de espaços: o UPDATE recebe (destino, autor do TOKEN, motivo APARADO, id), com a condição no comando; o log segue', async () => {
-    const r = await request(app).post('/api/institutions/1/end-legacy-transition').set('Authorization', bearer(SUPER))
-      .send({ destination: 'W', reason: '   servidor desktop desligado   ' })
+const BODY = {
+  entity: { nameCompany: 'SETES LTDA', nickTrade: 'SETES' }, personType: 'J', company: { cnpj: '11222333000181' },
+  addresses: [], phones: [], socialMedia: [],
+}
+const put = (body: object, who: object = SUPER) =>
+  request(app).put('/api/institutions/1').set('Authorization', bearer(who)).send(body)
+
+describe('D-PR73/D-PR75/D-PR76 — virar Web é a troca D → W no PUT: grava quem e quando, sem motivo, no MESMO UPDATE condicionado', () => {
+  it('PUT com sourceKind W (chave bloqueada): o UPDATE recebe (autor do TOKEN, id), com o destino e a condição no comando; o log segue', async () => {
+    const r = await put({ ...BODY, sourceKind: 'W' })
     expect(r.status).toBe(200)
-    expect(instUpdates).toEqual([['W', 7, 'servidor desktop desligado', 1]])
-    const upd = txSql.filter(s => /UPDATE setes_central\.tb_institution/.test(s))
-    expect(upd).toHaveLength(1)                                                      // UM comando para as quatro marcas
-    expect(upd[0]).toMatch(/source_kind = \?, transition_ended_at = NOW\(\), transition_ended_by = \?, transition_end_reason = \?/)
-    expect(upd[0]).toMatch(/WHERE id = \? AND source_kind = 'L' AND transition_ended_at IS NULL/)
-    expect(r.body.data).toEqual({ sourceKind: 'W', transitionEndedAt: ENDED.toISOString(), defaultCategories: { P: null, S: null }, syncKeysInactivated: 1 })
-    const log = (logger.info as jest.Mock).mock.calls.find(x => /ENCERRADA/.test(x[0]))
-    expect(log?.[1]).toMatchObject({ institutionId: 1, destination: 'W', reason: 'servidor desktop desligado', actorUserId: 7 })
+    expect(instUpdates).toEqual([[7, 1]])
+    const upd = txSql.filter(s => /SET source_kind/.test(s))
+    expect(upd).toHaveLength(1)                                                      // UM comando para as três marcas
+    expect(upd[0]).toMatch(/source_kind = 'W', transition_ended_at = NOW\(\), transition_ended_by = \?/)
+    expect(upd[0]).toMatch(/WHERE id = \? AND source_kind = 'D' AND transition_ended_at IS NULL/)
+    expect(upd[0]).not.toMatch(/transition_end_reason/)                              // D-PR75: sem motivo
+    expect(row).toEqual({ kind: 'W', endedAt: ENDED, by: 7, reason: null })
+    const log = (logger.info as jest.Mock).mock.calls.find(x => /TROCADA/.test(x[0]))
+    expect(log?.[1]).toMatchObject({ institutionId: 1, actorUserId: 7 })
   })
 
-  it('motivo curto depois de aparado = 400, nada chega ao banco', async () => {
-    const r = await request(app).post('/api/institutions/1/end-legacy-transition').set('Authorization', bearer(SUPER))
-      .send({ destination: 'W', reason: '   abc   ' })
-    expect(r.status).toBe(400)
+  it('chave do sincronizador ATIVA = 409 SOURCE_KIND_SYNC_KEY_ACTIVE e nada gravado (bloqueie antes — D-PR73)', async () => {
+    activeKeys = 1
+    const r = await put({ ...BODY, sourceKind: 'W' })
+    expect([r.status, r.body.code]).toEqual([409, 'SOURCE_KIND_SYNC_KEY_ACTIVE'])
     expect(instUpdates).toEqual([])
+    expect(row.kind).toBe('D')
   })
 
-  it('repetir o ato não reescreve autor nem motivo (write-once): 409 e o fato fica como o 1º ato deixou', async () => {
-    await request(app).post('/api/institutions/1/end-legacy-transition').set('Authorization', bearer(SUPER)).send({ destination: 'W', reason: 'primeira vez' })
-    const again = await request(app).post('/api/institutions/1/end-legacy-transition').set('Authorization', bearer({ ...SUPER, userId: 8 }))
-      .send({ destination: 'W', reason: 'segunda vez' })
-    expect([again.status, again.body.code]).toEqual([409, 'LEGACY_TRANSITION_NOT_APPLICABLE'])
-    expect(row).toEqual({ kind: 'W', endedAt: ENDED, by: 7, reason: 'primeira vez' })
+  it('repetir não reescreve o autor (write-once); voltar a D = 409 SOURCE_KIND_IMMUTABLE e o fato fica como a 1ª troca deixou', async () => {
+    await put({ ...BODY, sourceKind: 'W' })
+    const again = await put({ ...BODY, sourceKind: 'W' }, { ...SUPER, userId: 8 })
+    expect(again.status).toBe(200)                                                   // igual ao gravado: passa sem troca
+    expect(instUpdates).toEqual([[7, 1]])
+    const back = await put({ ...BODY, sourceKind: 'D' }, { ...SUPER, userId: 8 })
+    expect([back.status, back.body.code]).toEqual([409, 'SOURCE_KIND_IMMUTABLE'])
+    expect(row).toEqual({ kind: 'W', endedAt: ENDED, by: 7, reason: null })
   })
 
-  it('autor ausente (chamada sem usuário) = falha alta ANTES da transação — nunca grava o ato pela metade', async () => {
-    await expect(endLegacyTransition(1, 'W', 'sem autor no token', null)).rejects.toThrow(/autor ausente/)
-    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  it('D-PR76: o ato saiu — as rotas end-legacy-transition e end-desktop-transition = 404, nada chega ao banco', async () => {
+    for (const path of ['end-legacy-transition', 'end-desktop-transition']) {
+      const r = await request(app).post(`/api/institutions/1/${path}`).set('Authorization', bearer(SUPER)).send({ reason: 'rota velha' })
+      expect([path, r.status]).toEqual([path, 404])
+    }
+    expect(instUpdates).toEqual([])
+    expect(row.kind).toBe('D')
   })
 })
 
-describe('D-PR53 — o GET /:id devolve autor e motivo', () => {
-  it('antes do ato: tudo nulo; depois: o id e o NOME do autor (D-PR57) e o motivo gravados', async () => {
+describe('D-PR53/D-PR75 — o GET /:id devolve quem trocou e quando (o motivo só existe em linha antiga)', () => {
+  it('antes da troca: tudo nulo; depois: o id e o NOME do autor (D-PR57), motivo nulo', async () => {
     const before = await request(app).get('/api/institutions/1').set('Authorization', bearer(SUPER))
     expect(before.status).toBe(200)
     expect(before.body.data).toMatchObject({
-      sourceKind: 'L', transitionEndedAt: null, transitionEndedBy: null, transitionEndedByName: null, transitionEndReason: null,
+      sourceKind: 'D', transitionEndedAt: null, transitionEndedBy: null, transitionEndedByName: null, transitionEndReason: null,
     })
-    row = { kind: 'W', endedAt: ENDED, by: 7, reason: 'servidor desktop desligado' }
+    await put({ ...BODY, sourceKind: 'W' })
     const after = await request(app).get('/api/institutions/1').set('Authorization', bearer(SUPER))
     expect(after.body.data).toMatchObject({
       sourceKind: 'W', transitionEndedAt: ENDED.toISOString(), transitionEndedBy: 7, transitionEndedByName: 'VALDO',
-      transitionEndReason: 'servidor desktop desligado',
+      transitionEndReason: null,
     })
   })
 })
@@ -133,7 +154,7 @@ describe('D-PR53/D-PR57 — o boot confere a 079 pelo NOME e sonda o motor', () 
   ]
   const ALL_CKS = [CK_INSTITUTION_SOURCE_KIND, CK_INSTITUTION_TRANSITION_ENDED, CK_INSTITUTION_TRANSITION_AUTHOR, CK_INSTITUTION_TRANSITION_REASON]
   /** Conexão dublada: o motor recusa cada sonda pela constraint que o modelo manda (null = grava). */
-  const fakeConn = (o: { cols?: any[]; cks?: string[]; fk?: string | null; refuse?: (p: any[]) => string | null } = {}) => {
+  const fakeConn = (o: { cols?: any[]; cks?: string[]; fk?: string | null; refuse?: (p: any[], sql?: string) => string | null } = {}) => {
     const calls: Array<[string, any[]]> = []
     const conn = {
       query: jest.fn(async (sql: string, p: any[] = []) => {
@@ -142,7 +163,7 @@ describe('D-PR53/D-PR57 — o boot confere a 079 pelo NOME e sonda o motor', () 
         if (/information_schema\.CHECK_CONSTRAINTS/.test(sql)) return [(o.cks ?? ALL_CKS).map(n => ({ n }))]
         if (/information_schema\.REFERENTIAL_CONSTRAINTS/.test(sql)) return [o.fk === null ? [] : [{ t: o.fk ?? 'tb_user' }]]
         if (/INSERT INTO setes_central\.tb_institution/.test(sql)) {
-          const ck = (o.refuse ?? defaultRefuse)(p)
+          const ck = (o.refuse ?? defaultRefuse)(p, sql)
           if (ck) throw Object.assign(new Error(`CONSTRAINT \`${ck}\` failed for \`setes_central\`.\`tb_institution\``), { errno: 4025 })
         }
         return [{}]
@@ -152,34 +173,41 @@ describe('D-PR53/D-PR57 — o boot confere a 079 pelo NOME e sonda o motor', () 
     return { q: { getConnection: async () => conn as any }, calls, conn }
   }
   // o motor de verdade: [id, schema_name?, source_kind, by, reason] — params do INSERT da sonda: [id, sourceKind, by, reason]
-  const defaultRefuse = (p: any[]): string | null => {
+  const defaultRefuse = (p: any[], sql = ''): string | null => {
     const [, kind, by, reason] = p
-    if (!['W', 'L', 'P'].includes(kind)) return CK_INSTITUTION_SOURCE_KIND
-    if (kind === 'L' && by !== null) return CK_INSTITUTION_TRANSITION_ENDED      // a única sonda "L com data" leva autor e motivo
-    if (by === null || reason === null) return CK_INSTITUTION_TRANSITION_AUTHOR  // W com data, sem autor e/ou sem motivo
+    const withDate = /'setes_sonda_boot', \?, NOW\(\)/.test(sql)
+    if (!['W', 'D'].includes(kind)) return CK_INSTITUTION_SOURCE_KIND           // domínio da 081 (D-OI10): 'X', 'd', 'L', 'P' recusados
+    if (kind === 'D' && by !== null) return CK_INSTITUTION_TRANSITION_ENDED      // a única sonda "D com data" leva autor e motivo
+    if (by !== null && !withDate) return CK_INSTITUTION_TRANSITION_AUTHOR   // autor sem data (gate adversarial L7)
+    if (by === null) return CK_INSTITUTION_TRANSITION_AUTHOR                    // W com data, sem autor (data e autor juntos — 081, D-PR75)
     if (typeof reason === 'string' && reason.trim() === '') return CK_INSTITUTION_TRANSITION_REASON   // motivo só branco
     return null
   }
 
-  it('tudo certo = "ok"; as seis sondas rodam, cada uma numa transação desfeita; só as que levam autor criam o usuário de prova', async () => {
+  it('tudo certo = "ok"; as nove sondas rodam, cada uma numa transação desfeita; só as que levam autor criam o usuário de prova', async () => {
     const f = fakeConn()
     await expect(assertInstitutionSourceKindSchema(f.q as any)).resolves.toBe('ok')
     const inserts = f.calls.filter(([s]) => /INSERT INTO setes_central\.tb_institution/.test(s)).map(([, p]) => p)
     expect(inserts).toEqual([
-      [-1, 'X', null, null], [-1, 'l', null, null], [-1, 'L', -1, 'sonda do boot (D-PR53)'], [-1, 'W', null, null], [-1, 'W', -1, '   '],
-      [-1, 'W', -1, null],
+      [-1, 'X', null, null], [-1, 'd', null, null], [-1, 'L', null, null], [-1, 'P', null, null],
+      [-1, 'D', -1, 'sonda do boot (D-PR53)'], [-1, 'W', null, null], [-1, 'W', -1, null], [-1, 'W', -1, '   '], [-1, 'W', -1, null],
     ])
-    expect(f.calls.filter(([s]) => /INSERT INTO setes_central\.tb_user/.test(s))).toHaveLength(3)
-    expect(f.conn.rollback).toHaveBeenCalledTimes(6)
+    expect(f.calls.filter(([s]) => /INSERT INTO setes_central\.tb_user/.test(s))).toHaveLength(4)
+    expect(f.conn.rollback).toHaveBeenCalledTimes(9)
   })
 
-  it('CHECK do autor frouxo que esquece o motivo (mesmo nome) = o boot não sobe', async () => {
-    const f = fakeConn({ refuse: p => (p[1] === 'W' && p[2] === -1 && p[3] === null ? null : defaultRefuse(p)) })
-    await expect(assertInstitutionSourceKindSchema(f.q as any)).rejects.toThrow(new RegExp(`CHECK ${CK_INSTITUTION_TRANSITION_AUTHOR} NÃO aplicado`))
+  it.each(['L', 'P'])("a 081 não rodou: o CHECK com o NOME certo ainda aceita '%s' (domínio da 072) = o boot não sobe, apontando a 081", async (old) => {
+    const f = fakeConn({ refuse: (p, sql) => (p[1] === old ? null : defaultRefuse(p, sql)) })
+    await expect(assertInstitutionSourceKindSchema(f.q as any)).rejects.toThrow(new RegExp(`CHECK ${CK_INSTITUTION_SOURCE_KIND} NÃO aplicado.*migration 081`))
+  })
+
+  it('a 081 não rodou: o CHECK do autor ainda é o da 079 (recusa data e autor SEM motivo) = o boot não sobe, apontando a 081 (D-PR75)', async () => {
+    const f = fakeConn({ refuse: (p, sql) => (p[1] === 'W' && p[2] === -1 && p[3] === null ? CK_INSTITUTION_TRANSITION_AUTHOR : defaultRefuse(p, sql)) })
+    await expect(assertInstitutionSourceKindSchema(f.q as any)).rejects.toThrow(/SEM motivo foi recusada pelo motor[\s\S]*migration 081 não rodou \(D-PR75\)/)
   })
 
   it('o motor ACEITA motivo só branco (CHECK do motivo frouxo com o mesmo nome) = o boot não sobe', async () => {
-    const f = fakeConn({ refuse: p => (p[3] === '   ' ? null : defaultRefuse(p)) })
+    const f = fakeConn({ refuse: (p, sql) => (p[3] === '   ' ? null : defaultRefuse(p, sql)) })
     await expect(assertInstitutionSourceKindSchema(f.q as any)).rejects.toThrow(new RegExp(`CHECK ${CK_INSTITUTION_TRANSITION_REASON} NÃO aplicado`))
   })
 
@@ -204,12 +232,12 @@ describe('D-PR53/D-PR57 — o boot confere a 079 pelo NOME e sonda o motor', () 
   })
 
   it('o motor GRAVA o ato sem autor (CHECK da 079 não aplicado) = o boot não sobe', async () => {
-    const f = fakeConn({ refuse: p => (p[1] === 'W' && p[2] === null ? null : defaultRefuse(p)) })
+    const f = fakeConn({ refuse: (p, sql) => (p[1] === 'W' && p[2] === null ? null : defaultRefuse(p, sql)) })
     await expect(assertInstitutionSourceKindSchema(f.q as any)).rejects.toThrow(new RegExp(`CHECK ${CK_INSTITUTION_TRANSITION_AUTHOR} NÃO aplicado`))
   })
 
   it('a sonda "W com data" recusada por OUTRA constraint = o boot não sobe', async () => {
-    const f = fakeConn({ refuse: p => (p[1] === 'W' && p[2] === null ? CK_INSTITUTION_TRANSITION_REASON : defaultRefuse(p)) })
+    const f = fakeConn({ refuse: (p, sql) => (p[1] === 'W' && p[2] === null ? CK_INSTITUTION_TRANSITION_REASON : defaultRefuse(p, sql)) })
     await expect(assertInstitutionSourceKindSchema(f.q as any)).rejects.toThrow(/recusada por OUTRA constraint/)
   })
 })

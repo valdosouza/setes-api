@@ -5,7 +5,7 @@ import * as controller from './categories.controller'
  * Rotas do módulo categories — montadas em /api/categories pelo gateway.
  * Cadastro de CLIENTE (sem superGuard — escopo por institution do JWT);
  * gate técnico = flag 'categories'. Com sincronizador ativo a escrita é recusada
- * no gateway (`catalogOwnerGuard` — D-PR41 revista + D-PR47, Rodada 7 de produtos).
+ * no gateway até a D-PR77 (2026-11-22), que tirou a guarda do dono do catálogo.
  * Espelho no app: apps/web/lib/app/modules/categories/categories_module.dart
  */
 const router = Router()
@@ -58,7 +58,6 @@ const router = Router()
  *       201: { description: 'Envelope { ok, data: { id } }' }
  *       400: { description: 'Validação (pai inexistente / de outro kind)' }
  *       401: { description: Não autenticado }
- *       409: { description: 'CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro é só consulta na web (D-PR47)' }
  *       500: { description: Erro interno }
  */
 router.get('/', controller.list)
@@ -112,7 +111,6 @@ router.post('/', controller.create)
  *       400: { description: 'Validação (ciclo / pai inexistente / outro kind)' }
  *       401: { description: Não autenticado }
  *       404: { description: Categoria não encontrada }
- *       409: { description: 'CATALOG_LEGACY_OWNED — estabelecimento em transição do legado (source_kind L): o cadastro é só consulta na web (D-PR47)' }
  *       500: { description: Erro interno }
  *   delete:
  *     summary: Exclui logicamente uma categoria (bloqueado se houver subníveis)
@@ -128,7 +126,7 @@ router.post('/', controller.create)
  *       200: { description: 'Envelope { ok }' }
  *       401: { description: Não autenticado }
  *       404: { description: Categoria não encontrada }
- *       409: { description: 'HAS_CHILDREN — categoria possui subníveis (excluir os filhos primeiro); CATALOG_LEGACY_OWNED — transição do legado (só consulta)' }
+ *       409: { description: 'HAS_CHILDREN — categoria possui subníveis (excluir os filhos primeiro)' }
  *       500: { description: Erro interno }
  */
 router.get('/:id', controller.getById)

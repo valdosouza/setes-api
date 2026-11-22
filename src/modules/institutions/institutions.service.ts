@@ -8,7 +8,7 @@ import { sourceKindHasSync } from '@shared/catalog-owner'
 import { invalidateSessionContextForInstitution } from '@shared/session-context'
 import { runMigrationsForSchema } from '../../migrations/runner'
 import {
-  InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow, LegacyTransitionResult,
+  InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
 } from './institutions.interface'
 import { md5Password } from '@shared/auth/password'
 import { findLoginEmailOwner, insertUserCascade } from '@shared/user'
@@ -20,7 +20,7 @@ import {
   insertInstitutionCascade, updateInstitutionCascade,
   setInstitutionActive, deleteInstitution, insertDefaultFlags,
   grantStructuralInterfaces,
-  getSyncApiKey, insertSyncApiKey, switchSyncApiKeyTx, endLegacyTransitionTx, getInstitutionFact,
+  getSyncApiKey, insertSyncApiKey, switchSyncApiKeyTx, getInstitutionFact,
   INSTITUTION_SEARCH_CRITERIA,
 } from './institutions.repository'
 
@@ -128,7 +128,15 @@ export async function editInstitution(
     throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
   }
   try {
-    await updateInstitutionCascade(id, input, updatedBy)
+    // a troca D → W cunha id de categoria padrão: reexecuta a transação INTEIRA em deadlock (o resto da cascade é idempotente)
+    const outcome = await withDeadlockRetry('institutions/:id PUT', { institutionId: id }, 3,
+      () => updateInstitutionCascade(id, input, updatedBy))
+    if (outcome.sourceKindChanged) {
+      invalidateSessionContextForInstitution(id)      // o bloco `context` do app passa a dizer o dono novo sem esperar o TTL
+      logger.info('Origem dos cadastros TROCADA de ERP Desktop para Web (D-PR73/D-PR75)', {
+        institutionId: id, actorUserId: updatedBy, defaultCategories: outcome.defaultCategories,
+      })
+    }
   } catch (err) {
     dupEntryTo409(err)
   }
@@ -164,9 +172,9 @@ export async function generateSyncApiKey(id: number): Promise<SyncApiKeyRow> {
   if (!institution) {
     throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
   }
-  // D-PR47: a chave só existe para quem TEM fonte externa (L ou P) — W (nativo web, ou L encerrado para W) não tem sincronizador
+  // D-PR47/D-OI10: a chave só existe para quem tem o ERP Desktop como fonte (D) — W (nativo web, ou trocado de D para W) não tem sincronizador
   if (!sourceKindHasSync(institution.sourceKind)) {
-    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador — a chave só existe para L e P',
+    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador — a chave só existe para D (ERP Desktop)',
       [{ field: 'apiKey', message: `origem dos cadastros: ${institution.sourceKind}` }], ErrorCodes.SYNC_KEY_NOT_FOR_SOURCE)
   }
   const existing = await getSyncApiKey(id)
@@ -181,7 +189,7 @@ export async function generateSyncApiKey(id: number): Promise<SyncApiKeyRow> {
   const outcome = await insertSyncApiKey(id, apiKey, establishmentCode)
   if (outcome.kind === 'missing') throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
   if (outcome.kind === 'not-for-source') {
-    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador — a chave só existe para L e P',
+    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador — a chave só existe para D (ERP Desktop)',
       [{ field: 'apiKey', message: `origem dos cadastros: ${outcome.sourceKind}` }], ErrorCodes.SYNC_KEY_NOT_FOR_SOURCE)
   }
   if (outcome.kind === 'exists') {
@@ -206,7 +214,7 @@ export async function switchSyncApiKey(id: number, active: 'S' | 'N', actorUserI
       ErrorCodes.SYNC_KEY_MISSING)
   }
   if (outcome.kind === 'not-for-source') {
-    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador para retomar — a chave só existe para L e P',
+    throw new HttpError(409, 'Estabelecimento nativo web não tem sincronizador para retomar — a chave só existe para D (ERP Desktop)',
       [{ field: 'active', message: `origem dos cadastros: ${outcome.sourceKind}` }], ErrorCodes.SYNC_KEY_NOT_FOR_SOURCE)
   }
   if (outcome.kind === 'switched') {
@@ -214,58 +222,4 @@ export async function switchSyncApiKey(id: number, active: 'S' | 'N', actorUserI
       { institutionId: id, actorUserId, keys: outcome.keys })
   }
   return (await getSyncApiKey(id))!
-}
-
-/**
- * ENCERRAR A TRANSIÇÃO do desktop legado (D-PR48/D-PR49 — ato ÚNICO e IRREVERSÍVEL do Super, tela Institutions): L → W (cliente sem
- * PDV) ou L → P (cliente com PDV — os PDVs passam a receber o catálogo da web). Grava `transition_ended_at`, muda o fato, cria as
- * categorias padrão que faltarem e, no destino W, inativa a chave do sincronizador em definitivo; no destino P a chave fica (é a dos
- * PDVs — A-PR4/Q-PR60) e o servidor desktop passa a ser recusado pelo FATO no setes-sync (`SYNC_TRANSITION_ENDED` — contrato com o grupo
- * do sync). O autor e o motivo viram FATO do objeto (`transition_ended_by`/`transition_end_reason`, gravados no MESMO UPDATE do ato —
- * D-PR53/D-PR57) e seguem também no log. Reexecuta em deadlock (cunha id de categoria).
- */
-/**
- * BARREIRA INTERINA (A-PR5 — gate socrático da Rodada 7; questão Q-PR62 ao Valdo): o destino P deixa a chave viva para os PDVs (A-PR4) e
- * conta com o setes-sync RECUSAR o servidor desktop pelo FATO (`SYNC_TRANSITION_ENDED`) — contrato que ainda não existe. Até lá, L → P
- * abriria DOIS escritores no catálogo (o desktop pela chave viva + a web, agora dona) — exatamente o que a guarda existe para impedir; e o
- * ato é irreversível. Destino W já vale (a chave fica inativa e o setes-sync a recusa pela pausa). Liberar P = tirar daqui quando o contrato
- * for honrado (ou decisão do Valdo em contrário).
- */
-export const OPEN_TRANSITION_DESTINATIONS: ReadonlySet<'W' | 'P'> = new Set<'W' | 'P'>(['W'])
-
-export async function endLegacyTransition(
-  id: number, destination: 'W' | 'P', reason: string, actorUserId: number | null
-): Promise<LegacyTransitionResult> {
-  if (!OPEN_TRANSITION_DESTINATIONS.has(destination)) {
-    throw new HttpError(409,
-      `Destino ${destination} ainda não disponível: o sincronizador precisa honrar o fato da origem dos cadastros antes (contrato SYNC_TRANSITION_ENDED) — por enquanto só W`,
-      [{ field: 'destination', message: `destinos abertos: ${[...OPEN_TRANSITION_DESTINATIONS].join(', ')}` }],
-      ErrorCodes.LEGACY_TRANSITION_DESTINATION_PENDING)
-  }
-  // a rota passa por auth + superGuard: o token SEMPRE traz o usuário — sem ele o ato não grava pela metade (o CHECK da 079 recusaria)
-  if (actorUserId == null) throw new Error('encerrar a transição: autor ausente — a rota exige o usuário do token (D-PR53)')
-  const outcome = await withDeadlockRetry('institutions end-legacy-transition POST', { institutionId: id }, 3,
-    () => endLegacyTransitionTx(id, destination, actorUserId, reason))
-  if (outcome.kind === 'missing') throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
-  if (outcome.kind === 'not-applicable') {
-    // o instante não vai na prosa (PADROES §10: instante na zona é da fronteira do app) — vai tipado em fields[]
-    const fields = [{ field: 'destination', message: `origem atual: ${outcome.sourceKind}` }]
-    if (outcome.transitionEndedAt) fields.push({ field: 'transitionEndedAt', message: outcome.transitionEndedAt })
-    throw new HttpError(409,
-      outcome.transitionEndedAt
-        ? `A transição deste estabelecimento já foi encerrada (origem atual: ${outcome.sourceKind}) — o ato é único`
-        : `Encerrar a transição só vale para estabelecimento em transição do legado (origem atual: ${outcome.sourceKind})`,
-      fields, ErrorCodes.LEGACY_TRANSITION_NOT_APPLICABLE)
-  }
-  invalidateSessionContextForInstitution(id)      // o bloco `context` do app passa a dizer o dono novo sem esperar o TTL
-  const fact = (await getInstitutionFact(id))!
-  logger.info('Transição do legado ENCERRADA', {
-    institutionId: id, schemaName: outcome.schemaName, destination, reason, actorUserId,
-    transitionEndedAt: fact.transitionEndedAt, defaultCategories: outcome.defaultCategories,
-    syncKeysInactivated: outcome.syncKeysInactivated,
-  })
-  return {
-    sourceKind: fact.sourceKind, transitionEndedAt: fact.transitionEndedAt,
-    defaultCategories: outcome.defaultCategories, syncKeysInactivated: outcome.syncKeysInactivated,
-  }
 }
