@@ -1,0 +1,613 @@
+{
+  "funcao": "IBS/CBS do item de mercadoria com o tributo por fora (2026), alíquota efetiva, alíquota pela data e Simples no DAS",
+  "versao": 1,
+  "regras": [
+    "RF-BC-04",
+    "RF-BC-06",
+    "RF-BC-07",
+    "RF-BC-08",
+    "RF-BC-11",
+    "RF-SN-03",
+    "RF-SN-18"
+  ],
+  "convencao": {
+    "numeros": "valores e alíquotas são STRINGS decimais (nunca número JSON); reais com 2 casas",
+    "aliquotas": "fração decimal: \"0.009\" = 0,9%; a alíquota efetiva sai com 6 casas da fração (= 4 casas do percentual)",
+    "datas": "AAAA-MM-DD",
+    "arredondamento": "meio para cima, em centavos inteiros",
+    "grau": "T = escrito na norma · L = leitura nossa · E = observado em homologação ou produção"
+  },
+  "descricao": "Casos do motor próprio de IBS/CBS (setes-api:IBS.E9.P1). A conta por dentro fica em conta-por-dentro.json. Fora dos vetores: a CBS de 2027 (sem valor fixado), ICMS diferido e ST retido na base, devolução, crédito presumido.",
+  "casosAliquotaEfetiva": [
+    {
+      "id": "IAE-001",
+      "descricao": "CBS de 8,7% com redução de 60%",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras do gRed (rej. 1035, 1047, 1064): pAliqEfet = p × (1 − pRedAliq/100); o modo de arredondamento é leitura nossa",
+      "entrada": {
+        "aliquota": "0.087",
+        "reducao": "0.6"
+      },
+      "saida": {
+        "aliquotaEfetiva": "0.034800"
+      }
+    },
+    {
+      "id": "IAE-002",
+      "descricao": "IBS de 0,05% com redução de 60%",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras do gRed (rej. 1035, 1047, 1064): pAliqEfet = p × (1 − pRedAliq/100); o modo de arredondamento é leitura nossa",
+      "entrada": {
+        "aliquota": "0.0005",
+        "reducao": "0.6"
+      },
+      "saida": {
+        "aliquotaEfetiva": "0.000200"
+      }
+    },
+    {
+      "id": "IAE-003",
+      "descricao": "IBS de 0,1% com redução de 40%",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras do gRed (rej. 1035, 1047, 1064): pAliqEfet = p × (1 − pRedAliq/100); o modo de arredondamento é leitura nossa",
+      "entrada": {
+        "aliquota": "0.001",
+        "reducao": "0.4"
+      },
+      "saida": {
+        "aliquotaEfetiva": "0.000600"
+      }
+    },
+    {
+      "id": "IAE-004",
+      "descricao": "Redução de 100% zera a alíquota",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras do gRed (rej. 1035, 1047, 1064): pAliqEfet = p × (1 − pRedAliq/100); o modo de arredondamento é leitura nossa",
+      "entrada": {
+        "aliquota": "0.087",
+        "reducao": "1"
+      },
+      "saida": {
+        "aliquotaEfetiva": "0.000000"
+      }
+    },
+    {
+      "id": "IAE-005",
+      "descricao": "Sem redução, a efetiva é a nominal",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras do gRed (rej. 1035, 1047, 1064): pAliqEfet = p × (1 − pRedAliq/100); o modo de arredondamento é leitura nossa",
+      "entrada": {
+        "aliquota": "0.112",
+        "reducao": "0"
+      },
+      "saida": {
+        "aliquotaEfetiva": "0.112000"
+      }
+    },
+    {
+      "id": "IAE-006",
+      "descricao": "CBS de teste de 2026 com redução de 60%",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras do gRed (rej. 1035, 1047, 1064): pAliqEfet = p × (1 − pRedAliq/100); o modo de arredondamento é leitura nossa",
+      "entrada": {
+        "aliquota": "0.009",
+        "reducao": "0.6"
+      },
+      "saida": {
+        "aliquotaEfetiva": "0.003600"
+      }
+    }
+  ],
+  "casosAliquotaPorData": [
+    {
+      "id": "IAD-001",
+      "descricao": "2026",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "CBS",
+        "data": "2026-11-10"
+      },
+      "saida": {
+        "aliquota": "0.009000"
+      }
+    },
+    {
+      "id": "IAD-002",
+      "descricao": "2026",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_UF",
+        "data": "2026-11-10"
+      },
+      "saida": {
+        "aliquota": "0.001000"
+      }
+    },
+    {
+      "id": "IAD-003",
+      "descricao": "2026: município zero",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_MUN",
+        "data": "2026-11-10"
+      },
+      "saida": {
+        "aliquota": "0.000000"
+      }
+    },
+    {
+      "id": "IAD-004",
+      "descricao": "Último dia de 2026",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_UF",
+        "data": "2026-12-31"
+      },
+      "saida": {
+        "aliquota": "0.001000"
+      }
+    },
+    {
+      "id": "IAD-005",
+      "descricao": "Primeiro dia de 2027",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_UF",
+        "data": "2027-01-01"
+      },
+      "saida": {
+        "aliquota": "0.000500"
+      }
+    },
+    {
+      "id": "IAD-006",
+      "descricao": "Primeiro dia de 2027",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_MUN",
+        "data": "2027-01-01"
+      },
+      "saida": {
+        "aliquota": "0.000500"
+      }
+    },
+    {
+      "id": "IAD-007",
+      "descricao": "CBS de 2027: a norma não fixa o valor, não há linha",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "CBS",
+        "data": "2027-01-01"
+      },
+      "saida": {
+        "aliquota": null
+      }
+    },
+    {
+      "id": "IAD-008",
+      "descricao": "Último dia de 2028",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_UF",
+        "data": "2028-12-31"
+      },
+      "saida": {
+        "aliquota": "0.000500"
+      }
+    },
+    {
+      "id": "IAD-009",
+      "descricao": "2029: sem linha",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_MUN",
+        "data": "2029-01-01"
+      },
+      "saida": {
+        "aliquota": null
+      }
+    },
+    {
+      "id": "IAD-010",
+      "descricao": "2029: sem linha",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras de alíquota do gIBSUF, do gIBSMun e do gCBS (rej. 1026, 1036, 1037); LC 214 arts. 343, 344 e 346",
+      "entrada": {
+        "tributo": "IBS_UF",
+        "data": "2029-01-01"
+      },
+      "saida": {
+        "aliquota": null
+      }
+    }
+  ],
+  "casosItem": [
+    {
+      "id": "IIT-001",
+      "descricao": "Base 100,00",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "100.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0",
+        "reducaoIBSMun": "0",
+        "reducaoCBS": "0",
+        "diferimentoIBSUF": "0",
+        "diferimentoIBSMun": "0",
+        "diferimentoCBS": "0"
+      },
+      "saida": {
+        "vBC": "100.00",
+        "aliquotaEfetivaIBSUF": "0.001000",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.009000",
+        "vDifIBSUF": "0.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "0.00",
+        "vIBSUF": "0.10",
+        "vIBSMun": "0.00",
+        "vCBS": "0.90",
+        "vIBS": "0.10"
+      }
+    },
+    {
+      "id": "IIT-002",
+      "descricao": "Base 33,33",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "33.33",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0",
+        "reducaoIBSMun": "0",
+        "reducaoCBS": "0",
+        "diferimentoIBSUF": "0",
+        "diferimentoIBSMun": "0",
+        "diferimentoCBS": "0"
+      },
+      "saida": {
+        "vBC": "33.33",
+        "aliquotaEfetivaIBSUF": "0.001000",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.009000",
+        "vDifIBSUF": "0.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "0.00",
+        "vIBSUF": "0.03",
+        "vIBSMun": "0.00",
+        "vCBS": "0.30",
+        "vIBS": "0.03"
+      }
+    },
+    {
+      "id": "IIT-003",
+      "descricao": "Base 1.000,00",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "1000.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0",
+        "reducaoIBSMun": "0",
+        "reducaoCBS": "0",
+        "diferimentoIBSUF": "0",
+        "diferimentoIBSMun": "0",
+        "diferimentoCBS": "0"
+      },
+      "saida": {
+        "vBC": "1000.00",
+        "aliquotaEfetivaIBSUF": "0.001000",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.009000",
+        "vDifIBSUF": "0.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "0.00",
+        "vIBSUF": "1.00",
+        "vIBSMun": "0.00",
+        "vCBS": "9.00",
+        "vIBS": "1.00"
+      }
+    },
+    {
+      "id": "IIT-004",
+      "descricao": "Redução de 60%",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "10000.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0.6",
+        "reducaoIBSMun": "0.6",
+        "reducaoCBS": "0.6",
+        "diferimentoIBSUF": "0",
+        "diferimentoIBSMun": "0",
+        "diferimentoCBS": "0"
+      },
+      "saida": {
+        "vBC": "10000.00",
+        "aliquotaEfetivaIBSUF": "0.000400",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.003600",
+        "vDifIBSUF": "0.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "0.00",
+        "vIBSUF": "4.00",
+        "vIBSMun": "0.00",
+        "vCBS": "36.00",
+        "vIBS": "4.00"
+      }
+    },
+    {
+      "id": "IIT-005",
+      "descricao": "Diferimento de 50%",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "1000.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0",
+        "reducaoIBSMun": "0",
+        "reducaoCBS": "0",
+        "diferimentoIBSUF": "0.5",
+        "diferimentoIBSMun": "0.5",
+        "diferimentoCBS": "0.5"
+      },
+      "saida": {
+        "vBC": "1000.00",
+        "aliquotaEfetivaIBSUF": "0.001000",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.009000",
+        "vDifIBSUF": "0.50",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "4.50",
+        "vIBSUF": "0.50",
+        "vIBSMun": "0.00",
+        "vCBS": "4.50",
+        "vIBS": "0.50"
+      }
+    },
+    {
+      "id": "IIT-006",
+      "descricao": "Redução de 60% com diferimento de 50%: o diferimento usa a alíquota efetiva",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "10000.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0.6",
+        "reducaoIBSMun": "0.6",
+        "reducaoCBS": "0.6",
+        "diferimentoIBSUF": "0.5",
+        "diferimentoIBSMun": "0.5",
+        "diferimentoCBS": "0.5"
+      },
+      "saida": {
+        "vBC": "10000.00",
+        "aliquotaEfetivaIBSUF": "0.000400",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.003600",
+        "vDifIBSUF": "2.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "18.00",
+        "vIBSUF": "2.00",
+        "vIBSMun": "0.00",
+        "vCBS": "18.00",
+        "vIBS": "2.00"
+      }
+    },
+    {
+      "id": "IIT-007",
+      "descricao": "Meio centavo exato: 0,005 e 0,045 sobem (o modo de arredondamento é leitura nossa)",
+      "grau": "L",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "5.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0",
+        "reducaoIBSMun": "0",
+        "reducaoCBS": "0",
+        "diferimentoIBSUF": "0",
+        "diferimentoIBSMun": "0",
+        "diferimentoCBS": "0"
+      },
+      "saida": {
+        "vBC": "5.00",
+        "aliquotaEfetivaIBSUF": "0.001000",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.009000",
+        "vDifIBSUF": "0.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "0.00",
+        "vIBSUF": "0.01",
+        "vIBSMun": "0.00",
+        "vCBS": "0.05",
+        "vIBS": "0.01"
+      }
+    },
+    {
+      "id": "IIT-008",
+      "descricao": "Base zero",
+      "grau": "T",
+      "fonte": "NT 2025.002 v1.53, regras UB35-10, UB54-10, UB67-10, UB54a-10 e as do gRed e do gDif; alíquotas de 2026",
+      "entrada": {
+        "vBC": "0.00",
+        "aliquotaIBSUF": "0.001",
+        "aliquotaIBSMun": "0",
+        "aliquotaCBS": "0.009",
+        "reducaoIBSUF": "0",
+        "reducaoIBSMun": "0",
+        "reducaoCBS": "0",
+        "diferimentoIBSUF": "0",
+        "diferimentoIBSMun": "0",
+        "diferimentoCBS": "0"
+      },
+      "saida": {
+        "vBC": "0.00",
+        "aliquotaEfetivaIBSUF": "0.001000",
+        "aliquotaEfetivaIBSMun": "0.000000",
+        "aliquotaEfetivaCBS": "0.009000",
+        "vDifIBSUF": "0.00",
+        "vDifIBSMun": "0.00",
+        "vDifCBS": "0.00",
+        "vIBSUF": "0.00",
+        "vIBSMun": "0.00",
+        "vCBS": "0.00",
+        "vIBS": "0.00"
+      }
+    }
+  ],
+  "casosSimplesBase": [
+    {
+      "id": "ISB-001",
+      "descricao": "Produto, frete, seguro e outras, menos o desconto",
+      "grau": "L",
+      "fonte": "RF-SN-03 (leitura nossa; a NT não define a base do gTribSN, RF-SN-02); molde Un_RegraSimplesIBSCBS.pas do ERP Desktop",
+      "entrada": {
+        "vProd": "100.00",
+        "vFrete": "10.00",
+        "vSeg": "5.00",
+        "vOutro": "2.50",
+        "vDesc": "7.50"
+      },
+      "saida": {
+        "vBCSN": "110.00"
+      }
+    },
+    {
+      "id": "ISB-002",
+      "descricao": "Só o produto",
+      "grau": "L",
+      "fonte": "RF-SN-03 (leitura nossa; a NT não define a base do gTribSN, RF-SN-02); molde Un_RegraSimplesIBSCBS.pas do ERP Desktop",
+      "entrada": {
+        "vProd": "1000.00",
+        "vFrete": "0.00",
+        "vSeg": "0.00",
+        "vOutro": "0.00",
+        "vDesc": "0.00"
+      },
+      "saida": {
+        "vBCSN": "1000.00"
+      }
+    },
+    {
+      "id": "ISB-003",
+      "descricao": "Desconto maior que a soma: piso em zero",
+      "grau": "L",
+      "fonte": "RF-SN-03 (leitura nossa; a NT não define a base do gTribSN, RF-SN-02); molde Un_RegraSimplesIBSCBS.pas do ERP Desktop",
+      "entrada": {
+        "vProd": "10.00",
+        "vFrete": "0.00",
+        "vSeg": "0.00",
+        "vOutro": "0.00",
+        "vDesc": "15.00"
+      },
+      "saida": {
+        "vBCSN": "0.00"
+      }
+    }
+  ],
+  "casosSimplesValor": [
+    {
+      "id": "ISV-001",
+      "descricao": "IBS com alíquota efetiva de 0,1234%",
+      "grau": "L",
+      "fonte": "RF-SN-03 e RF-SN-18: valor = base × alíquota efetiva do Simples; arredondamento é leitura nossa",
+      "entrada": {
+        "vBCSN": "1000.00",
+        "aliquotaEfetivaSN": "0.001234"
+      },
+      "saida": {
+        "valor": "1.23"
+      }
+    },
+    {
+      "id": "ISV-002",
+      "descricao": "CBS com alíquota efetiva de 0,9258%",
+      "grau": "L",
+      "fonte": "RF-SN-03 e RF-SN-18: valor = base × alíquota efetiva do Simples; arredondamento é leitura nossa",
+      "entrada": {
+        "vBCSN": "1000.00",
+        "aliquotaEfetivaSN": "0.009258"
+      },
+      "saida": {
+        "valor": "9.26"
+      }
+    },
+    {
+      "id": "ISV-003",
+      "descricao": "3,1%",
+      "grau": "L",
+      "fonte": "RF-SN-03 e RF-SN-18: valor = base × alíquota efetiva do Simples; arredondamento é leitura nossa",
+      "entrada": {
+        "vBCSN": "123.45",
+        "aliquotaEfetivaSN": "0.031"
+      },
+      "saida": {
+        "valor": "3.83"
+      }
+    },
+    {
+      "id": "ISV-004",
+      "descricao": "",
+      "grau": "L",
+      "fonte": "RF-SN-03 e RF-SN-18: valor = base × alíquota efetiva do Simples; arredondamento é leitura nossa",
+      "entrada": {
+        "vBCSN": "333.33",
+        "aliquotaEfetivaSN": "0.001234"
+      },
+      "saida": {
+        "valor": "0.41"
+      }
+    },
+    {
+      "id": "ISV-005",
+      "descricao": "",
+      "grau": "L",
+      "fonte": "RF-SN-03 e RF-SN-18: valor = base × alíquota efetiva do Simples; arredondamento é leitura nossa",
+      "entrada": {
+        "vBCSN": "333.33",
+        "aliquotaEfetivaSN": "0.009258"
+      },
+      "saida": {
+        "valor": "3.09"
+      }
+    },
+    {
+      "id": "ISV-006",
+      "descricao": "CBS de 1,5%",
+      "grau": "L",
+      "fonte": "RF-SN-03 e RF-SN-18: valor = base × alíquota efetiva do Simples; arredondamento é leitura nossa",
+      "entrada": {
+        "vBCSN": "200.00",
+        "aliquotaEfetivaSN": "0.015"
+      },
+      "saida": {
+        "valor": "3.00"
+      }
+    }
+  ]
+}

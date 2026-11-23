@@ -97,6 +97,11 @@ src/
 │   │                        # entityFiscalBody+withFiscalRefinements) + index.ts (barrel
 │   │                        # '@shared/entity'); peças NUNCA importam entity/ — só a
 │   │                        # composição importa as peças; concretos consomem o barrel
+│   ├── ibscbs-calculation/  # peça PURA: motor próprio de IBS/CBS do item de mercadoria (D-IB132;
+│   │                        # regular por fora/por dentro, Simples no DAS, totais). Centavos inteiros e
+│   │                        # milionésimos; sem banco/relógio/import de outra peça (cerca
+│   │                        # ibscbs-calculation-fence); vetores neutros em __tests__/vectors/ibscbs.
+│   │                        # Ninguém chama ainda — a ligação no faturamento é do IBS.E9.P3
 │   ├── errors/http-error.ts # Custom HTTP error class
 │   ├── http/controller-utils.ts # handleError + parseId (todo controller usa)
 │   ├── logger/logger.ts     # Simple console logger with timestamps
