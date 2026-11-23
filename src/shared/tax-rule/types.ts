@@ -113,6 +113,7 @@ export interface IcmsCalcResult {
   value: number
   operationValue?: number  // vICMSOp — CST 51 e CSOSN (informativo, nunca zerado pelo grupo)
   deferredValue?: number   // vICMSDif — CST 51 e CSOSN
+  deferredAliq?: number    // pDif APLICADA (D-NE248: o registro comprova o cálculo) — CST 51; CSOSN = 0 fora da revenda
   baseSt?: number
   valueSt?: number
   creditAliq?: number      // pCredSN — CSOSN 101/201/500/900 (P2.9)

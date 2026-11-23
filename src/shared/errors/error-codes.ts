@@ -32,6 +32,8 @@ export const ErrorCodes = {
   ORDER_INVOICED:      'ORDER_INVOICED',
   ORDER_CANCELLED:     'ORDER_CANCELLED',
   ORDER_NO_ITEMS:      'ORDER_NO_ITEMS',
+  ORDER_ITEM_ID_DUPLICATED: 'ORDER_ITEM_ID_DUPLICATED',
+  BILLING_TOTAL_INVALID: 'BILLING_TOTAL_INVALID',
   PAYMENT_TYPE_UNAVAILABLE: 'PAYMENT_TYPE_UNAVAILABLE',
   // Financeiro
   TITLE_NOT_FOUND:     'TITLE_NOT_FOUND',
@@ -282,6 +284,8 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   ORDER_INVOICED:      'Ordem já faturada — alterações só via financeiro',
   ORDER_CANCELLED:     'Pedido cancelado com nota fiscal (D3/D4) — somente leitura; faturar de novo exige pedido/OS novo',
   ORDER_NO_ITEMS:      'Ordem sem itens — nada a faturar',
+  ORDER_ITEM_ID_DUPLICATED: 'Pedido com número de item repetido entre mercadoria e serviço — o faturamento exige número único por pedido',
+  BILLING_TOTAL_INVALID: 'Total da nota de mercadoria inválido pela fórmula oficial — confira os valores dos itens',
   PAYMENT_TYPE_UNAVAILABLE: 'Forma de pagamento não vinculada/habilitada na institution',
   TITLE_NOT_FOUND:     'Título financeiro não encontrado',
   BANK_NOT_FOUND:      'Banco/conta bancária inexistente',

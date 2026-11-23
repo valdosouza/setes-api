@@ -13,6 +13,11 @@ import { validateOrder, invoiceOrder } from '../modules/billing/billing.service'
 
 // IB-2 (D-IB71): a declaração IBS/CBS tem teste próprio (ibscbs-declaration.test.ts) — aqui a fronteira é mockada
 // D-IB99/D-IB100: a opção de apuração do IBS/CBS tem teste próprio (ibscbs-assessment.test.ts) — aqui a fronteira é mockada
+// D-FAT1: a conferência do pedido sob a trava tem teste próprio (billing-input-print.test.ts) — aqui a fronteira é mockada
+jest.mock('../modules/billing/billing.input-print', () => ({
+  ...jest.requireActual('../modules/billing/billing.input-print'),
+  assertBillingInputsUnchanged: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../shared/ibscbs-assessment', () => ({
   __esModule: true,
   previewIbscbsAssessmentRefusal: jest.fn().mockResolvedValue(null),
@@ -269,8 +274,8 @@ describe('invoiceOrder — caminho kind=S', () => {
     expect(result.model).toBe('SE')
     const issqn = conn.query.mock.calls.find(c => (c[0] as string).includes('tb_order_item_issqn'))
     expect(issqn).toBeDefined()
-    // params: ...key(3), base, aliq, valor, listservice, tax_code
+    // params: ...key(3), base, aliq, valor, listservice, tax_code, ISS retido (D-NE248, migration 082: 0 = tomador não retém)
     const p = issqn![1] as any[]
-    expect(p.slice(-5)).toEqual([1000, 5, 50, '1.02', '0102'])
+    expect(p.slice(-6)).toEqual([1000, 5, 50, '1.02', '0102', 0])
   })
 })

@@ -19,7 +19,9 @@ function walk(dir: string): string[] {
 // D-IB129 (fase IBS/CBS, Valdo 2026-11-18 — prompt_fase_ibs_cbs.md §17.7): o 4º subpath é a opção de apuração do IBS/CBS
 // `fiscal-api/ibscbs-assessment` — peça PURA (sem banco, sem I/O) com a regra ÚNICA da vigente (D-IB128) e o contrato da view; aceita
 // em qualquer arquivo, como o `federal-id`.
-const ALLOWED = new Set(['fiscal-api/reading', 'fiscal-api/federal-id', 'fiscal-api/ibscbs-assessment'])
+// D-NE215 (NF-e, 2026-11-21; setes-api:NFE.E1.P1.T2): o 4º subpath permitido é `fiscal-api/merchandise-total` — peça PURA (sem banco,
+// sem I/O) com a fórmula oficial do vNF, lida pelo ERP (que cunha o total do ramo de mercadoria) e pela nfe-api (que confere).
+const ALLOWED = new Set(['fiscal-api/reading', 'fiscal-api/federal-id', 'fiscal-api/ibscbs-assessment', 'fiscal-api/merchandise-total'])
 // Costura A1 da auth-api (D-AU6, Valdo 2026-10-31): o 3º subpath é o LEITOR do veredito de acesso `fiscal-api/access` (a pilha de views
 // publicada — nada de escrita). Só o ADAPTADOR o importa (`@shared/access` — um leitor no setes-api) e a prova das views em banco descartável.
 const ALLOWED_ONLY_IN: Readonly<Record<string, readonly string[]>> = {
@@ -28,7 +30,7 @@ const ALLOWED_ONLY_IN: Readonly<Record<string, readonly string[]>> = {
     'scripts/adv-a1-delta-probe.ts', 'scripts/measure-access-reads.ts'],
 }
 
-describe('cerca F2a — o setes-api só importa `fiscal-api/reading`, `fiscal-api/federal-id`, `fiscal-api/ibscbs-assessment` e (só no adaptador) `fiscal-api/access`', () => {
+describe('cerca F2a — o setes-api só importa `fiscal-api/reading`, `fiscal-api/federal-id`, `fiscal-api/ibscbs-assessment`, `fiscal-api/merchandise-total` e (só no adaptador) `fiscal-api/access`', () => {
   it('nenhum import/require/import() de `fiscal-api` (raiz) ou de outro subpath dele', () => {
     const bad: string[] = []
     for (const f of ROOTS.flatMap(walk)) {

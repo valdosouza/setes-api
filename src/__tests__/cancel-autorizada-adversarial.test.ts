@@ -14,6 +14,11 @@ import { validateOrder, invoiceOrder } from '../modules/billing/billing.service'
 import { persistInvoice } from '../modules/billing/billing.repository'
 import { buildCancelPlan } from '../shared/invoice/invoice-cancel'
 
+// D-FAT1: a conferência do pedido sob a trava tem teste próprio (billing-input-print.test.ts) — aqui a fronteira é mockada
+jest.mock('../modules/billing/billing.input-print', () => ({
+  ...jest.requireActual('../modules/billing/billing.input-print'),
+  assertBillingInputsUnchanged: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('../shared/db/connection', () => ({
   __esModule: true,
   default: { query: jest.fn(), getConnection: jest.fn() },
@@ -68,7 +73,7 @@ describe('A2 (HIGH) — pedido cancelado com registro fiscal (status C) NUNCA re
     mockGetConnection.mockResolvedValue(conn)
     const resolveParcels = jest.fn().mockResolvedValue([])
     await expect(persistInvoice('setes_setes', 1, {
-      orderId: 10, recipientEntityId: 55, model: 'SE', serie: '1', items: [], totalValue: 100,
+      orderId: 10, recipientEntityId: 55, model: 'SE', serie: '1', items: [], totalValue: 100, merchandiseTotalValue: null, inputPrint: '',
       resolveParcels, checks: [], financialKind: 'RA', financialOperation: 'C', noteText: '',
       approxTaxByItem: new Map(), userId: 7, automationConfig: {} as any, commissions: [], returnPlan: null,
       dtEmission: '2026-10-15',
