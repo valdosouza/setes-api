@@ -162,6 +162,11 @@ describe('billing.context', () => {
 // ---------------------------------------------------------------------
 
 describe('billing.repository', () => {
+  it('billNumberOf (D-NE266): pedido/nota-parcela com número; sem número o pedido entra no lugar da nota', () => {
+    expect(repo.billNumberOf(1500, '7', 2)).toBe('1500/7-2')
+    expect(repo.billNumberOf(1500, null, 1)).toBe('1500/1500-1')
+  })
+
   it('getOrderBranch identifica venda (direction S)', async () => {
     mockQuery.mockResolvedValueOnce([[{ entityId: 55 }]])
     const branch = await repo.getOrderBranch('setes_setes', 1, 10)
@@ -597,7 +602,13 @@ describe('invoiceOrder', () => {
       .rejects.toMatchObject({ statusCode: 422, code: 'REQUIRES_VALIDATION' })
   })
 
-  it('fatura feliz: calcula, monta parcelas do prazo e persiste', async () => {
+  // NFE.E1.P3 (D-NE257/D-NE266): a nota de mercadoria nasce SEM número — o retorno leva null e o título leva o pedido no lugar
+  // da nota (`pedido/pedido-parcela`); com número (o que a peça devolve para os modelos que o ERP numera) segue `pedido/nota-parcela`
+  it.each([
+    [null, ['10/10-1', '10/10-2']],
+    ['1', ['10/1-1', '10/1-2']],
+  ] as Array<[string | null, string[]]>)('fatura feliz (número da nota = %s): calcula, monta parcelas do prazo e persiste', async (issuedNumber, billNumbers) => {
+    ;(jest.requireMock('../shared/invoice') as any).issueInvoice.mockResolvedValueOnce({ invoiceNumber: issuedNumber, event: 1 })
     mockOrderBase()
     mockBranchSale()
     mockContext()
@@ -638,7 +649,7 @@ describe('invoiceOrder', () => {
 
     const result = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
 
-    expect(result.invoiceNumber).toBe('1')
+    expect(result.invoiceNumber).toBe(issuedNumber)
     expect(result.model).toBe('55')
     expect(result.parcels).toBe(2)                  // prazo 028/056
     expect(result.totalValue).toBe(100)
@@ -657,6 +668,7 @@ describe('invoiceOrder', () => {
       (c[0] as string).includes('tb_financial_bills'))
     expect(billCalls.length).toBe(2)
     expect(billCalls[0][1]).toContain('RA')
+    expect(billCalls.map(c => (c[1] as unknown[])[3])).toEqual(billNumbers)
     void finCalls
   })
 

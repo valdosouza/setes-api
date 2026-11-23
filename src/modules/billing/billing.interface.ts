@@ -35,7 +35,8 @@ export interface ValidationReport {
 
 export interface InvoiceResult {
   orderId: number
-  invoiceNumber: string
+  /** null na nota de mercadoria (55): o número nasce na transmissão (D-NE257). */
+  invoiceNumber: string | null
   serie: string
   model: string
   totalValue: number

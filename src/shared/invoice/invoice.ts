@@ -199,6 +199,7 @@ export async function readInvoiceLives(
  * `deleted='S'` (pendente cancelada libera o número; só reaproveita de fato
  * se a cancelada era a última — igual ao legado; número no meio vira
  * buraco para a inutilização da fase de transmissão).
+ * Só para modelo que o ERP numera (SE, 65): o 55 NÃO passa por aqui — ver `isNumberedAtTransmission`.
  */
 export async function nextInvoiceNumber(
   conn: PoolConnection, s: string, institutionId: number, model: string, serie: string
@@ -210,6 +211,18 @@ export async function nextInvoiceNumber(
     [institutionId, model, serie]
   )
   return String(mx[0].nextNumber)
+}
+
+/**
+ * D-NE257 (Valdo, 2026-11-23, NFE.E1.P3): o número destes modelos nasce na TRANSMISSÃO, na API fiscal, a partir do último número
+ * guardado no núcleo (D-NE255) — o ERP fatura a nota SEM número fiscal (`tb_invoice.number` NULL) e não lê faixa, ambiente nem
+ * habilitação para isso (D-NE249). Troca a D-F21 só neste ponto (a série continua do ERP). Quem traz o número de volta é o
+ * NFE.E1.P6 (D-NE259). O 65 segue no MAX+1 até a onda dele.
+ */
+export const MODELS_NUMBERED_AT_TRANSMISSION: readonly string[] = Object.freeze(['55'])
+
+export function isNumberedAtTransmission(model: string): boolean {
+  return MODELS_NUMBERED_AT_TRANSMISSION.includes(model)
 }
 
 export interface InvoiceMerchandiseInput {
@@ -265,7 +278,8 @@ export interface IssueInvoiceInput {
 }
 
 export interface IssuedInvoice {
-  invoiceNumber: string
+  /** null = nota de modelo numerado na transmissão (D-NE257): nasce sem número fiscal. */
+  invoiceNumber: string | null
   event: number
 }
 
@@ -291,7 +305,12 @@ export async function issueInvoice(
   input: IssueInvoiceInput
 ): Promise<IssuedInvoice> {
   await assertIbscbsAssessmentSupported(conn, s, institutionId, input.dtEmission)
-  const invoiceNumber = await nextInvoiceNumber(conn, s, institutionId, input.model, input.serie)
+  // D-NE257: modelo numerado na transmissão nasce (e REVIVE) sem número — cada vida recebe o dela ao ir para o fisco. O revive
+  // ZERA o número do cabeçalho; onde o número de uma vida transmitida fica guardado é do NFE.E1.P6 (o evento E daqui nasce sem
+  // número). Os demais modelos seguem no MAX+1 (D4).
+  const invoiceNumber = isNumberedAtTransmission(input.model)
+    ? null
+    : await nextInvoiceNumber(conn, s, institutionId, input.model, input.serie)
   await conn.query(
     `INSERT INTO \`${s}\`.tb_invoice
        (id, tb_institution_id, terminal, issuer, number, serie,

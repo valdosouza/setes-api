@@ -1182,6 +1182,8 @@ export async function generateInvoice(
         orderId, recipientEntityId: customerId, model: 'SE', serie: invoiceSerie, totalValue: total,
         noteText: null, merchandise: null, service: { ...draft, ibscbs }, dtEmission,
       })
+      // a OS fatura 'SE', que o ERP numera; nulo só existe em modelo numerado na transmissão (D-NE257) — nunca título "null"
+      if (invoiceNumber == null) throw new Error(`Nota da OS ${orderId} nasceu sem número — modelo 'SE' é numerado pelo ERP`)
 
       // financeiro: 1 tb_financial + 1 bill 'RA' POR PARCELA (P7 — PK natural);
       // ON DUPLICATE KEY = revive da parcela soft-deletada pelo cancelamento
