@@ -70,7 +70,7 @@ router.post('/validate', requirePrivilegeFor(PRIVILEGE_FATURAR, resolveFromBody)
  *       Consome as regras GRAVADAS pela validação (item sem regra = 422
  *       REQUIRES_VALIDATION). Calcula os tributos por item na ordem T1
  *       (@shared/tax-rule), grava nas tabelas de imposto por item, gera
- *       tb_invoice (número MAX+1 por modelo+série; série da config
+ *       tb_invoice (número MAX+1 por modelo+série, menos o 55, que nasce sem número — D-NE257; série da config
  *       invoice_serie) + tb_invoice_merchandise e MATERIALIZA o financeiro
  *       (tb_order_installment elaborado, senão o prazo gera as parcelas) —
  *       tudo em UMA transação. Nota nasce NÃO transmitida (status '0').
@@ -103,7 +103,7 @@ router.post('/validate', requirePrivilegeFor(PRIVILEGE_FATURAR, resolveFromBody)
  *                       vendedor derivado. Venda gera comissão POSITIVA por
  *                       item na mesma transação (kind F).
  *     responses:
- *       201: { description: "{ ok, data: { orderId, invoiceNumber, serie, model, totalValue, parcels, autoSettled, bankSlipsIssued, chargeableParcels, ibscbs } } — ibscbs (IB-2, D-IB65): { declared, omitted[] } da declaração IBS/CBS CONGELADA no ramo de serviço (vai ao DPS a partir da IB-3 — declared não é prova de envio); null = nota sem ramo de serviço — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113)" }
+ *       201: { description: "{ ok, data: { orderId, invoiceNumber, serie, model, totalValue, parcels, autoSettled, bankSlipsIssued, chargeableParcels, ibscbs } } — ibscbs (IB-2, D-IB65): { declared, omitted[] } da declaração IBS/CBS CONGELADA no ramo de serviço (vai ao DPS a partir da IB-3 — declared não é prova de envio); null = nota sem ramo de serviço — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113) — `invoiceNumber` pode vir null: a nota de mercadoria (55) nasce sem número e o recebe na transmissão (D-NE257)." }
  *       400: { description: Payload inválido }
  *       401: { description: Sem JWT }
  *       403: { description: Flag billing desabilitada }
@@ -144,7 +144,7 @@ router.post('/invoice', requirePrivilegeFor(PRIVILEGE_FATURAR, resolveFromBody),
  *               orderId: { type: integer }
  *               reason:  { type: string, maxLength: 255 }
  *     responses:
- *       200: { description: "{ ok, data: { orderId, invoiceNumber, event, checksReversed[], bankSlipsCancelled[], releasedTitles[{bankSlipId, orderId, parcel}] (D-G9: títulos de OUTROS pedidos liberados do boleto agrupado cancelado), commissionsCompensated } } — pedido de ORDEM DE SERVIÇO volta a aberta (Q-G3; bloco serviceOrder se o cliente já tem outra OS aberta)" }
+ *       200: { description: "{ ok, data: { orderId, invoiceNumber, event, checksReversed[], bankSlipsCancelled[], releasedTitles[{bankSlipId, orderId, parcel}] (D-G9: títulos de OUTROS pedidos liberados do boleto agrupado cancelado), commissionsCompensated } } — pedido de ORDEM DE SERVIÇO volta a aberta (Q-G3; bloco serviceOrder se o cliente já tem outra OS aberta) — `invoiceNumber` pode vir null: a nota de mercadoria (55) nasce sem número e o recebe na transmissão (D-NE257)." }
  *       400: { description: Payload inválido / motivo ausente (INVOICE_REASON_REQUIRED) }
  *       401: { description: Sem JWT }
  *       403: { description: Flag billing desabilitada ou sem privilégio CANCELAR (PRIVILEGE_REQUIRED) }
@@ -221,7 +221,7 @@ router.post('/cancel-waiver', requirePrivilegeFor(PRIVILEGE_CANCELAR, resolveFro
  *     parameters:
  *       - { in: path, name: orderId, required: true, schema: { type: integer, minimum: 1 } }
  *     responses:
- *       200: { description: "{ ok, data: { orderId, invoiceNumber, cancellable, blocks[{field: title|bankSlip|check|return|serviceOrder|fiscal, ref, message, barrier? (só no fiscal)}], fiscalRecord, effects: { bankSlipsToCancel[], releasedTitles[], checksToReverse[{checkId, number}], commissionsToCompensate, touchesCash, cashierOpen (D16 do operador — null quando não toca o caixa) } } }" }
+ *       200: { description: "{ ok, data: { orderId, invoiceNumber, cancellable, blocks[{field: title|bankSlip|check|return|serviceOrder|fiscal, ref, message, barrier? (só no fiscal)}], fiscalRecord, effects: { bankSlipsToCancel[], releasedTitles[], checksToReverse[{checkId, number}], commissionsToCompensate, touchesCash, cashierOpen (D16 do operador — null quando não toca o caixa) } } } — `invoiceNumber` pode vir null: a nota de mercadoria (55) nasce sem número e o recebe na transmissão (D-NE257)." }
  *       400: { description: orderId inválido (INVALID_ID) }
  *       401: { description: Sem JWT }
  *       403: { description: Interface do ramo não contratada (INTERFACE_NOT_ALLOWED) ou sem o privilégio CANCELAR (PRIVILEGE_REQUIRED) }
