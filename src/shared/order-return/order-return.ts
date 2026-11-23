@@ -21,6 +21,13 @@ export interface OriginalSaleInfo {
   customerId: number
   /** status da tb_order da origem — devolução exige 'F' (decisão 2026-08-24) */
   status: string
+  /** `tb_order.origin`: 'D' = a venda veio do ERP Desktop pelo sincronizador; nulo = nasceu na web (D-NE113) */
+  origin: string | null
+}
+
+/** D-NE113: a venda de origem veio do ERP Desktop? (o sincronizador grava `origin = 'D'`; o pedido da web nasce sem origem) */
+export function isLegacySale(sale: Pick<OriginalSaleInfo, 'origin'> | null | undefined): boolean {
+  return sale?.origin === 'D'
 }
 
 export interface OriginalSaleItem {
@@ -149,7 +156,7 @@ export async function getSaleOrderInfo(
   const s = assertSchema(schemaName)
   const [rows] = await pool.query<any[]>(
     `SELECT os.tb_salesman_id AS salesmanId, os.tb_customer_id AS customerId,
-            o.status
+            o.status, o.origin
        FROM \`${s}\`.tb_order o
        JOIN \`${s}\`.tb_order_sale os
          ON (os.id = o.id AND os.tb_institution_id = o.tb_institution_id
@@ -163,6 +170,7 @@ export async function getSaleOrderInfo(
     salesmanId: Number(rows[0].salesmanId),
     customerId: Number(rows[0].customerId),
     status: String(rows[0].status ?? ''),
+    origin: rows[0].origin == null ? null : String(rows[0].origin),
   }
 }
 
@@ -230,11 +238,19 @@ export interface ReturnItemToCheck {
  * da origem. Devolve issues (vazia = ok) + o plano de gravação dos elos
  * (item de origem = o MAIS RECENTE do produto, paridade com o
  * ORDER BY ITF_CODIGO DESC do legado).
+ *
+ * D-NE112 + D-NE267: com `refuseRepeatedLines` (o faturamento passa a marcação de emitir a NF-e), duas linhas da devolução para o
+ * MESMO item da venda (= o mesmo produto, já que a origem é sempre o item mais recente do produto) são RECUSADAS — a NF-e de
+ * devolução referencia por item e o builder nunca soma. SEM a opção vale o de sempre: as linhas irmãs se ACUMULAM contra o saldo
+ * (R1 do gate socrático de 2026-08-24). A web não cria esse caso (a devolução abre uma linha por produto e não tem inclusão de
+ * item); ele só chega por dado gravado fora dela.
+ * D-NE113: `originLegacy` diz se a venda de origem veio do ERP Desktop — quem fatura a devolução COM a NF-e recusa (billing).
  */
 export async function buildReturnPlan(
   schemaName: string, institutionId: number, orderIdOri: number,
-  adjustEntityId: number, adjustItems: ReturnItemToCheck[]
-): Promise<{ issues: ReturnIssue[]; plan: ReturnPlan | null }> {
+  adjustEntityId: number, adjustItems: ReturnItemToCheck[],
+  opts: { refuseRepeatedLines?: boolean } = {},
+): Promise<{ issues: ReturnIssue[]; plan: ReturnPlan | null; originLegacy: boolean }> {
   const issues: ReturnIssue[] = []
 
   const sale = await getSaleOrderInfo(schemaName, institutionId, orderIdOri)
@@ -242,9 +258,10 @@ export async function buildReturnPlan(
     return {
       issues: [{ field: 'returnedOrderId',
         message: `Pedido de venda ${orderIdOri} não encontrado` }],
-      plan: null,
+      plan: null, originLegacy: false,
     }
   }
+  const originLegacy = isLegacySale(sale)
   // decisão 2026-08-24 (Q-C/R3): devolução só contra venda FATURADA —
   // sem nota não houve comissão nem financeiro para estornar (o legado
   // validava contra itens de NOTA, não de pedido)
@@ -265,11 +282,19 @@ export async function buildReturnPlan(
   // itens IRMÃOS do mesmo plano precisam se acumular, senão 2 itens do
   // mesmo produto passam cada um contra o saldo cheio.
   const plannedByProduct = new Map<number, number>()
+  // D-NE112 (só com `refuseRepeatedLines`): linhas do mesmo produto caem no MESMO item da venda — todas recusadas
+  const linesByProduct = new Map<number, number>()
+  for (const item of adjustItems) linesByProduct.set(item.productId, (linesByProduct.get(item.productId) ?? 0) + 1)
   for (const item of adjustItems) {
     const candidates = originals.filter(o => o.productId === item.productId)
     if (candidates.length === 0) {
       issues.push({ itemId: item.id, field: 'product',
         message: `Produto ${item.productId} não consta no pedido original ${orderIdOri}` })
+      continue
+    }
+    if (opts.refuseRepeatedLines === true && (linesByProduct.get(item.productId) ?? 0) > 1) {
+      issues.push({ itemId: item.id, field: 'product',
+        message: `Mais de uma linha da devolução para o mesmo item da venda (produto ${item.productId}) — junte em uma só` })
       continue
     }
     const soldQty = candidates.reduce((sum, o) => sum + o.quantity, 0)
@@ -300,6 +325,7 @@ export async function buildReturnPlan(
     plan: issues.length === 0
       ? { orderIdOri, salesmanId: sale.salesmanId, customerId: sale.customerId, links }
       : null,
+    originLegacy,
   }
 }
 

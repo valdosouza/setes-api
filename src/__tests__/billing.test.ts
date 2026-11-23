@@ -27,6 +27,12 @@ jest.mock('../modules/billing/billing.input-print', () => ({
   ...jest.requireActual('../modules/billing/billing.input-print'),
   assertBillingInputsUnchanged: jest.fn().mockResolvedValue(undefined),
 }))
+// NFE.E1.P2 (D-NE260/D-NE267): a LEITURA do conteúdo da NF-e tem teste próprio (billing-content.test.ts) — aqui a fronteira é
+// mockada (as regras puras são as reais); só é chamada com a marcação `authorizeNfe`
+jest.mock('../modules/billing/billing.content', () => ({
+  ...jest.requireActual('../modules/billing/billing.content'),
+  loadInvoiceContent: jest.fn(),
+}))
 jest.mock('../shared/db/connection', () => ({
   __esModule: true,
   default: { query: jest.fn(), getConnection: jest.fn() },
@@ -90,6 +96,17 @@ const mockTryAutoSettleByContract = (jest.requireMock('../shared/financial-settl
 const mockOrderReturn = jest.requireMock('../shared/order-return') as any
 const mockCommission = jest.requireMock('../shared/commission') as any
 const mockInputPrint = jest.requireMock('../modules/billing/billing.input-print') as any
+const mockContent = jest.requireMock('../modules/billing/billing.content') as any
+/** Um conteúdo que a NF-e aceita (destinatário PJ contribuinte e um item com unidade). */
+const goodContent = (over: { recipient?: any; items?: any[] } = {}) => ({
+  recipient: {
+    personType: 'J', name: 'Cliente Bom Ltda', document: '11.222.333/0001-81', stateRegistration: '123.456.789',
+    stateRegistrationIndicator: '1',
+    address: { street: 'Rua das Flores', number: '100', complement: null, neighborhood: 'Centro', zipCode: '80000-000', cityCode: '4106902', state: 'PR' },
+    phone: '(41) 3333-4444', email: 'nfe@cliente.com.br', ...over.recipient,
+  },
+  items: over.items ?? [{ itemId: 1, description: 'Peça usinada', ncm: '84713012', unit: 'UN', taxableUnit: 'UN', gtin: null }],
+})
 
 const inst = { institutionId: 1, userId: 7, role: 'admin', schemaName: 'setes_setes' }
 
@@ -335,6 +352,57 @@ describe('validateOrder', () => {
     const report = await validateOrder(inst as any, { orderId: 10 })
     expect(report.issues).toEqual([{ scope: 'ibscbs', field: 'ibscbs', message: refusal.message }])
     expect(assessment.previewIbscbsAssessmentRefusal.mock.calls[0][3]).toBe('2027-01-05')   // a MESMA competência da prévia
+  })
+
+  // ── NFE.E1.P2.T1 (D-NE260, D-NE267): conferência do conteúdo só com a marcação de emitir a NF-e ───────────────────────
+  const queueManualItem = () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{
+      orderItemId: 1, kind: 'Sale', taxRuleId: 99, cfopId: '5405', setFinancial: 'S', origin: 'M',
+    }]])
+  }
+
+  it('D-NE267 — /validate SEM a marcação: o conteúdo nem é lido e a lista é a de sempre', async () => {
+    queueManualItem()
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+    expect(report.issues).toEqual([])
+    queueManualItem()
+    await validateOrder(inst as any, { orderId: 10, authorizeNfe: false })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+  })
+
+  it('D-NE260 — /validate COM a marcação: as pendências do conteúdo entram na lista, com o campo (destinatário sem CEP e item sem unidade)', async () => {
+    queueManualItem()
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent({
+      recipient: { address: { street: 'Rua das Flores', number: '100', complement: null, neighborhood: 'Centro', zipCode: null, cityCode: '4106902', state: 'PR' } },
+      items: [{ itemId: 1, description: 'Peça usinada', ncm: '84713012', unit: null, taxableUnit: null, gtin: null }],
+    }))
+    const report = await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })
+    expect(mockContent.loadInvoiceContent).toHaveBeenCalledWith('setes_setes', 1, 55, [expect.objectContaining({ id: 1, productId: 100 })])
+    expect(report.issues).toEqual([
+      { scope: 'recipient', field: 'zipCode', message: 'CEP do destinatário não informado' },
+      { scope: 'item', itemId: 1, field: 'unit', message: 'Item 1: produto sem unidade de venda cadastrada' },
+    ])
+  })
+
+  it('D-NE260 — /validate COM a marcação e conteúdo bom: nenhuma pendência nova', async () => {
+    queueManualItem()
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent())
+    expect((await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })).issues).toEqual([])
+  })
+
+  it('D-NE267 — pedido SÓ de serviço com a marcação: o conteúdo da NF-e não é conferido (não há nota de mercadoria)', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, productKind: 'S' })]])
+    mockQuery.mockResolvedValueOnce([[]])
+    await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
   })
 
   it('linha manual (M) é respeitada — motor não roda para o item', async () => {
@@ -966,6 +1034,89 @@ describe('invoiceOrder', () => {
     expect((ipi[1] as unknown[]).slice(-3)).toEqual([100, 10, 10])   // base 100,00 × 10% = 10,00
   })
 
+  it('D-NE267 — /invoice SEM a marcação: o conteúdo não é lido e a nota sai como sempre, mesmo com texto longo', async () => {
+    const { result } = await invoiceWithPieces({ icms: icmsPiece() })
+    expect(result.totalValue).toBe(100)
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+  })
+
+  it('D-NE260 — /invoice COM a marcação e pendência de conteúdo: 422 REQUIRES_VALIDATION com os campos, antes de abrir conexão', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 42 }]])           // findDeadRuleIds
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent({
+      recipient: { name: 'N'.repeat(73) },
+      items: [{ itemId: 1, description: 'Peça usinada', ncm: '84713012', unit: null, taxableUnit: null, gtin: '123' }],
+    }))
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })).rejects.toMatchObject({
+      statusCode: 422, code: 'REQUIRES_VALIDATION',
+      fields: [
+        { field: 'name', message: 'Nome do destinatário com 73 caracteres — o máximo da NF-e é 60' },
+        { field: 'item.1', message: 'Item 1: produto sem unidade de venda cadastrada' },
+        { field: 'item.1', message: expect.stringContaining('GTIN') },
+      ],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it('D-NE260 — /invoice COM a marcação e conteúdo bom: fatura', async () => {
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent())
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece() })
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+    const conn = { beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(conn, null)
+    const result = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })
+    expect(result.totalValue).toBe(100)
+    expect(mockContent.loadInvoiceContent).toHaveBeenCalledTimes(1)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('D-NE49 — /invoice COM a marcação e texto da nota acima de 5000 caracteres: 422 com o campo note (nunca trunca); sem a marcação, fatura', async () => {
+    const queue = () => {
+      mockOrderBase()
+      mockBranchSale()
+      mockContext()
+      mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+      mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+      mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+      mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+      mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+      mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece() })
+      mockQuery.mockResolvedValueOnce([[]])                                      // getRuleObservationNotes
+      mockQuery.mockResolvedValueOnce([[{ note: 'x'.repeat(5001) }]])            // getGeneralObservations: texto de 5001
+      mockQuery.mockResolvedValueOnce([[]])                                      // getNcmApproxRates
+    }
+    queue()
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent())
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })).rejects.toMatchObject({
+      statusCode: 422, code: 'REQUIRES_VALIDATION',
+      fields: [{ field: 'note', message: 'Observações da nota com 5001 caracteres — o máximo da NF-e é 5000' }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+    // sem a marcação o mesmo pedido fatura (o texto vai inteiro para a nota interna, como sempre)
+    queue()
+    const conn = { beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(conn, null)
+    const ok = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(ok.totalValue).toBe(100)
+    expect((jest.requireMock('../shared/invoice') as any).issueInvoice.mock.calls[0][4].noteText.length).toBe(5001)
+  })
+
   it('D-FAT2 — todos os itens em valor zero com frete 10,00: o frete é dividido em partes iguais (5,00 em cada item) e o total da nota fecha em 10,00 (antes o frete sumia)', async () => {
     const inv = jest.requireMock('../shared/invoice') as any
     const { result, conn } = await invoiceWithPieces({ icms: icmsPiece() }, {},
@@ -1303,9 +1454,58 @@ describe('comissão e devolução', () => {
     })
     expect(mockOrderReturn.getAnchor).toHaveBeenCalledWith('setes_setes', 1, 10, { includeDeleted: true })
     expect(mockOrderReturn.buildReturnPlan).toHaveBeenCalledWith(
-      'setes_setes', 1, 77, 55, expect.any(Array))
+      'setes_setes', 1, 77, 55, expect.any(Array), { refuseRepeatedLines: false })   // sem a marcação: o acúmulo de sempre
     expect(report.issues.some(i =>
       i.itemId === 1 && i.field === 'quantity' && i.scope === 'item')).toBe(true)
+  })
+
+  it('D-NE113 + D-NE267 — devolução de venda do ERP Desktop COM a marcação: /validate avisa e /invoice recusa com RETURN_ORIGIN_LEGACY (antes das issues do plano); SEM a marcação segue como sempre', async () => {
+    const legacyPlan = { issues: [{ itemId: 1, field: 'quantity', message: 'saldo insuficiente' }], plan: null, originLegacy: true }
+    // /validate com a marcação
+    mockOrderBase()
+    mockBranchAdjust(55, 'E')
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[]]) // itens
+    mockOrderReturn.getAnchor.mockResolvedValueOnce({ orderIdOri: 77 })
+    mockOrderReturn.buildReturnPlan.mockResolvedValueOnce(legacyPlan)
+    mockQuery.mockResolvedValueOnce([[]]) // links
+    const report = await validateOrder(inst as any, { orderId: 10, adjustment: { cfopId: '1202' }, authorizeNfe: true })
+    expect(report.issues).toEqual(expect.arrayContaining([
+      { scope: 'order', field: 'returnedOrderId', message: expect.stringContaining('A venda 77 foi feita no ERP Desktop') },
+    ]))
+    // /validate SEM a marcação: só as issues do plano
+    mockOrderBase()
+    mockBranchAdjust(55, 'E')
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[]])
+    mockOrderReturn.getAnchor.mockResolvedValueOnce({ orderIdOri: 77 })
+    mockOrderReturn.buildReturnPlan.mockResolvedValueOnce(legacyPlan)
+    mockQuery.mockResolvedValueOnce([[]])
+    const plain = await validateOrder(inst as any, { orderId: 10, adjustment: { cfopId: '1202' } })
+    expect(plain.issues.some(i => i.field === 'returnedOrderId')).toBe(false)
+
+    const queueInvoice = () => {
+      mockOrderBase()
+      mockBranchAdjust(55, 'E')
+      mockContext()
+      mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, kind: 'Adjust' })]])
+      mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Adjust', taxRuleId: 42, cfopId: '1202', setFinancial: 'S', origin: 'A' }]])
+      mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+      mockOrderReturn.getAnchor.mockResolvedValueOnce({ orderIdOri: 77 })
+      mockOrderReturn.buildReturnPlan.mockResolvedValueOnce(legacyPlan)
+    }
+    // /invoice com a marcação: a causa é a origem — não o saldo nem o cadastro (a conferência do conteúdo nem chega a rodar)
+    queueInvoice()
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, adjustment: { cfopId: '1202' }, authorizeNfe: true }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'RETURN_ORIGIN_LEGACY', message: expect.stringContaining('A venda 77 foi feita no ERP Desktop') })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+    // a marcação chega ao plano: com ela, linhas repetidas são recusadas (D-NE112); sem ela, o acúmulo de sempre
+    expect(mockOrderReturn.buildReturnPlan.mock.calls.at(-1)![5]).toEqual({ refuseRepeatedLines: true })
+    // /invoice sem a marcação: a devolução de venda do Desktop segue o caminho de sempre (aqui, as issues do plano)
+    queueInvoice()
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, adjustment: { cfopId: '1202' } }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'RETURN_INVALID' })
+    expect(mockOrderReturn.buildReturnPlan.mock.calls.at(-1)![5]).toEqual({ refuseRepeatedLines: false })
   })
 
   it('invoice: devolução inválida -> 422 RETURN_INVALID (gate DURO revalidado)', async () => {

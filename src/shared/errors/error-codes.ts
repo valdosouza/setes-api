@@ -154,6 +154,7 @@ export const ErrorCodes = {
   RETURN_INVALID:      'RETURN_INVALID',
   RETURN_REQUIRES_ENTRY: 'RETURN_REQUIRES_ENTRY',
   ORIGIN_NOT_INVOICED: 'ORIGIN_NOT_INVOICED',
+  RETURN_ORIGIN_LEGACY: 'RETURN_ORIGIN_LEGACY',
   NOTHING_RETURNABLE:  'NOTHING_RETURNABLE',
   // Cancelamento de nota (prompt_cancelamento_nota.md, 2026-09-08)
   INVOICE_NOT_FOUND:   'INVOICE_NOT_FOUND',
@@ -397,6 +398,7 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   RETURN_INVALID:      'Devolução inválida contra o pedido original (saldo/itens/valores/âncora)',
   RETURN_REQUIRES_ENTRY: 'Devolução de mercadoria exige ajuste de ENTRADA',
   ORIGIN_NOT_INVOICED: 'Pedido de venda de origem ainda não foi faturado',
+  RETURN_ORIGIN_LEGACY: 'A venda de origem foi feita no ERP Desktop — a NF-e de devolução pela web ainda não atende vendas do Desktop',
   NOTHING_RETURNABLE:  'Pedido de origem sem saldo devolvível',
   INVOICE_NOT_FOUND:   'Nota fiscal não encontrada',
   INVOICE_NOT_CANCELLABLE: 'Nota não pode ser cancelada (pedido não faturado, nota já cancelada ou sincronizada da origem)',

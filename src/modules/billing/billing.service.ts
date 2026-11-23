@@ -60,6 +60,7 @@ import {
 } from './billing.interface'
 import { ValidateBodyDto, InvoiceBodyDto } from './billing.dto'
 import { merchandiseInvoiceTotalOf } from './billing.total'
+import { invoiceContentIssues, loadInvoiceContent, noteTextIssue } from './billing.content'
 import { billingInputPrint, BillingInputChanged } from './billing.input-print'
 
 /**
@@ -217,12 +218,17 @@ export async function validateOrder(
     } else if (anchor) {
       // devolução de MERCADORIA — item de serviço fica fora do plano
       // (achado LOW do gate adversarial 2026-08-24)
-      const { issues: retIssues } = await buildReturnPlan(
+      const { issues: retIssues, originLegacy } = await buildReturnPlan(
         schemaName, institutionId, anchor.orderIdOri,
         branch.recipientEntityId,
         items.filter(i => i.productKind !== 'S')
           .map(i => ({ id: i.id, kind: i.kind, productId: i.productId,
-            quantity: i.quantity, unitValue: i.unitValue })))
+            quantity: i.quantity, unitValue: i.unitValue })),
+        { refuseRepeatedLines: input.authorizeNfe === true })
+      // D-NE113 + D-NE267: com a marcação de emitir a NF-e, devolução de venda do ERP Desktop é recusada (sem ela, segue)
+      if (input.authorizeNfe === true && originLegacy) {
+        issues.push({ scope: 'order', field: 'returnedOrderId', message: `A venda ${anchor.orderIdOri} foi feita no ERP Desktop — a NF-e de devolução pela web ainda não atende vendas do Desktop` })
+      }
       issues.push(...retIssues.map(ri => ({
         scope: (ri.itemId !== undefined ? 'item' : 'order') as 'item' | 'order',
         itemId: ri.itemId, field: ri.field, message: ri.message,
@@ -346,6 +352,14 @@ export async function validateOrder(
           `consumidor final ${criteria.finalConsumer}, Simples ${criteria.simples}, ` +
           `UF destino ${criteria.destinationStateId}` })
     }
+  }
+
+  // D-NE260 + D-NE267: com a marcação de emitir a NF-e (a opção da TELA do faturamento, como no ERP Desktop) e nota com
+  // mercadoria, a conferência do conteúdo que a NF-e exige entra na lista — destinatário e itens, com o campo. Sem a marcação,
+  // nenhuma leitura nova. (O texto da nota só existe no /invoice: é conferido lá.)
+  if (input.authorizeNfe === true && items.some(i => i.productKind !== 'S')) {
+    issues.push(...invoiceContentIssues(
+      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, items)))
   }
 
   // Q-A8: condições de cobrança são pré-requisito do faturamento — a tela
@@ -546,12 +560,19 @@ async function invoiceOrderOnce(
           [{ field: 'adjustment', message: 'Sentido do ajuste deve ser E' }],
           'RETURN_REQUIRES_ENTRY')
       }
-      const { issues: retIssues, plan } = await buildReturnPlan(
+      const { issues: retIssues, plan, originLegacy } = await buildReturnPlan(
         schemaName, institutionId, anchor.orderIdOri,
         branch.recipientEntityId,
         items.filter(i => i.productKind !== 'S')
           .map(i => ({ id: i.id, kind: i.kind, productId: i.productId,
-            quantity: i.quantity, unitValue: i.unitValue })))
+            quantity: i.quantity, unitValue: i.unitValue })),
+        { refuseRepeatedLines: input.authorizeNfe === true })
+      // D-NE113 + D-NE267: com a marcação de emitir a NF-e, devolução de venda do ERP Desktop é recusada — ANTES das issues do
+      // plano (a causa é a origem, não o saldo). Sem a marcação, a devolução de venda do Desktop segue como sempre foi.
+      if (input.authorizeNfe === true && originLegacy) {
+        throw new HttpError(422, `A venda ${anchor.orderIdOri} foi feita no ERP Desktop — a NF-e de devolução pela web ainda não atende vendas do Desktop`,
+          [{ field: 'returnedOrderId', message: 'Venda feita no ERP Desktop' }], 'RETURN_ORIGIN_LEGACY')
+      }
       if (retIssues.length > 0 || !plan) {
         throw new HttpError(422, 'Devolução inválida contra o pedido original',
           retIssues.map(ri => ({
@@ -560,6 +581,19 @@ async function invoiceOrderOnce(
           })), 'RETURN_INVALID')
       }
       returnPlan = plan
+    }
+  }
+
+  // D-NE260 + D-NE267: a conferência do conteúdo é REFEITA aqui com a marcação que ESTE pedido de faturamento traz (a marcação não
+  // é gravada; o /validate anterior não vale como garantia — padrão R5-Q3). Pendência = 422, antes de qualquer gravação —
+  // e DEPOIS da devolução: na venda do ERP Desktop a causa a dizer é a origem (`RETURN_ORIGIN_LEGACY`), não o cadastro.
+  if (input.authorizeNfe === true && items.some(i => i.productKind !== 'S')) {
+    const content = invoiceContentIssues(
+      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, items))
+    if (content.length > 0) {
+      throw new HttpError(422, 'Dados que a NF-e exige estão incompletos — corrija o cadastro antes de faturar',
+        content.map(i => ({ field: i.itemId !== undefined ? `item.${i.itemId}` : i.field ?? i.scope, message: i.message })),
+        'REQUIRES_VALIDATION')
     }
   }
 
@@ -819,6 +853,14 @@ async function invoiceOrderOnce(
 
   const noteText = [...generalNotes, ...regimeTexts, issqnText, approxTaxText]
     .filter((t): t is string => !!t).join('\n')
+  // D-NE49 + D-NE267: com a marcação, o texto da nota acima do tamanho da NF-e é recusado com o campo — nunca truncado
+  if (input.authorizeNfe === true && hasMerchandise) {
+    const tooLong = noteTextIssue(noteText)
+    if (tooLong) {
+      throw new HttpError(422, 'Dados que a NF-e exige estão incompletos — corrija antes de faturar',
+        [{ field: tooLong.field ?? 'note', message: tooLong.message }], 'REQUIRES_VALIDATION')
+    }
+  }
 
   // LOW-9 (seed 58): como o xDescServ do DPS é montado — 'I' itens · 'O' observação
   // da nota · 'A' ambos. Lido ANTES da transação (mesma regra da config acima).

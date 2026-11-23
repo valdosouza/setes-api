@@ -17,6 +17,8 @@ const ALLOWED: Record<string, string> = {
     'conta corrente do canal do banco (dígitos)',
   "src/shared/bank-slip-registration/bank-slip-registration.ts: (addr?.zipCode ?? '').replace(/\\D/g, '')": 'CEP (8 dígitos)',
   "src/shared/ibscbs-classification/index.ts: filter.replace(/\\D/g, '')": 'filtro por código numérico do catálogo IBS/CBS (NBS/cClassTrib)',
+  "src/modules/billing/billing.content.ts: (v ?? '').replace(/\\D/g, '')":
+    'conferência do conteúdo da NF-e: CEP, IE, telefone, NCM e código do IBGE (dígitos) — o CNPJ/CPF passa por normalizeCnpj/isValidCnpj, nunca por aqui',
   "src/shared/validation/validators.ts: /\\d/.test(c)":
     'matchesMask do motor de máscara configurável: confere UM caractere na posição `#` (não coleta) — CPF/CNPJ fora do motor (D-CJ11)',
 }
