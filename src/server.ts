@@ -11,6 +11,7 @@ import { assertPasswordResetReady, assertLoginLockReady } from '@modules/auth/au
 import { assertMailerReady, assertOpsAlertReady, nodeEnvWarning } from '@shared/mailer/mailer'
 import { assertPasswordPolicyReady } from '@shared/auth/password-policy'
 import { assertFiscalVoiceReadable } from '@shared/fiscal-voice'
+import { awaitingFamiliesBootNote } from '@shared/invoice/invoice-fiscal-effect'
 import { assertInstitutionSourceKindSchema } from '@shared/catalog-owner'
 import pool from '@shared/db/connection'
 import { runMigrationsForAllInstitutions } from './migrations/runner'
@@ -51,9 +52,10 @@ async function bootstrap() {
     logger.info(`E-mail (SMTP): ${assertMailerReady()}`)
     // D-EA4: em produção o e-mail da OPERAÇÃO (alarme do login) é OBRIGATÓRIO junto do SMTP — sem ele o setes-api NÃO sobe
     logger.info(`E-mail da operação (alarmes): ${assertOpsAlertReady()}`)
-    // D-F113/D-F127 (F2a A3): a voz do fisco é LIDA no fiscal_api — sem a view de cada família (ou sem o GRANT) o setes-api NÃO sobe
-    // (nunca 500 na 1ª leitura da lista de OS). Ordem de deploy: nfse-api (as migrations das views) ANTES do setes-api.
-    logger.info(`Voz do fisco (views): ${await assertFiscalVoiceReadable(pool)}`)
+    // D-F113/D-F127 (F2a A3): a voz do fisco é LIDA no fiscal_api — sem a view de cada família que o ERP lê (ou sem o GRANT) o
+    // setes-api NÃO sobe (nunca 500 na 1ª leitura da lista de OS). Ordem de deploy: nfse-api (as migrations das views) ANTES do
+    // setes-api. D-NE245: a família que espera o plano de cancelamento não é conferida — e o log diz isso.
+    logger.info(`Voz do fisco (views): ${await assertFiscalVoiceReadable(pool)}${awaitingFamiliesBootNote()}`)
     logger.info('Iniciando migrations...')
     await runMigrationsForAllInstitutions()
     // D-F135 (F2a): os gatilhos de TRAVA da f2a_fiscal_passivo conferidos pelo NOME em cada schema — faltando, o setes-api NÃO sobe

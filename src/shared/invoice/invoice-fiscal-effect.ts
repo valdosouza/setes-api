@@ -12,8 +12,9 @@ import { readInvoiceLives } from './invoice'
  * PREDICADOS do núcleo (`fiscal-api/reading`) e os fatos do ERP (nota, vida, dispensa): nada decide por coluna crua da voz
  * (`accessKey`, `environment === 'H'|'P'`, `last_queried_at` — nota (8) e §22.5 item 8; cerca na suíte).
  *
- * Família: hoje só a NFS-e (`service`) está no catálogo `VOICE_READINGS`; a NF-e entra com a NE-2 e esta peça é revista com ela
- * (cerca: o catálogo com outra família quebra o teste desta peça até alguém decidir o que o plano faz com ela — nota (9)).
+ * Família: esta peça só lê e só decide a NFS-e (`service`). O catálogo `VOICE_READINGS` do núcleo 5.0.0 também traz a NF-e
+ * (`merchandise`), que ESPERA o plano de cancelamento (`FAMILIES_AWAITING_CANCEL_PLAN` — D-NE245) e entra aqui no NFE.E1.P4.T1.
+ * Cerca (nota (9)): família do catálogo que não é conhecida nem está em espera quebra o teste desta peça até alguém decidir.
  */
 
 export interface InvoiceFiscalReading {
@@ -25,6 +26,17 @@ export interface InvoiceFiscalReading {
 
 /** Famílias que esta composição conhece — qualquer outra no catálogo é revisão OBRIGATÓRIA (nota (9) da F2a). */
 export const KNOWN_FAMILIES = Object.freeze(['service'] as const)
+
+/**
+ * Famílias do catálogo que o plano de cancelamento AINDA NÃO DECIDIU (D-NE245 — Valdo, 2026-11-23). Não são conhecidas nem
+ * desconhecidas: esperam, com saída marcada. `merchandise` (NF-e) sai daqui e entra em `KNOWN_FAMILIES` no NFE.E1.P4.T1, junto com o
+ * plano que lê a voz dela. Enquanto uma família espera, a cerca da suíte fecha os caminhos de leitura: o catálogo `VOICE_READINGS` só
+ * é citado NESTE arquivo (para a cerca), a porta `@shared/fiscal-voice` só passa leituras nomeadas ao leitor do núcleo e nenhum nome da
+ * família em espera aparece em `src`. Hoje o cancelamento IGNORA a voz `merchandise` em silêncio — inofensivo só enquanto não existir
+ * tentativa de NF-e sobre nota do ERP, fato que NENHUM código daqui garante (a precedência está na árvore: NFE.E1.P4 antes da 1ª
+ * transmissão). Pôr a família em `KNOWN_FAMILIES` sem o plano seria contornar a cerca.
+ */
+export const FAMILIES_AWAITING_CANCEL_PLAN = Object.freeze(['merchandise'] as const)
 
 /** Lê a voz da VIDA vigente. Quem DECIDE chama depois da trava da nota (D-F121) com a vida do `lockInvoice` (D-F126). */
 export async function readInvoiceFiscal(
@@ -110,7 +122,17 @@ export function fiscalEffectOf(
 
 /** Cerca da nota (9): o catálogo de famílias desta versão da biblioteca é o que esta composição conhece. */
 export function unknownFamilies(): string[] {
-  return Object.keys(VOICE_READINGS).filter(f => !(KNOWN_FAMILIES as readonly string[]).includes(f))
+  const decided: readonly string[] = [...KNOWN_FAMILIES, ...FAMILIES_AWAITING_CANCEL_PLAN]
+  return Object.keys(VOICE_READINGS).filter(f => !decided.includes(f))
+}
+
+/**
+ * O trecho do log do BOOT sobre as famílias em espera (D-NE245): estão no catálogo e o boot NÃO conferiu a view delas. Vazio quando a
+ * lista esvaziar. Derivado da constante — nunca texto fixo.
+ */
+export function awaitingFamiliesBootNote(families: readonly string[] = FAMILIES_AWAITING_CANCEL_PLAN): string {
+  if (!families.length) return ''
+  return `; no catálogo sem conferência (esperando o plano de cancelamento, NFE.E1.P4): ${families.join(', ')}`
 }
 
 /**

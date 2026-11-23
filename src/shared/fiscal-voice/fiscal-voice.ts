@@ -1,5 +1,5 @@
 import {
-  readFamilyTransmissions, readFamilyTransmissionsMany, assertFamilyViewsReadable, SERVICE_VOICE_READING, VOICE_READINGS,
+  readFamilyTransmissions, readFamilyTransmissionsMany, assertFamilyViewsReadable, SERVICE_VOICE_READING,
   invoiceRef, WEB_TERMINAL,
 } from 'fiscal-api/reading'
 import type { ServiceTransmissionView, InvoiceLifeRef, ReadQueryable } from 'fiscal-api/reading'
@@ -121,12 +121,21 @@ export function readServiceVoicesOfLives(
 }
 
 /**
- * D-F113/D-F127: conferência do BOOT — a view de tentativas de CADA família do catálogo (`VOICE_READINGS` desta versão da biblioteca)
+ * As leituras que ESTA porta lê — e por isso as que o boot confere (D-NE158: cada chamador passa o que confere; o núcleo 5.0.0 não tem
+ * mais valor padrão). Hoje só a NFS-e. Família do catálogo que o ERP ainda não lê fica FORA daqui e é dita no log pela lista de espera
+ * do plano de cancelamento (`FAMILIES_AWAITING_CANCEL_PLAN`, em `@shared/invoice` — D-NE245). Quem passar a ler outra família a põe aqui
+ * (cerca na suíte: catálogo = lidas ∪ em espera; e nesta porta todo leitor passa uma leitura NOMEADA, nunca o catálogo).
+ */
+export const READ_FAMILIES = Object.freeze([SERVICE_VOICE_READING])
+
+/**
+ * D-F113/D-F127, restritas pela D-NE245: conferência do BOOT — a view de tentativas de cada família que o ERP LÊ (`READ_FAMILIES`)
  * responde ao SELECT publicado (com `authority_recorded` — nota (9)). Sem a view, a coluna ou o GRANT, o setes-api NÃO sobe (nunca 500
- * na 1ª leitura da lista de OS). Ordem de deploy: o serviço da família (nfse-api) ANTES do setes-api.
+ * na 1ª leitura da lista de OS). Ordem de deploy: o serviço da família (nfse-api) ANTES do setes-api. Devolve o que CONFERIU — nunca o
+ * catálogo inteiro (dizer "merchandise" sem ter conferido a view dela seria mentir no log).
  */
 export async function assertFiscalVoiceReadable(q: ReadQueryable): Promise<string> {
   const db = fiscalDbName()
-  await assertFamilyViewsReadable(q, db)
-  return `${db} — família(s) ${Object.keys(VOICE_READINGS).join(', ')}`
+  await assertFamilyViewsReadable(q, db, READ_FAMILIES)
+  return `${db} — conferida(s): ${READ_FAMILIES.map(r => r.branch).join(', ')}`
 }

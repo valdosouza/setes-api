@@ -3,8 +3,13 @@
 // único lugar do setes-api que lê o fiscal_api), a NOTA diante da voz (`@shared/invoice/invoice-fiscal-effect` — predicados do núcleo,
 // D-F114 `fiscalEffectOf`, selo em lote) e a SÉRIE da nota (`@shared/invoice-series` — D-F112). Leitor do núcleo REAL; banco mockado na
 // fronteira com LINHAS CRUAS da view (o mapa da família é o real — nota (5)).
-import { fiscalDbName, readServiceVoiceOfLife, readServiceVoicesOfLives, assertFiscalVoiceReadable } from '../shared/fiscal-voice'
-import { fiscalEffectOf, fiscalCancelBarrier, readFiscalSeals, unknownFamilies, KNOWN_FAMILIES, fiscalRecordKey } from '../shared/invoice/invoice-fiscal-effect'
+import { fiscalDbName, readServiceVoiceOfLife, readServiceVoicesOfLives, assertFiscalVoiceReadable, READ_FAMILIES } from '../shared/fiscal-voice'
+import {
+  fiscalEffectOf, fiscalCancelBarrier, readFiscalSeals, unknownFamilies, KNOWN_FAMILIES, FAMILIES_AWAITING_CANCEL_PLAN,
+  awaitingFamiliesBootNote, fiscalRecordKey,
+} from '../shared/invoice/invoice-fiscal-effect'
+import * as fs from 'fs'
+import * as path from 'path'
 import { invoiceSerieFor } from '../shared/invoice-series'
 import { rawServiceRow, serviceView, unrecorded, TEST_KEY } from '../test-setup/fiscal-voice-rows'
 import { VOICE_READINGS } from 'fiscal-api/reading'
@@ -69,9 +74,10 @@ describe('porta @shared/fiscal-voice — o único leitor do fiscal_api (D-F15/D-
     expect(rows.map(r => [r.invoiceId, r.lifeEvent])).toEqual([[10, 1], [11, 4]])
     expect(q.query.mock.calls[0][0]).toMatch(/FROM `fiscal_api`\.vw_invoice_service_transmission/)
   })
-  it('D-F113/D-F127 — conferência do boot: a view de cada família responde ao SELECT publicado; sem view/coluna/GRANT o boot NÃO sobe', async () => {
+  it('D-F113/D-F127 + D-NE245 — conferência do boot: a view de cada família que o ERP LÊ (só a NFS-e) responde ao SELECT publicado; sem view/coluna/GRANT o boot NÃO sobe', async () => {
     const ok = qOf([])
-    expect(await assertFiscalVoiceReadable(ok)).toMatch(/^fiscal_api — família\(s\) service/)
+    expect(await assertFiscalVoiceReadable(ok)).toBe('fiscal_api — conferida(s): service')
+    expect(ok.query).toHaveBeenCalledTimes(1)   // D-NE245: a view da família em espera (merchandise) NÃO é consultada no boot
     expect(ok.query.mock.calls[0][0]).toMatch(/FROM `fiscal_api`\.vw_invoice_service_transmission v WHERE 1 = 0/)
     const denied = { query: jest.fn().mockRejectedValue(Object.assign(new Error('SELECT command denied'), { code: 'ER_TABLEACCESS_DENIED_ERROR' })) }
     await expect(assertFiscalVoiceReadable(denied)).rejects.toThrow(/família "service"[\s\S]*ER_TABLEACCESS_DENIED_ERROR[\s\S]*D-F113/)
@@ -79,9 +85,56 @@ describe('porta @shared/fiscal-voice — o único leitor do fiscal_api (D-F15/D-
 })
 
 describe('nota (9) — famílias que o plano conhece × catálogo da biblioteca', () => {
-  it('o catálogo VOICE_READINGS desta versão do núcleo só tem famílias que a composição do ERP conhece (família nova = revisão obrigatória do plano)', () => {
+  it('o catálogo VOICE_READINGS desta versão do núcleo só tem famílias que a composição do ERP conhece ou que esperam o plano (família nova = revisão obrigatória do plano)', () => {
     expect(unknownFamilies()).toEqual([])
-    expect(Object.keys(VOICE_READINGS).sort()).toEqual([...KNOWN_FAMILIES].sort())
+    expect(Object.keys(VOICE_READINGS).sort()).toEqual([...KNOWN_FAMILIES, ...FAMILIES_AWAITING_CANCEL_PLAN].sort())
+  })
+  it('D-NE245 — a lista de espera é EXATAMENTE [merchandise] até o NFE.E1.P4.T1 (o plano de cancelamento da NF-e a esvazia e põe a família em KNOWN_FAMILIES)', () => {
+    expect([...FAMILIES_AWAITING_CANCEL_PLAN]).toEqual(['merchandise'])
+    expect([...KNOWN_FAMILIES]).toEqual(['service'])   // listar a família sem decidir o plano = contornar a cerca
+    const known: readonly string[] = KNOWN_FAMILIES
+    expect(FAMILIES_AWAITING_CANCEL_PLAN.filter(f => known.includes(f))).toEqual([])                          // disjuntas
+    expect(FAMILIES_AWAITING_CANCEL_PLAN.filter(f => !Object.keys(VOICE_READINGS).includes(f))).toEqual([])   // sem espera órfã
+  })
+  it('D-NE245 — o log do boot diz a família que está no catálogo SEM conferência, derivado da lista (vazio quando ela esvaziar)', () => {
+    expect(awaitingFamiliesBootNote()).toBe('; no catálogo sem conferência (esperando o plano de cancelamento, NFE.E1.P4): merchandise')
+    expect(awaitingFamiliesBootNote([])).toBe('')
+    const server = fs.readFileSync(path.join(__dirname, '..', 'server.ts'), 'utf8')
+    expect(server).toContain('${await assertFiscalVoiceReadable(pool)}${awaitingFamiliesBootNote()}')
+  })
+  it('D-NE245 — catálogo = famílias que a porta LÊ (e o boot confere) ∪ famílias em espera; e toda conhecida do plano é lida', () => {
+    const read = READ_FAMILIES.map(r => r.branch as string)
+    expect([...read, ...FAMILIES_AWAITING_CANCEL_PLAN].sort()).toEqual(Object.keys(VOICE_READINGS).sort())
+    expect([...read].sort()).toEqual([...KNOWN_FAMILIES].sort())   // no NFE.E1.P4.T1: quem entra em KNOWN_FAMILIES entra em READ_FAMILIES
+  })
+  it('D-NE245 — espera e leitor NÃO coexistem: com família em espera, nenhum arquivo de src (fora dos testes) lê a voz merchandise', () => {
+    const root = path.join(__dirname, '..')
+    const files: string[] = []
+    const walk = (dir: string): void => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) { if (e.name !== '__tests__' && e.name !== 'test-setup') walk(path.join(dir, e.name)) }
+        else if (e.name.endsWith('.ts')) files.push(path.join(dir, e.name))
+      }
+    }
+    walk(root)
+    expect(files.length).toBeGreaterThan(100)   // a varredura não passa no vazio
+    if (!FAMILIES_AWAITING_CANCEL_PLAN.length) return
+    const rel = (f: string): string => path.relative(root, f).replace(/\\/g, '/')
+    const code = (f: string): string => fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')   // sem comentários
+    // (1) nenhum nome da família em espera em código: a leitura, o mapa, o predicado e a view dela
+    const names = /MERCHANDISE_VOICE_READING|mapMerchandiseTransmissionView|isMerchandiseHumanEffectCancel|vw_invoice_merchandise_transmission/
+    expect(files.filter(f => names.test(code(f))).map(rel)).toEqual([])
+    // (2) o catálogo só é citado na peça da cerca — ninguém o percorre (Object.values/entries, índice, alias) para ler a família em espera
+    expect(files.filter(f => /\bVOICE_READINGS\b/.test(code(f))).map(rel)).toEqual(['shared/invoice/invoice-fiscal-effect.ts'])
+    // (3) na porta, todo leitor do núcleo recebe uma leitura NOMEADA de serviço — nunca variável nem o catálogo
+    const door = code(path.join(root, 'shared', 'fiscal-voice', 'fiscal-voice.ts'))
+    const calls = [...door.matchAll(/readFamilyTransmissions(?:Many)?\(\s*\w+\s*,\s*([^,]+),/g)].map(m => m[1].trim())
+    expect(calls.length).toBeGreaterThanOrEqual(2)
+    expect(calls.filter(a => a !== 'SERVICE_VOICE_READING')).toEqual([])
+    // (4) o 5.0.0 também publica em `fiscal-api/reading` os leitores das faixas retiradas e da habilitação (não são a voz, mas leem o
+    // fiscal_api): só a porta `@shared/fiscal-voice` pode chamá-los (é o ÚNICO lugar que lê o fiscal_api) — hoje ninguém chama
+    const fiscalReaders = /\b(readWithdrawnRanges|assertWithdrawnRangesViewReadable|readIssuerView|assertIssuerViewReadable)\b/
+    expect(files.filter(f => fiscalReaders.test(code(f)) && !rel(f).startsWith('shared/fiscal-voice/')).map(rel)).toEqual([])
   })
 })
 
