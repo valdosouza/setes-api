@@ -5,10 +5,27 @@ import jwt from 'jsonwebtoken'
 import { testToken } from '../test-setup/test-token'
 import * as authRepo from '../modules/auth/auth.repository'
 import * as sessionRepo from '../shared/session-context/session-context.repository'
-import { login, selectInstitution, switchInstitution } from '../modules/auth/auth.service'
+import { login, selectInstitution, switchInstitution, setLoginRefusalFloor, LOGIN_REFUSAL_FLOOR_MS } from '../modules/auth/auth.service'
+import pool from '../shared/db/connection'
 
-jest.mock('../modules/auth/auth.repository')
+jest.mock('../modules/auth/auth.repository', () => ({
+  ...jest.requireActual('../modules/auth/auth.repository'),
+  // CONV.E2.P3 (D-UC12): o aceite do convite no login — aqui nenhum convite pendente (provado em `conv-e2-p3-login-accept.test.ts` e ao vivo
+  // por `scripts/prove-conv-e2-p3.ts`)
+  acceptPendingInvites: jest.fn().mockResolvedValue([]),
+  hasPendingInvites: jest.fn().mockResolvedValue(false),   // CONV.E2.P7 (D-UC19): sem convite esperando aqui
+  findUserByEmail: jest.fn(), getInstitutionsForUser: jest.fn(),
+  // Ondas 1+2 do endurecer (D-EA1/D-EA2): o login passa pelo pré-filtro e pela trava da linha do usuário — aqui sem falhas na janela
+  // (o limite por conta é provado em `auth-login-lock-d-ea1.test.ts` e ao vivo por `scripts/prove-login-lock.ts`)
+  countLoginFailuresInWindow: jest.fn(), lockUserCredential: jest.fn(), insertLoginFailure: jest.fn(),
+  // Onda 4 (D-EA9): a senha certa em MD5 legado é regravada em scrypt no login admitido (compare-and-set — provado em
+  // `password-scrypt-d-ea9.test.ts` e ao vivo por `scripts/prove-scrypt-migration.ts`)
+  rehashPassword: jest.fn().mockResolvedValue(true),
+}))
 jest.mock('../shared/session-context/session-context.repository')
+jest.mock('../shared/db/connection', () => ({
+  __esModule: true, default: { query: jest.fn(), getConnection: jest.fn(), on: jest.fn(), end: jest.fn() },
+}))
 
 const mockFindUser         = authRepo.findUserByEmail        as jest.Mock
 const mockGetInstitutions  = authRepo.getInstitutionsForUser as jest.Mock
@@ -17,6 +34,11 @@ mockExistsSalesman.mockResolvedValue(false)
 // D-PR47 (Rodada 7 de produtos): o contexto carrega a origem dos cadastros e o dono do catálogo derivado (UX; a guarda decide)
 const mockReadSourceKind   = sessionRepo.readSourceKind      as jest.Mock
 mockReadSourceKind.mockResolvedValue('D')
+const mockCountFailures    = authRepo.countLoginFailuresInWindow as jest.Mock
+const mockLock             = authRepo.lockUserCredential     as jest.Mock
+const fakeConn = { beginTransaction: jest.fn(), commit: jest.fn(), rollback: jest.fn(), release: jest.fn(), query: jest.fn() }
+beforeAll(() => setLoginRefusalFloor(0))
+afterAll(() => setLoginRefusalFloor(LOGIN_REFUSAL_FLOOR_MS))
 
 // D-F13 (F2a, etapa A2): os tokens saem em RS256 com o kid de assinatura — conferidos com a chave PÚBLICA de teste
 const PUBLIC = createPublicKey(createPrivateKey(fs.readFileSync(process.env.JWT_PRIVATE_KEY_PATH!, 'utf8')))
@@ -36,6 +58,9 @@ describe('auth.service — login', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     mockFindUser.mockResolvedValue({ id: 1, password: MD5_12345, active: 'S' })
+    mockCountFailures.mockResolvedValue(0)
+    mockLock.mockResolvedValue({ id: 1, password: MD5_12345, active: 'S' })
+    ;(pool.getConnection as jest.Mock).mockResolvedValue(fakeConn)
   })
 
   it('senha errada retorna 401', async () => {
@@ -47,9 +72,9 @@ describe('auth.service — login', () => {
     await expect(login('nao@existe.com', '12345')).rejects.toMatchObject({ statusCode: 401 })
   })
 
-  it('usuário sem institution ativa retorna 403', async () => {
+  it('usuário sem institution ativa retorna a MESMA 401 da senha errada (D-EA6 — o 403 morreu)', async () => {
     mockGetInstitutions.mockResolvedValue([])
-    await expect(login('valdo@setes.com.br', '12345')).rejects.toMatchObject({ statusCode: 403 })
+    await expect(login('valdo@setes.com.br', '12345')).rejects.toMatchObject({ statusCode: 401, message: 'Email ou senha inválidos' })
   })
 
   it('1 institution: emite JWT final direto com institutionId/schemaName', async () => {
@@ -79,13 +104,42 @@ describe('auth.service — login', () => {
     expect(payload.institutionId).toBeUndefined()   // não passa no auth.middleware
   })
 
-  it("'super' fora da institution 1 é rebaixado para 'user' (decisão 14)", async () => {
-    mockGetInstitutions.mockResolvedValue([{ ...alphaLink, profile: 'super' }])
-    const result = await login('valdo@setes.com.br', '12345')
+  // Costura A1 da auth-api (D-AU3/D-AU6, 2026-10-31): o rebaixamento da decisão 14 é da VIEW `setes_central.vw_user_link` (o ÚNICO
+  // intérprete de `tb_institution_has_user.kind` — 'super' só na institution 1; a semântica da view é provada ao vivo em banco
+  // descartável por `scripts/prove-user-access-views.ts`). O login não reinterpreta nada: o repositório lê o `profile` da view e o
+  // service o repassa ao token.
+  it("'super' fora da institution 1 é rebaixado para 'user' (decisão 14) — pela VIEW; o login repassa o perfil da linha", async () => {
+    // (1) o repositório REAL lê o vínculo e o perfil da view (nunca `tb_institution_has_user.kind` cru)
+    const realRepo = jest.requireActual('../modules/auth/auth.repository') as typeof authRepo
+    // o pool está dublado neste arquivo (a trava do login — Ondas 1+2): o repositório REAL lê pelo pool dublado
+    const spy = jest.spyOn(pool as any, 'query').mockResolvedValueOnce([
+      [{ institutionId: 2, schemaName: 'setes_alpha', name: 'Empresa Alpha', profile: 'user' }], [],
+    ] as any)
+    try {
+      const links = await realRepo.getInstitutionsForUser(1)
+      const [sql, params] = spy.mock.calls[0] as [string, any[]]
+      const flat = sql.replace(/\s+/g, ' ')
+      expect(flat).toMatch(/FROM setes_central\.vw_user_link l/)
+      expect(flat).toMatch(/\bl\.profile\b/)
+      expect(flat).not.toMatch(/tb_institution_has_user/)
+      expect(params).toEqual([1])
+      expect(links).toEqual([{ institutionId: 2, schemaName: 'setes_alpha', name: 'Empresa Alpha', profile: 'user' }])
+    } finally {
+      spy.mockRestore()
+    }
 
+    // (2) a linha que a view devolve para o vínculo 'super' com a institution 2 (perfil já rebaixado) → token com 'user'
+    mockGetInstitutions.mockResolvedValue([{ ...alphaLink, profile: 'user' }])
+    const result = await login('valdo@setes.com.br', '12345')
     const payload = verifyRs256(result.token)
     expect(payload.institutionId).toBe(2)
     expect(payload.role).toBe('user')
+
+    // (3) o service não tem regra própria de perfil: repassa o que a linha traz (a regra mora UMA vez, na view)
+    mockGetInstitutions.mockResolvedValue([{ ...alphaLink, profile: 'admin' }])
+    expect(verifyRs256((await login('valdo@setes.com.br', '12345')).token).role).toBe('admin')
+    mockGetInstitutions.mockResolvedValue([{ ...alphaLink, profile: null }])
+    expect(verifyRs256((await login('valdo@setes.com.br', '12345')).token).role).toBe('user')
   })
 })
 

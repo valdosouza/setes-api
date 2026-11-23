@@ -22,7 +22,8 @@ const walk = (dir: string, out: string[] = []): string[] => {
 }
 const rel = (p: string) => path.relative(SRC, p).split(path.sep).join('/')
 const FILES = walk(SRC)
-const read = (p: string) => fs.readFileSync(p, 'utf8')
+// fim de linha normalizado: as cercas de texto abaixo casam com '\n' (o checkout no Windows pode trazer CRLF — autocrlf)
+const read = (p: string) => fs.readFileSync(p, 'utf8').replace(/\r\n/g, '\n')
 
 describe('cerca por varredura — quem ESCREVE nas tabelas que o ERP Desktop alimenta (DESKTOP_OWNED_TABLES) e em tb_service_ibscbs', () => {
   it('[RESISTIU] só os 6 módulos desses cadastros e as peças deles escrevem; nenhuma rota, controller, service de outro módulo ou script do src', () => {
@@ -94,8 +95,14 @@ describe('cerca por varredura — quem ESCREVE nas tabelas que o ERP Desktop ali
     expect(importers(/\bensureDefaultCategor(y|ies)\b/)).toEqual(['modules/institutions/institutions.repository.ts', 'shared/category-kind/index.ts'])
     // em CÓDIGO (não em comentário): nenhuma chamada/importação das peças da Rodada 6 sobrou
     expect(importers(/\b(hasActiveSyncKey|assertNoActiveSyncKey|webBornSince)\(|@shared\/sync-key|sync-write\.guard|ErrorCodes\.(SYNC_MANAGED_CATALOG|SYNC_KEY_WEB_ROWS)/)).toEqual([])
-    // a chave do sincronizador só é LIDA/ESCRITA (SQL) pelo módulo institutions, que a administra — nunca por cadastro (D-PR47: é só autenticação)
-    expect(importers(/setes_central\.tb_sync_api_key/)).toEqual(['modules/institutions/institutions.repository.ts'])
+    // a chave do sincronizador só é ESCRITA (SQL) pelo módulo institutions, que a administra — nunca por cadastro (D-PR47: é só autenticação).
+    // LEITURA fora dele: só a do main (D-IB104 — `readIbscbsAssessmentView` lê a PRESENÇA da chave para o aviso "emite pelo ERP Desktop"
+    // da tela do Estabelecimento); não decide dono do catálogo nem escrita de cadastro
+    expect(importers(/setes_central\.tb_sync_api_key/)).toEqual(['modules/institutions/institutions.repository.ts', 'shared/ibscbs-assessment/index.ts'])
+    const assessment = read(path.join(SRC, 'shared', 'ibscbs-assessment', 'index.ts'))
+    expect(assessment.match(/[^\n]*setes_central\.tb_sync_api_key[^\n]*/g)).toEqual([
+      expect.stringMatching(/^\s*"SELECT 1 AS ok FROM setes_central\.tb_sync_api_key WHERE tb_institution_id = \? AND deleted = 'N' LIMIT 1", \[institutionId\]\)$/),
+    ])
   })
 })
 
@@ -126,21 +133,26 @@ describe('D-PR45 — cerca do ENQUADRAMENTO FISCAL do serviço: um escritor por 
     expect(body('updateServiceFiscalClassification')).not.toMatch(/upsertServiceRule|tb_product\s+SET/)
   })
 
-  it('[RESISTIU] as rotas próprias vivem SÓ em services.fiscal.routes.ts (2 PUT, cada uma com o privilégio ALTERAR) e o gateway as monta ANTES do cadastro; nenhuma guarda do dono do catálogo (D-PR77)', () => {
-    const fiscal = read(path.join(SRC, 'modules', 'services', 'services.fiscal.routes.ts'))
-    expect(fiscal.match(/router\.(get|post|put|delete|patch)\(/g)).toEqual(['router.put(', 'router.put('])
-    expect(fiscal).toMatch(/requirePrivilege\('services', PRIVILEGE_ALTERAR\)/)
-    expect(fiscal).toMatch(/router\.put\('\/:id\/tax-rule', alterar, controller\.updateTaxRule\)/)
-    expect(fiscal).toMatch(/router\.put\('\/:id\/ibscbs', alterar, controller\.updateIbscbs\)/)
+  it('[RESISTIU] as rotas próprias vivem SÓ em services.routes.ts (2 PUT — ALTERAR pelo verbo, conferido pela guarda do roteador) e o gateway monta o módulo UMA vez, sob `gatedModule`; os roteadores irmãos saíram; nenhuma guarda do dono do catálogo (D-PR77)', () => {
+    // os roteadores irmãos (montados ANTES do cadastro para ficar fora da guarda do dono) saíram com ela
+    expect(fs.existsSync(path.join(SRC, 'modules', 'services', 'services.fiscal.routes.ts'))).toBe(false)
+    expect(fs.existsSync(path.join(SRC, 'modules', 'bank-accounts', 'bank-accounts.channel.routes.ts'))).toBe(false)
     const mainRoutes = read(path.join(SRC, 'modules', 'services', 'services.routes.ts'))
-    expect(mainRoutes).not.toMatch(/tax-rule'|ibscbs'/)
+    expect(mainRoutes.match(/router\.(get|post|put|delete|patch)\('\/:id\/(tax-rule|ibscbs)'[^\n]*/g)).toEqual([
+      "router.put('/:id/tax-rule', controller.updateTaxRule)", "router.put('/:id/ibscbs', controller.updateIbscbs)",
+    ])
+    // nenhum outro arquivo do src declara essas duas rotas
+    expect(FILES.filter(p => /router\.\w+\('\/:id\/(tax-rule|ibscbs)'/.test(read(p))).map(rel)).toEqual(['modules/services/services.routes.ts'])
     const gateway = read(path.join(SRC, 'gateway', 'router.ts'))
-    const a = gateway.indexOf("router.use('/services', servicesFiscalRoutes)")
-    const b = gateway.indexOf("router.use('/services', servicesRoutes)")
-    expect(a).toBeGreaterThan(-1); expect(b).toBeGreaterThan(a)
-    const c = gateway.indexOf("router.use('/bank-accounts', bankAccountsChannelRoutes)")
-    const d = gateway.indexOf("router.use('/bank-accounts', bankAccountsRoutes)")
-    expect(c).toBeGreaterThan(-1); expect(d).toBeGreaterThan(c)
+    expect(gateway.match(/router\.use\('\/services',[^\n]*/g)).toEqual(["router.use('/services', ...gatedModule('services', servicesRoutes))"])
+    expect(gateway.match(/router\.use\('\/bank-accounts',[^\n]*/g)).toEqual(["router.use('/bank-accounts', ...gatedModule('bank-accounts', bankAccountsRoutes))"])
+    expect(gateway.match(/router\.use\('\/merchandise',[^\n]*/g)).toEqual(["router.use('/merchandise', ...gatedModule('merchandise', merchandiseRoutes))"])
+    expect(gateway).not.toMatch(/servicesFiscalRoutes|bankAccountsChannelRoutes/)
+    // o canal API da conta: toda escrita com adminGuard + ALTERAR declarado (D-PR51 + inventário da D-PV1)
+    const accountRoutes = read(path.join(SRC, 'modules', 'bank-accounts', 'bank-accounts.routes.ts'))
+    const channelWrites = accountRoutes.match(/router\.(post|put|delete|patch)\('\/:id\/channel[^\n]*/g) ?? []
+    expect(channelWrites.length).toBe(8)
+    for (const w of channelWrites) expect(w).toMatch(/', adminGuard, privilegeAct\(PRIVILEGE_ALTERAR\), channel\.\w+\)/)
     expect(gateway).not.toMatch(/catalogOwnerGuard|catalog-owner\.guard/)                // a guarda saiu (D-PR77)
     expect(fs.existsSync(path.join(SRC, 'gateway', 'catalog-owner.guard.ts'))).toBe(false)
   })

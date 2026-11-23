@@ -12,6 +12,11 @@ import * as taxRule from '../shared/tax-rule'
 import { validateOrder, invoiceOrder } from '../modules/billing/billing.service'
 
 // IB-2 (D-IB71): a declaração IBS/CBS tem teste próprio (ibscbs-declaration.test.ts) — aqui a fronteira é mockada
+// D-IB99/D-IB100: a opção de apuração do IBS/CBS tem teste próprio (ibscbs-assessment.test.ts) — aqui a fronteira é mockada
+jest.mock('../shared/ibscbs-assessment', () => ({
+  __esModule: true,
+  previewIbscbsAssessmentRefusal: jest.fn().mockResolvedValue(null),
+}))
 jest.mock('../shared/service-ibscbs-declaration', () => ({
   __esModule: true,
   declareServiceIbscbs: jest.fn().mockResolvedValue({ group: null, nbs: null, omitted: ['not-classified'] }),

@@ -150,7 +150,7 @@ async function p0(): Promise<void> {
         AND i.i18n_key IN ('orders', 'service-orders', 'order-returns')`)
   const regulares = await uma<any>(
     `SELECT COUNT(*) q FROM \`${SCHEMA}\`.tb_user_has_privilege
-      WHERE tb_privilege_id IN (5, 7) AND active = 'S' AND deleted = 'N'`)
+      WHERE tb_institution_id = ? AND tb_privilege_id IN (5, 7) AND active = 'S' AND deleted = 'N'`, [INST])
   reporta('P0.2', 'privilégios FATURAR/CANCELAR (D32)',
     Number(catalogo?.q ?? 0) >= 5 ? 'OK' : 'PENDENTE',
     `${catalogo?.q ?? 0} vínculo(s) interface×privilégio no catálogo (esperado ≥ 5: FATURAR+CANCELAR em orders e service-orders, FATURAR em order-returns) · `

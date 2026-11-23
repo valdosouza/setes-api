@@ -3,6 +3,7 @@ import { HttpError } from '@shared/errors/http-error'
 import { ListQuery, PagedRows, SearchCriterion, escapeLike } from '@shared/list'
 import { entityRoleSearchCriteria, roleStatusSearchCriteria, saveEntityFiscalChain, getEntityFiscalFull } from '@shared/entity'
 import { SETES_INSTITUTION_ID, SETES_SCHEMA } from '@shared/auth/roles'
+import { STRUCTURAL_INTERFACE_KEYS, ensureStructuralInterfaces } from '@shared/institution-interfaces'
 import { assertSchema } from '@shared/db/schema'
 import { lockInstitutionCounters } from '@shared/db/counters'
 import { ensureDefaultCategories, CategoryKind } from '@shared/category-kind'
@@ -197,6 +198,13 @@ export async function insertInstitutionCascade(
   }
 }
 
+/** Schema e situação da institution viva (sem a cadeia) — a edição decide se a volta a ATIVO provisiona o schema. */
+export async function getInstitutionActivation(id: number): Promise<{ schemaName: string; active: string } | null> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT schema_name AS schemaName, active FROM setes_central.tb_institution WHERE id = ? AND deleted = 'N'`, [id])
+  return rows[0] ? { schemaName: String(rows[0].schemaName), active: String(rows[0].active) } : null
+}
+
 /** O cache da chave no setes-sync (D-SY13: até 5 min) — a troca D → W só aceita a chave bloqueada há mais que isso (D-PR78). */
 export const SYNC_KEY_CACHE_TTL_SECONDS = 300
 
@@ -261,7 +269,9 @@ export async function updateInstitutionCascade(
         // pode estar gravando: a troca espera o cache vencer (a pausa grava `updated_at` da chave — `switchSyncApiKeyTx`)
         const [[recent]] = await conn.query<any[]>(
           `SELECT TIMESTAMPDIFF(SECOND, MAX(updated_at), NOW()) AS pausedFor FROM setes_central.tb_sync_api_key
-            WHERE tb_institution_id = ? AND deleted = 'N' AND active = 'N'`, [id]) as any
+            WHERE tb_institution_id = ? AND deleted = 'N' AND active = 'N' FOR UPDATE`, [id]) as any   // leitura TRAVADA: vê o bloqueio
+        // comitado DEPOIS do retrato da transação (a leitura sem trava do `peek` o fixou — gate adversarial do PROD.E7.P1: sem isto, um
+        // bloqueio em voo passava com `pausedFor` nulo e a troca gravava na hora)
         const pausedFor = recent?.pausedFor == null ? null : Number(recent.pausedFor)
         if (pausedFor !== null && pausedFor < SYNC_KEY_CACHE_TTL_SECONDS) {
           const wait = SYNC_KEY_CACHE_TTL_SECONDS - pausedFor
@@ -321,6 +331,13 @@ export async function deleteInstitution(id: number): Promise<void> {
  * antigo admin.repository quando o cadastro absorveu o onboarding
  * (decisão do Valdo, 2026-07-11).
  */
+/**
+ * Módulos que SEGUEM na flag técnica (D-PV36): os do perfil admin (`users`, `modules`, `establishment` — adminGuard), as
+ * guardas de AÇÃO por ramo (`billing`), o catálogo fiscal sem tela (`state-tax-rates` — adminGuard, D-PV23) e o `core`.
+ * Todo módulo de TELA do cliente é guardado por roteador e NÃO entra aqui.
+ */
+export const FLAG_ONLY_MODULES: readonly string[] = ['core', 'users', 'modules', 'establishment', 'billing', 'state-tax-rates']
+
 export async function insertDefaultFlags(institutionId: number): Promise<void> {
   // 'customers' liberado por padrão desde a Fase 3; 'collaborators' desde a
   // onda 2; 'salesmen'/'carriers' desde a Onda 2 salesman/carrier (gate
@@ -342,18 +359,11 @@ export async function insertDefaultFlags(institutionId: number): Promise<void> {
   // 'services'/'price-lists' desde 2026-09-01 (prompt_modulo_services.md):
   // gate técnico — a liberação comercial é por interface (D3: só cliente
   // sem legado); seed 42 cobre as institutions retroativas.
-  // 'merchandise' desde 2026-10-18 (prompt_modulo_products.md §16 — cadastro de produtos/mercadoria, onda 1): mesma regra da liberação
-  // comercial (D-PR14); seed 66 cobre as institutions retroativas.
-  const defaultModules = [
-    'core', 'users', 'customers', 'collaborators', 'salesmen', 'carriers',
-    'providers', 'categories', 'financial-plans', 'tax-rules',
-    'state-tax-rates', 'billing',
-    'payment-types', 'contracts', 'bank-accounts',
-    'service-orders', 'settlements', 'modules', 'cashier', 'orders',
-    'order-returns', 'establishment', 'services', 'price-lists',
-    'service-tax-rules', 'settlement-rules', 'bank-slips',
-    'bank-charge-agreements', 'checks', 'merchandise',
-  ]
+  // D-PV36 (Valdo 2026-10-20 — prompt_privilegios_interfaces.md): a flag técnica MORREU para os módulos que passam pela guarda
+  // por roteador (`gatedModule` — o vínculo tb_institution_has_interface é a única licença); o onboarding só cria flag para o
+  // que NÃO tem tela guardada. Lista FECHADA (cerca `feature-flags-d-pv36.test.ts`: nenhum item pode estar em `listGatedModules()`,
+  // e todo item tem de estar montado no gateway).
+  const defaultModules = [...FLAG_ONLY_MODULES]
   const conn = await pool.getConnection()
   try {
     await conn.beginTransaction()
@@ -392,29 +402,16 @@ export async function insertDefaultFlags(institutionId: number): Promise<void> {
  * Ids resolvidos por i18n_key, nunca literais (lição do seed 25).
  * Roda DEPOIS das migrations: a tabela vive no schema do cliente.
  */
-export const STRUCTURAL_INTERFACE_KEYS = ['users', 'modules', 'interface-configs', 'establishment']
+// D-PV35 (2026-10-20): a lista é UMA constante na peça `@shared/institution-interfaces` (o onboarding concede; a porta delegada não
+// revoga). Re-exportada aqui para os consumidores do módulo (testes do onboarding).
+export { STRUCTURAL_INTERFACE_KEYS }
 
+// D-TM29/D-TM31 (2026-11-15): a regra é UMA, na peça (`ensureStructuralInterfaces`) — o onboarding e o passo do boot a usam. Cria só
+// a concessão que falta (a institution nova não tem nenhuma). Devolve quantas estruturais o catálogo tem (o contrato de antes).
 export async function grantStructuralInterfaces(
   schemaName: string, institutionId: number
 ): Promise<number> {
-  const s = assertSchema(schemaName)
-  const [rows] = await pool.query<any[]>(
-    `SELECT id FROM setes_central.tb_interface
-      WHERE i18n_key IN (?) AND deleted = 'N'`,
-    [STRUCTURAL_INTERFACE_KEYS]
-  )
-  if (rows.length === 0) return 0
-
-  const now    = new Date()
-  const values = rows.map((r: any) => [institutionId, r.id, 'S', now, now])
-  await pool.query(
-    `INSERT INTO \`${s}\`.tb_institution_has_interface
-       (tb_institution_id, tb_interface_id, active, created_at, updated_at)
-     VALUES ?
-     ON DUPLICATE KEY UPDATE active = 'S', deleted = 'N', updated_at = NOW()`,
-    [values]
-  )
-  return rows.length
+  return (await ensureStructuralInterfaces(schemaName, institutionId)).catalog
 }
 
 // ---------------------------------------------------------------------

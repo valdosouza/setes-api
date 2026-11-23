@@ -276,4 +276,79 @@ router.post('/', controller.create)
 router.put('/:id', controller.update)
 router.delete('/:id', controller.remove)
 
+
+// D-PR45 (Rodada 7 do cadastro de produtos — fecha a Q-PR52): o ENQUADRAMENTO FISCAL do serviço tem rota PRÓPRIA — o vínculo com a
+// regra de ISS (`tb_service.tb_service_tax_rule_id`) e a presunção IBS/CBS (`tb_service.nbs` + `tb_service_ibscbs`) são fatos que o
+// ERP Desktop não produz: a web é a única escritora deles, em qualquer origem do estabelecimento (W/D). Viviam num roteador irmão
+// montado ANTES da guarda do dono do catálogo; a guarda saiu (D-PR77) e, no modelo da guarda por roteador (D-PV2), todo roteador do
+// módulo passa pelo `gatedModule` — as duas rotas voltaram para cá (PROD.E7.P1). Privilégio: ALTERAR em `services`, pelo verbo PUT.
+
+/**
+ * @swagger
+ * /api/services/{id}/tax-rule:
+ *   put:
+ *     summary: Vincula o serviço à regra de ISS (D-PR45 — fora da guarda do dono do catálogo; a web é a única escritora deste fato)
+ *     description: Corpo `{ serviceTaxRuleId }` — `null` = sem regra. Vale em qualquer modo do estabelecimento (W/D), inclusive
+ *       quando o cadastro do serviço vem do sistema legado (origem D). Privilégio ALTERAR na interface services.
+ *     tags: [services]
+ *     security: [{ BearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [serviceTaxRuleId]
+ *             properties:
+ *               serviceTaxRuleId: { type: integer, nullable: true }
+ *     responses:
+ *       200: { description: "{ ok }" }
+ *       400: { description: "Validação; regra inexistente (fields[serviceTaxRuleId]); campo obrigatório do cliente (REQUIRED_FIELDS)" }
+ *       403: { description: "PRIVILEGE_REQUIRED — falta ALTERAR em services (guarda do roteador — D-PV2) / INTERFACE_NOT_ALLOWED" }
+ *       404: { description: Serviço não encontrado }
+ */
+router.put('/:id/tax-rule', controller.updateTaxRule)
+
+/**
+ * @swagger
+ * /api/services/{id}/ibscbs:
+ *   put:
+ *     summary: Grava a presunção IBS/CBS do serviço — NBS e/ou par cClassTrib × cIndOp (D-PR45 — fora da guarda do dono do catálogo)
+ *     description: Mesma semântica do PUT do cadastro (ausente = não mexe · null = remove · valor = grava), mas pelo menos um dos dois
+ *       campos tem de vir. Catálogo central conferido só no que MUDOU (D-IB30). Vale em qualquer modo do estabelecimento (W/D).
+ *     tags: [services]
+ *     security: [{ BearerAuth: [] }]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               nbs: { type: string, nullable: true, description: "9 dígitos" }
+ *               ibscbs:
+ *                 type: object
+ *                 nullable: true
+ *                 properties:
+ *                   classificationCode: { type: string, description: "cClassTrib, 6 dígitos" }
+ *                   placeIndicatorCode: { type: string, description: "cIndOp, 6 dígitos" }
+ *     responses:
+ *       200: { description: "{ ok }" }
+ *       400: { description: "Validação (corpo sem nbs e sem ibscbs = nada a gravar); campo obrigatório do cliente (REQUIRED_FIELDS)" }
+ *       403: { description: "PRIVILEGE_REQUIRED — falta ALTERAR em services (guarda do roteador — D-PV2) / INTERFACE_NOT_ALLOWED" }
+ *       404: { description: Serviço não encontrado }
+ *       422: { description: "Classificação IBS/CBS inválida (IBSCBS_* em code; campo em fields[])" }
+ */
+router.put('/:id/ibscbs', controller.updateIbscbs)
+
 export default router

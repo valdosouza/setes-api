@@ -11,6 +11,7 @@ import net from 'net'
 import { AddressInfo } from 'net'
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
+import { accessAnswer, AccessModel, ModelProfile } from '../test-setup/access-model'
 
 jest.mock('../shared/db/connection', () => ({
   __esModule: true, default: { query: jest.fn(), getConnection: jest.fn(), on: jest.fn(), end: jest.fn() },
@@ -43,7 +44,6 @@ jest.mock('../modules/merchandise/merchandise.service', () => {
 
 import pool from '../shared/db/connection'
 import * as service from '../modules/merchandise/merchandise.service'
-import { resetPrivilegeCache } from '../shared/auth/require-privilege'
 import app from '../app'
 
 const q = (pool as any).query as jest.Mock
@@ -55,20 +55,32 @@ function routeDb(): void {
   q.mockImplementation(async (sql: string, params: any[] = []) => {
     if (/SELECT source_kind AS kind FROM setes_central\.tb_institution/.test(sql)) return [[{ kind: desktop.has(Number(params[0])) ? 'D' : 'W' }]]
     if (/tb_sync_api_key/.test(sql)) throw new Error('nenhuma camada da escrita do catálogo consulta a chave (D-PR47/D-PR77)')
-    if (/FROM setes_central\.tb_interface WHERE i18n_key/.test(sql)) {
-      const id = ({ merchandise: MERCH_IFACE, services: SERVICES_IFACE } as Record<string, number>)[String(params[0])]
-      return [id ? [{ id }] : []]
-    }
-    if (/tb_institution_has_interface/.test(sql)) return [contracted.has(Number(params[1])) ? [{ 1: 1 }] : []]
-    if (/tb_user_has_privilege/.test(sql)) return [privileged.has(`${params[0]}:${params[1]}:${params[2]}`) ? [{ 1: 1 }] : []]
+    // o veredito da guarda do roteador (gatedModule('merchandise') — D-PV2; costura A1): as views respondem pelo modelo do cenário
+    const a = accessAnswer(sql, params, modelFor)
+    if (a) return [a, []]
     throw new Error(`SQL inesperado: ${String(sql).slice(0, 90)}`)
   })
 }
+const KEY_BY_IFACE: Record<number, string> = { [MERCH_IFACE]: 'merchandise', [SERVICES_IFACE]: 'services' }
+const VERB_BY_ID: Record<number, string> = { 1: 'INSERIR', 2: 'ALTERAR', 3: 'EXCLUIR', 6: 'VISUALIZAR', 10: 'CATALOGAR' }
+/** O cenário (contratadas por id de interface; concessões `${userId}:${interfaceId}:${privilegeId}`) como o modelo das views. */
+function modelFor(userId: number, institutionId: number): AccessModel | null {
+  const profile = PROFILE[`${userId}:${institutionId}`]
+  if (!profile) return null
+  const granted: Record<string, string[]> = {}
+  for (const p of privileged) {
+    const [u, iface, priv] = p.split(':').map(Number)
+    if (u === userId) (granted[KEY_BY_IFACE[iface]] ??= []).push(VERB_BY_ID[priv])
+  }
+  return { profile, contracted: [...contracted].map(id => KEY_BY_IFACE[id]), granted }
+}
 
 const SETES_ADMIN = { institutionId: 1, userId: 1, role: 'admin', schemaName: 'setes_setes' }
-const SETES_SUPER = { institutionId: 1, userId: 1, role: 'super', schemaName: 'setes_setes' }
+const SETES_SUPER = { institutionId: 1, userId: 2, role: 'super', schemaName: 'setes_setes' }   // outro usuário: o perfil é do vínculo (vw_user_link)
 const ADMIN = { institutionId: 2, userId: 9, role: 'admin', schemaName: 'setes_x' }
 const USER = { institutionId: 2, userId: 10, role: 'user', schemaName: 'setes_x' }
+const PROFILE: Record<string, ModelProfile> = Object.fromEntries(
+  [SETES_ADMIN, SETES_SUPER, ADMIN, USER].map(p => [`${p.userId}:${p.institutionId}`, p.role as ModelProfile]))
 const bearer = (p: object) => `Bearer ${testToken(p)}`
 const WRITES = ['createMerchandise', 'editMerchandise', 'removeMerchandise', 'putTradeUnits', 'createBrand', 'createMeasure', 'createPackage'] as const
 const writesReached = () => WRITES.filter(w => ((service as any)[w] as jest.Mock).mock.calls.length > 0)
@@ -77,12 +89,11 @@ const brand = { description: 'MARCA ADV3' }
 
 beforeEach(() => {
   jest.clearAllMocks()
-  resetPrivilegeCache()
   desktop = new Set([1]); contracted = new Set([MERCH_IFACE]); privileged = new Set()
   routeDb()
 })
 
-describe('D-PR77 — SEM guarda no /api/merchandise: institution com origem D (ERP Desktop dono do catálogo) ESCREVE', () => {
+describe('D-PR77 — sem guarda do dono do catálogo no /api/merchandise (V/I/A/E seguem pela guarda do roteador): institution com origem D (ERP Desktop dono do catálogo) ESCREVE', () => {
   it('[RESISTIU] toda escrita do módulo (ficha, níveis, exclusão, criação na central) chega ao handler — admin e super; nenhum 409 do dono do catálogo; o fato nem é lido', async () => {
     for (const who of [SETES_ADMIN, SETES_SUPER]) {
       jest.clearAllMocks()
@@ -117,14 +128,14 @@ describe('D-PR77 — SEM guarda no /api/merchandise: institution com origem D (E
     expect(factRead()).toBe(false)
   })
 
-  it('[RESISTIU] PATCH e métodos fora do router (PURGE/LOCK) não acham rota (404) — nada chega ao serviço', async () => {
+  it('[RESISTIU] PATCH não acha rota (404, depois do ALTERAR conferido) e método fora do mapa da guarda (PURGE/LOCK) é negado por ela (403 — D-PV2) — nada chega ao serviço', async () => {
     const auth = bearer(SETES_ADMIN)
     const res = await Promise.all([
       request(app).patch('/api/merchandise/5').set('Authorization', auth).send({}),
       request(app).purge('/api/merchandise/5').set('Authorization', auth),
       request(app).lock('/api/merchandise/5').set('Authorization', auth),
     ])
-    expect(res.map(r => r.status)).toEqual([404, 404, 404])
+    expect(res.map(r => r.status)).toEqual([404, 403, 403])
     expect(writesReached()).toEqual([])
   })
 
@@ -184,7 +195,7 @@ describe('D-PR77 — SEM guarda no /api/merchandise: institution com origem D (E
   })
 })
 
-describe('D-PR33 — CATALOGAR (10) nas criações da central (o privilégio segue sendo a ÚNICA barreira, em W e em D)', () => {
+describe('D-PR33 — CATALOGAR (10) nas criações da central (sem guarda do dono do catálogo, em W e em D; o resto do módulo tem V/I/A/E pela guarda do roteador)', () => {
   it('[RESISTIU] usuário regular sem o privilégio: 403 PRIVILEGE_REQUIRED nas três (inclusive /Brands e barra final)', async () => {
     const auth = bearer(USER)
     const res = await Promise.all([
@@ -222,7 +233,7 @@ describe('D-PR33 — CATALOGAR (10) nas criações da central (o privilégio seg
     expect(writesReached()).toEqual([])
   })
 
-  it('[RESISTIU] com CATALOGAR na interface contratada (ou admin) cria; o super na Setes (origem D) também cria — sem guarda (D-PR77)', async () => {
+  it('[RESISTIU] com CATALOGAR na interface contratada (ou admin) cria; o super na Setes (origem D) também cria — sem guarda do dono do catálogo (D-PR77)', async () => {
     privileged.add(`${USER.userId}:${MERCH_IFACE}:10`)
     const [u, a, s] = await Promise.all([
       request(app).post('/api/merchandise/brands').set('Authorization', bearer(USER)).send(brand),
@@ -235,8 +246,13 @@ describe('D-PR33 — CATALOGAR (10) nas criações da central (o privilégio seg
 
   it('[RESISTIU] a ficha e as unidades NÃO criam item na central por tabela: o PUT/POST só referenciam (sem CATALOGAR, sem criação)', async () => {
     // a criação na central só existe nas três rotas com CATALOGAR; as demais rotas de escrita não chamam createBrand/Measure/Package
+    // a guarda do roteador (D-PV2) pede ALTERAR no PUT: com a concessão a requisição CHEGA ao handler — sem ela morreria em 403 e a
+    // asserção de baixo passaria no vazio
+    privileged.add(`${USER.userId}:${MERCH_IFACE}:2`)
     const auth = bearer(USER)
-    await request(app).put('/api/merchandise/5/trade-units').set('Authorization', auth).send({ levels: [{ level: 1, measureId: 999, factor: 1 }] })
+    const r = await request(app).put('/api/merchandise/5/trade-units').set('Authorization', auth).send({ levels: [{ level: 1, measureId: 999, factor: 1 }] })
+    expect(r.status).toBe(200)
+    expect((service.putTradeUnits as jest.Mock).mock.calls).toHaveLength(1)
     expect(['createBrand', 'createMeasure', 'createPackage'].filter(w => ((service as any)[w] as jest.Mock).mock.calls.length)).toEqual([])
   })
 })

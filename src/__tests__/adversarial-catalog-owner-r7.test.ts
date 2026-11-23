@@ -10,6 +10,7 @@
 // `it('[RESISTIU] …')` = a promessa vale. Substitui `adversarial-sync-guard-r6.test.ts`.
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
+import { accessAnswer, AccessModel, ModelProfile } from '../test-setup/access-model'
 
 jest.mock('../shared/db/connection', () => ({
   __esModule: true, default: { query: jest.fn(), getConnection: jest.fn(), on: jest.fn(), end: jest.fn() },
@@ -81,12 +82,17 @@ import * as categories from '../modules/categories/categories.service'
 import * as financialPlans from '../modules/financial-plans/financial-plans.service'
 import * as bankAccounts from '../modules/bank-accounts/bank-accounts.service'
 import * as channel from '../modules/bank-accounts/bank-accounts.channel.controller'
-import { resetPrivilegeCache } from '../shared/auth/require-privilege'
 import { ErrorCodes } from '../shared/errors/error-codes'
 import app from '../app'
 
 const q = (pool as any).query as jest.Mock
 const SERVICES_IFACE = 34
+// as 5 telas dos cadastros deste arquivo, todas sob a guarda por roteador (gatedModule — D-PV2): id da interface → chave
+const KEY_BY_IFACE: Record<number, string> = {
+  [SERVICES_IFACE]: 'services', 35: 'price-lists', 36: 'categories', 37: 'financial-plans', 38: 'bank-accounts',
+}
+const ALL_IFACES = Object.keys(KEY_BY_IFACE).map(Number)
+const VERB_BY_ID: Record<number, string> = { 1: 'INSERIR', 2: 'ALTERAR', 3: 'EXCLUIR', 6: 'VISUALIZAR' }
 let facts: Map<number, string>                  // o fato gravado por institution ('W' | 'D'; letra antiga só para provar que é ilegível)
 let factQueries: number
 let contracted: Set<number>
@@ -99,9 +105,9 @@ function routeDb(): void {
       const k = facts.get(Number(params[0]))
       return [k ? [{ kind: k }] : []]
     }
-    if (/FROM setes_central\.tb_interface WHERE i18n_key/.test(s)) return [String(params[0]) === 'services' ? [{ id: SERVICES_IFACE }] : []]
-    if (/tb_institution_has_interface/.test(s)) return [contracted.has(Number(params[1])) ? [{ 1: 1 }] : []]
-    if (/tb_user_has_privilege/.test(s)) return [privileged.has(`${params[0]}:${params[1]}:${params[2]}`) ? [{ 1: 1 }] : []]
+    // o veredito da guarda do roteador (costura A1): as views respondem pelo modelo do cenário — contrato + concessões, NUNCA o fato
+    const a = accessAnswer(s, params, modelFor)
+    if (a) return [a, []]
     if (/tb_sync_api_key/.test(s)) throw new Error('nenhuma camada da escrita do catálogo consulta a chave (D-PR47/D-PR77)')
     if (/^\s*SELECT/i.test(s)) return [[]]                         // catálogo de campos configuráveis etc. — vazio
     throw new Error(`SQL inesperado: ${s.slice(0, 90)}`)
@@ -109,9 +115,22 @@ function routeDb(): void {
 }
 
 const SETES_ADMIN = { institutionId: 1, userId: 1, role: 'admin', schemaName: 'setes_setes' }
-const SETES_SUPER = { institutionId: 1, userId: 1, role: 'super', schemaName: 'setes_setes' }
+const SETES_SUPER = { institutionId: 1, userId: 2, role: 'super', schemaName: 'setes_setes' }   // outro usuário: o perfil é do vínculo (vw_user_link)
 const SETES_USER  = { institutionId: 1, userId: 5, role: 'user', schemaName: 'setes_setes' }
 const OTHER_ADMIN = { institutionId: 2, userId: 9, role: 'admin', schemaName: 'setes_x' }
+const PROFILE: Record<string, ModelProfile> = Object.fromEntries(
+  [SETES_ADMIN, SETES_SUPER, SETES_USER, OTHER_ADMIN].map(p => [`${p.userId}:${p.institutionId}`, p.role as ModelProfile]))
+/** O cenário (contratadas por id de interface; concessões `${userId}:${interfaceId}:${privilegeId}`) como o modelo das views. */
+function modelFor(userId: number, institutionId: number): AccessModel | null {
+  const profile = PROFILE[`${userId}:${institutionId}`]
+  if (!profile) return null
+  const granted: Record<string, string[]> = {}
+  for (const p of privileged) {
+    const [u, iface, priv] = p.split(':').map(Number)
+    if (u === userId) (granted[KEY_BY_IFACE[iface]] ??= []).push(VERB_BY_ID[priv])
+  }
+  return { profile, contracted: [...contracted].map(id => KEY_BY_IFACE[id]), granted }
+}
 const bearer = (p: object) => `Bearer ${testToken(p)}`
 const WRITES = [
   [services, 'createService'], [services, 'editService'], [services, 'removeService'],
@@ -149,13 +168,12 @@ const allWrites = (auth: string) => Promise.all([
 
 beforeEach(() => {
   jest.clearAllMocks()
-  resetPrivilegeCache()
   facts = new Map([[1, 'D'], [2, 'W']]); factQueries = 0
-  contracted = new Set([SERVICES_IFACE]); privileged = new Set()
+  contracted = new Set(ALL_IFACES); privileged = new Set()
   routeDb()
 })
 
-describe('D-PR77 — SEM guarda: com origem D (ERP Desktop dono do catálogo) a web ESCREVE nos 6 cadastros que o ERP Desktop alimenta', () => {
+describe('D-PR77 — SEM guarda do dono do catálogo: com origem D (ERP Desktop dono do catálogo) a web ESCREVE nos 6 cadastros que o ERP Desktop alimenta', () => {
   it('[RESISTIU] a guarda saiu de verdade: o arquivo catalog-owner.guard não existe e os códigos CATALOG_LEGACY_OWNED/CATALOG_DESKTOP_OWNED não existem', () => {
     expect(() => require.resolve('../gateway/catalog-owner.guard')).toThrow()
     expect(ErrorCodes).not.toHaveProperty('CATALOG_LEGACY_OWNED')
@@ -241,8 +259,10 @@ describe('D-PR77 — SEM guarda: com origem D (ERP Desktop dono do catálogo) a 
   })
 
   it("[RESISTIU] nenhuma camada do roteador depende do fato: erro do banco ao lê-lo, institution sem linha ou letra antiga ('L'/'P', ilegível desde a D-OI10) — a escrita passa igual", async () => {
-    q.mockImplementation(async (sql: string) => {
+    q.mockImplementation(async (sql: string, params: any[] = []) => {
       if (/SELECT source_kind AS kind/.test(String(sql))) throw new Error('pool esgotado')
+      const a = accessAnswer(String(sql), params, modelFor)          // o veredito do privilégio segue respondendo (não é o fato)
+      if (a) return [a, []]
       return [[]]
     })
     const r = await request(app).post('/api/price-lists').set('Authorization', bearer(SETES_ADMIN)).send(priceList)
@@ -258,7 +278,7 @@ describe('D-PR77 — SEM guarda: com origem D (ERP Desktop dono do catálogo) a 
   })
 })
 
-describe('D-PR45 — o ENQUADRAMENTO FISCAL do serviço é da web em qualquer origem (rota própria, privilégio ALTERAR)', () => {
+describe('D-PR45 — o ENQUADRAMENTO FISCAL do serviço é da web em qualquer origem (rotas próprias no roteador do módulo, sob a guarda por roteador: ALTERAR pelo PUT)', () => {
   const taxRule = { serviceTaxRuleId: 2 }
   const ibscbs = { nbs: '115013000', ibscbs: { classificationCode: '000001', placeIndicatorCode: '100301' } }
 
@@ -275,7 +295,7 @@ describe('D-PR45 — o ENQUADRAMENTO FISCAL do serviço é da web em qualquer or
     expect((services.editService as jest.Mock).mock.calls).toHaveLength(1)
   })
 
-  it('[RESISTIU] só PUT vive na rota própria: POST/DELETE/PATCH/GET nas mesmas URLs caem no roteador do cadastro e não acham rota (404)', async () => {
+  it('[RESISTIU] só PUT existe nas rotas próprias: POST/DELETE/PATCH/GET nas mesmas URLs não acham rota no roteador do módulo (404)', async () => {
     const auth = bearer(SETES_ADMIN)
     const res = await Promise.all([
       request(app).post('/api/services/2/tax-rule').set('Authorization', auth).send(taxRule),
@@ -294,7 +314,7 @@ describe('D-PR45 — o ENQUADRAMENTO FISCAL do serviço é da web em qualquer or
     privileged.add(`${SETES_USER.userId}:${SERVICES_IFACE}:2`)
     const ok = await request(app).put('/api/services/2/tax-rule').set('Authorization', bearer(SETES_USER)).send(taxRule)
     expect(ok.status).toBe(200)
-    contracted = new Set(); resetPrivilegeCache()
+    contracted = new Set()
     const noIface = await request(app).put('/api/services/2/ibscbs').set('Authorization', bearer(SETES_ADMIN)).send(ibscbs)
     expect([noIface.status, noIface.body.code]).toEqual([403, 'INTERFACE_NOT_ALLOWED'])
     expect((services.editServiceTaxRule as jest.Mock).mock.calls).toHaveLength(1)
@@ -316,7 +336,7 @@ describe('D-PR45 — o ENQUADRAMENTO FISCAL do serviço é da web em qualquer or
   })
 })
 
-describe('D-PR51 — o CANAL API da conta bancária (fato só da web) tem roteador próprio; o cadastro da conta também escreve em D (D-PR77)', () => {
+describe('D-PR51 — o CANAL API da conta bancária (fato só da web) vive no roteador da conta (ALTERAR + adminGuard); o cadastro da conta também escreve em D (D-PR77)', () => {
   it('[RESISTIU] em D o admin opera o canal (GET/PUT/DELETE, segredos, token, teste, webhook) E edita a conta', async () => {
     const auth = bearer(SETES_ADMIN)
     const res = await Promise.all([
@@ -337,6 +357,12 @@ describe('D-PR51 — o CANAL API da conta bancária (fato só da web) tem rotead
   it('[RESISTIU] o canal segue só do admin (adminGuard próprio): usuário regular em D = 403 antes de qualquer coisa', async () => {
     const r = await request(app).put('/api/bank-accounts/5/channel').set('Authorization', bearer(SETES_USER)).send({})
     expect(r.status).toBe(403)
+    // nem com o ALTERAR da conta concedido: o adminGuard do canal recusa o usuário regular (segredos do banco)
+    privileged.add(`${SETES_USER.userId}:38:2`)
+    const withGrant = await request(app).put('/api/bank-accounts/5/channel').set('Authorization', bearer(SETES_USER)).send({})
+    expect(withGrant.status).toBe(403)
+    const account5 = await request(app).put('/api/bank-accounts/5').set('Authorization', bearer(SETES_USER)).send(account)
+    expect(account5.status).toBe(200)                              // a concessão vale para a conta — só o canal é do admin
     expect((channel.putChannel as jest.Mock).mock.calls).toHaveLength(0)
   })
 })

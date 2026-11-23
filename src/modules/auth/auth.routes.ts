@@ -1,18 +1,47 @@
 import { Router, Request, Response } from 'express'
-import { login, selectInstitution, switchInstitution, recoveryPassword, changePassword } from './auth.service'
+import {
+  login, selectInstitution, switchInstitution, recoveryPassword, changePassword, requestMyPasswordCode, changeMyPassword,
+} from './auth.service'
 import { authMiddleware } from '@gateway/auth.middleware'
+import { perEmailRateLimit } from '@gateway/rate-limit.middleware'
+import { bodyText } from '@shared/auth/login-email'
 import { HttpError } from '@shared/errors/http-error'
 import logger from '@shared/logger/logger'
+import { maskEmailsInText } from '@shared/mailer/mailer'
 
 const router = Router()
 
+// Q-PV38: limite POR E-MAIL (memória — camada de carga) nas duas rotas públicas de senha, além do limite por IP do app.ts.
+// A garantia durável é o teto POR CONTA do auth.service (tentativas por código + emissões por janela). Valores: Q-RS1.
+export const RECOVERY_PER_EMAIL = { windowMinutes: 15, max: 5 }
+export const CHANGE_PER_EMAIL   = { windowMinutes: 15, max: 10 }
+const recoveryPerEmail = perEmailRateLimit(RECOVERY_PER_EMAIL.windowMinutes, RECOVERY_PER_EMAIL.max)
+const changePerEmail   = perEmailRateLimit(CHANGE_PER_EMAIL.windowMinutes, CHANGE_PER_EMAIL.max)
+
 function fail(res: Response, err: unknown, context: string) {
   if (err instanceof HttpError) {
-    res.status(err.statusCode).json({ error: err.message })
+    // o MESMO envelope do Framework de Mensagens (`handleError`): sem o `code`, o 401 SESSION_REVOKED da seleção (D-EA7) chegava ao app
+    // como um 401 qualquer (gate adversarial da costura A1)
+    res.status(err.statusCode).json({
+      error: err.message,
+      ...(err.code ? { code: err.code } : {}),
+      ...(err.fields ? { fields: err.fields } : {}),
+    })
     return
   }
-  logger.error(`Erro em auth/${context}`, { err })
+  // D-EA21 (gate adversarial do delta, ADV-EA21-02): nunca o `err` CRU — o erro do mysql2 carrega `sql` com os parâmetros FORMATADOS
+  // (o e-mail digitado nas três rotas públicas); só código, errno e a mensagem com todo endereço mascarado (molde do alarmNeutral)
+  logger.error(`Erro em auth/${context}`, authErrorForLog(err))
   res.status(500).json({ error: 'Erro interno' })
+}
+
+function authErrorForLog(err: unknown): { code?: unknown; errno?: unknown; message: string } {
+  try {
+    const e = err as { code?: unknown; errno?: unknown; message?: unknown } | null
+    return { code: e?.code, errno: e?.errno, message: maskEmailsInText(String(e?.message ?? err)) }
+  } catch {
+    return { message: '(erro sem texto legível)' }
+  }
 }
 
 /**
@@ -20,7 +49,14 @@ function fail(res: Response, err: unknown, context: string) {
  * /auth/login:
  *   post:
  *     summary: Autenticação unificada (retorna token ou lista de institutions)
- *     description: Login com email/password. Retorna JWT se usuário tem uma institution; se múltiplas, retorna selectionToken para escolher.
+ *     description: |
+ *       Login com email/password. Retorna JWT se o usuário tem uma institution; se múltiplas, retorna selectionToken para escolher.
+ *       **Limite por CONTA (D-EA1)**: 10 senhas erradas em 15 minutos (janela deslizante) bloqueiam a conta até a falha mais velha da
+ *       janela envelhecer — durante o bloqueio até a senha CERTA é recusada; não há desbloqueio manual. **Uma resposta só (D-EA6)**:
+ *       senha errada, e-mail inexistente, conta sem senha, usuário inativo, usuário sem estabelecimento ativo, conta bloqueada e
+ *       contenção recebem a MESMA 401 `{ "error": "Email ou senha inválidos" }`, no MESMO tempo mínimo (o 200 não espera o piso).
+ *       Ao bloquear, o dono recebe um e-mail neutro (no máximo 1 por hora — D-EA3). Muitas falhas no total disparam um alarme à
+ *       operação da Setes, nunca um bloqueio global (D-EA4). Limite por IP do gateway (300/min) — 429.
  *     tags: [Auth]
  *     security: []
  *     requestBody:
@@ -29,6 +65,7 @@ function fail(res: Response, err: unknown, context: string) {
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [email, password]
  *             properties:
  *               email:
  *                 type: string
@@ -51,6 +88,9 @@ function fail(res: Response, err: unknown, context: string) {
  *                     token:
  *                       type: string
  *                       description: JWT válido
+ *                     context:
+ *                       type: object
+ *                       description: Estado de sessão derivado (decisão 17)
  *                 - type: object
  *                   properties:
  *                     ok:
@@ -67,27 +107,41 @@ function fail(res: Response, err: unknown, context: string) {
  *                       items:
  *                         type: object
  *       400:
- *         description: Email ou password ausente
+ *         description: Email ou password ausente, ou não é texto (array, objeto, número)
  *       401:
- *         description: Credenciais inválidas
+ *         description: Credenciais inválidas — a MESMA resposta para toda recusa (D-EA6), nunca diz o motivo
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: Email ou senha inválidos
+ *       429:
+ *         description: Limite de requisições por IP excedido
  *       500:
  *         description: Erro interno
  */
 router.post('/login', async (req: Request, res: Response) => {
   const { email, password } = req.body ?? {}
-  if (!email || !password) {
+  // A-EA8 / L8: só TEXTO entra — array, objeto ou número em `email`/`password` = 400 (antes, o array virava SQL inválido e o objeto
+  // derrubava o hash: 500). O 400 não depende da conta (é a mesma recusa do campo ausente).
+  if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
     res.status(400).json({ error: 'Os campos "email" e "password" são obrigatórios' })
     return
   }
   try {
-    const result = await login(email, password)
+    const result = await login(email, password, { ip: req.ip })
     if (result.status === 'ok') {
       // context = estado de sessão derivado (decisão 17) — UX do app;
       // enforcement continua na API.
-      res.json({ ok: true, token: result.token, context: result.context })
+      res.json({ ok: true, token: result.token, context: result.context,
+        ...(result.pendingInvitesNeedOwnPassword ? { pendingInvitesNeedOwnPassword: true } : {}) })   // D-UC23
     } else {
       // N institutions: UI mostra "Escolha a empresa" e chama /auth/select-institution
-      res.json({ ok: true, select: true, selectionToken: result.token, institutions: result.institutions })
+      res.json({ ok: true, select: true, selectionToken: result.token, institutions: result.institutions,
+        ...(result.pendingInvitesNeedOwnPassword ? { pendingInvitesNeedOwnPassword: true } : {}) })   // D-UC23
     }
   } catch (err) {
     fail(res, err, 'login')
@@ -159,7 +213,11 @@ router.post('/select-institution', async (req: Request, res: Response) => {
  * /auth/recovery-password:
  *   post:
  *     summary: Inicia recuperação de senha (resposta genérica por segurança)
- *     description: Envia email com código de recuperação se o email existe
+ *     description: |
+ *       Emite um código de 6 dígitos (válido por 15 minutos; substitui o código anterior) e o envia ao e-mail de login
+ *       GRAVADO da conta — nunca ao texto da requisição. A resposta é SEMPRE a mesma 200 genérica: conta inexistente ou
+ *       inativa e conta no teto de emissões (3 por hora e 10 por 24 h por conta — Q-PV38) não recebem código e respondem
+ *       igual. O envio do e-mail não segura a resposta. Limite por e-mail (5 a cada 15 min) além do limite por IP — 429.
  *     tags: [Auth]
  *     security: []
  *     requestBody:
@@ -187,17 +245,19 @@ router.post('/select-institution', async (req: Request, res: Response) => {
  *                   type: string
  *       400:
  *         description: Email ausente
+ *       429:
+ *         description: Limite de pedidos por e-mail ou por IP excedido (a mesma resposta exista o e-mail ou não)
  *       500:
  *         description: Erro interno
  */
-router.post('/recovery-password', async (req: Request, res: Response) => {
-  const { email } = req.body ?? {}
+router.post('/recovery-password', recoveryPerEmail, async (req: Request, res: Response) => {
+  const email = bodyText((req.body ?? {}).email)
   if (!email) {
     res.status(400).json({ error: 'O campo "email" é obrigatório' })
     return
   }
   try {
-    await recoveryPassword(String(email))
+    await recoveryPassword(email)
     res.json({ ok: true, message: 'Se o email existir, um código de recuperação foi enviado' })
   } catch (err) {
     fail(res, err, 'recovery-password')
@@ -209,7 +269,12 @@ router.post('/recovery-password', async (req: Request, res: Response) => {
  * /auth/change-password:
  *   post:
  *     summary: Altera senha com código de recuperação
- *     description: Valida email + código + nova senha; altera a senha se código é válido
+ *     description: |
+ *       Valida email + código + nova senha; altera a senha se o código é válido. O código vale 15 minutos e aguenta 5
+ *       tentativas ERRADAS (Q-PV38): esgotado o orçamento, qualquer tentativa — mesmo com o código certo — recebe a mesma
+ *       401 até um código novo ser pedido. Toda recusa (código errado, esgotado, vencido, substituído, já usado, e-mail
+ *       inexistente, conta inativa) é a MESMA 401 — nunca diz se o e-mail existe. Trocar a senha ou o e-mail de login por
+ *       outro caminho invalida o código aberto. Limite por e-mail (10 a cada 15 min) além do limite por IP — 429.
  *     tags: [Auth]
  *     security: []
  *     requestBody:
@@ -227,6 +292,8 @@ router.post('/recovery-password', async (req: Request, res: Response) => {
  *               newPassword:
  *                 type: string
  *                 minLength: 8
+ *                 maxLength: 100
+ *                 description: Política de senha (D-EA5) — mínimo 8, não pode ser só espaços, estar na lista de senhas comuns nem conter o trecho antes do @ do e-mail (4+ letras)
  *     responses:
  *       200:
  *         description: Senha alterada com sucesso
@@ -239,20 +306,28 @@ router.post('/recovery-password', async (req: Request, res: Response) => {
  *                   type: boolean
  *                   example: true
  *       400:
- *         description: Campos obrigatórios ausentes ou senha muito curta
+ *         description: Campos obrigatórios ausentes ou a nova senha fora da política (D-EA5) — `fields[0].field = newPassword`; julgado antes do código, só pelo texto da requisição
+ *       422:
+ *         description: Código CERTO, mas a nova senha é igual à atual (`PASSWORD_SAME_AS_CURRENT`) — o código segue valendo
  *       401:
- *         description: Código inválido ou expirado
+ *         description: Código inválido ou expirado (a mesma resposta para toda recusa)
+ *       429:
+ *         description: Limite de tentativas por e-mail ou por IP excedido (a mesma resposta exista o e-mail ou não)
  *       500:
  *         description: Erro interno
  */
-router.post('/change-password', async (req: Request, res: Response) => {
-  const { email, code, newPassword } = req.body ?? {}
+router.post('/change-password', changePerEmail, async (req: Request, res: Response) => {
+  const body = req.body ?? {}
+  const email = bodyText(body.email), code = bodyText(body.code)
+  // A-EA8 (gate adversarial da Onda 3, ADV-O3-07): a senha nova só entra como TEXTO — `{}` virava a senha "[object Object]" e passava na
+  // política. O 400 não depende da conta (é a mesma recusa do campo ausente), como no login.
+  const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
   if (!email || !code || !newPassword) {
     res.status(400).json({ error: 'Os campos "email", "code" e "newPassword" são obrigatórios' })
     return
   }
   try {
-    await changePassword(String(email), String(code), String(newPassword))
+    await changePassword(email, code, newPassword)
     res.json({ ok: true })
   } catch (err) {
     fail(res, err, 'change-password')
@@ -311,6 +386,81 @@ router.post('/switch-institution', authMiddleware, async (req: Request, res: Res
     res.json({ ok: true, token: issued.token, context: issued.context })
   } catch (err) {
     fail(res, err, 'switch-institution')
+  }
+})
+
+/**
+ * @swagger
+ * /auth/my-password/code:
+ *   post:
+ *     summary: Minha senha — passo 1 — confere a senha atual e envia o código ao e-mail de login (D-UC7/D-UC8/D-UC18)
+ *     description: O titular vem do token. A senha atual errada conta como falha de login (10 em 15 min bloqueiam — D-EA2).
+ *     tags: [Auth]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               currentPassword: { type: string }
+ *     responses:
+ *       202: { description: Código enviado ao e-mail de login }
+ *       400: { description: currentPassword ausente }
+ *       422: { description: "MY_PASSWORD_REFUSED: senha atual incorreta ou conta temporariamente bloqueada" }
+ *       429: { description: "MY_PASSWORD_CODE_CAPPED: teto de códigos da conta (o mesmo da recuperação)" }
+ */
+router.post('/my-password/code', authMiddleware, async (req: Request, res: Response) => {
+  const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : ''
+  if (!currentPassword) {
+    res.status(400).json({ error: 'O campo "currentPassword" é obrigatório' })
+    return
+  }
+  try {
+    await requestMyPasswordCode(req.institution!.userId, currentPassword)
+    res.status(202).json({ ok: true })
+  } catch (err) {
+    fail(res, err, 'my-password/code')
+  }
+})
+
+/**
+ * @swagger
+ * /auth/my-password:
+ *   post:
+ *     summary: Minha senha — passo 2 — troca a senha pelo código (a mesma peça da recuperação); derruba as sessões abertas (D-EA7)
+ *     tags: [Auth]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               code: { type: string }
+ *               newPassword: { type: string }
+ *     responses:
+ *       200: { description: "Senha trocada; reauth = true: as sessões abertas, esta inclusive, caíram — entrar de novo" }
+ *       400: { description: Campos ausentes ou a nova senha fora da política (D-EA5) }
+ *       422: { description: "MY_PASSWORD_CODE_INVALID (código inválido, vencido ou esgotado) ou PASSWORD_SAME_AS_CURRENT" }
+ */
+router.post('/my-password', authMiddleware, async (req: Request, res: Response) => {
+  const body = req.body ?? {}
+  const code = bodyText(body.code)
+  const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
+  if (!code || !newPassword) {
+    res.status(400).json({ error: 'Os campos "code" e "newPassword" são obrigatórios' })
+    return
+  }
+  try {
+    await changeMyPassword(req.institution!.userId, code, newPassword)
+    res.json({ ok: true, reauth: true })
+  } catch (err) {
+    fail(res, err, 'my-password')
   }
 })
 

@@ -6,13 +6,14 @@ import { assertClientRequired } from '@shared/field-config'
 import { isSuper } from '@shared/auth/roles'
 import { UserScope } from './users.interface'
 import {
-  userCreateDto, userUpdateDto, userInstitutionsDto, userPrivilegesDto,
+  userCreateDto, userUpdateDto, userInstitutionsDto, userPrivilegesDto, userInviteWithdrawDto,
 } from './users.dto'
 import {
-  fetchUsers, fetchUser, createUser, editUser, removeUser,
+  fetchUsers, fetchUser, createUser, editUser,
   fetchInstitutionLinks, saveInstitutionLinks,
   fetchUserPrivileges, saveUserPrivileges,
   userSearchCriteriaFor, fetchUserSearchCriteria, fetchInstitutionLookup,
+  withdrawUserInvite,
 } from './users.service'
 
 /** Escopo derivado do JWT: super opera qualquer institution; admin, a sua. */
@@ -21,6 +22,7 @@ function scopeOf(req: Request): UserScope {
     isSuper:       isSuper(req.institution),
     institutionId: req.institution!.institutionId,
     schemaName:    req.institution!.schemaName,
+    userId:        req.institution!.userId,
   }
 }
 
@@ -64,7 +66,8 @@ export async function getById(req: Request, res: Response): Promise<void> {
   const id = parseId(req, res)
   if (id === null) return
   try {
-    res.json({ ok: true, data: await fetchUser(scopeOf(req), id) })
+    // D-PV19/D-UC2: `?institutionId=` = o vínculo em foco para o "ativo" (super); o admin tem o alvo forçado ao JWT
+    res.json({ ok: true, data: await fetchUser(scopeOf(req), id, focusOf(req)) })
   } catch (err) {
     handleError(res, err, 'users/:id GET')
   }
@@ -97,17 +100,6 @@ export async function update(req: Request, res: Response): Promise<void> {
   }
 }
 
-export async function remove(req: Request, res: Response): Promise<void> {
-  const id = parseId(req, res)
-  if (id === null) return
-  try {
-    await removeUser(scopeOf(req), id)
-    res.json({ ok: true })
-  } catch (err) {
-    handleError(res, err, 'users/:id DELETE')
-  }
-}
-
 export async function getPrivileges(req: Request, res: Response): Promise<void> {
   const id = parseId(req, res)
   if (id === null) return
@@ -136,8 +128,11 @@ export async function putPrivileges(req: Request, res: Response): Promise<void> 
   try {
     await saveUserPrivileges(
       scopeOf(req), id, interfaceId, body.privilegeIds, body.institutionId ?? null)
-    logger.info('Privilégios do usuário atualizados',
-      { userId: id, interfaceId, total: body.privilegeIds.length })
+    // trilha (gate socrático da D-PV11): quem concedeu o quê a quem — inclusive a liberação da tela delegável
+    logger.info('Privilégios do usuário atualizados', {
+      userId: id, interfaceId, privilegeIds: body.privilegeIds,
+      byInstitutionId: req.institution!.institutionId, byUserId: req.institution!.userId, byRole: req.institution!.role,
+    })
     res.json({ ok: true })
   } catch (err) {
     handleError(res, err, 'users/:id/privileges/:interfaceId PUT')
@@ -165,5 +160,19 @@ export async function putInstitutions(req: Request, res: Response): Promise<void
     res.json({ ok: true })
   } catch (err) {
     handleError(res, err, 'users/:id/institutions PUT')
+  }
+}
+
+/** POST /api/users/:id/invite/withdraw — D-UC15 (CONV.E2.P2.T4): retira o convite ainda não aceito. */
+export async function withdrawInvite(req: Request, res: Response): Promise<void> {
+  const id = parseId(req, res)
+  if (id === null) return
+  const body = parseBody(userInviteWithdrawDto, req, res)
+  if (body === null) return
+  try {
+    await withdrawUserInvite(scopeOf(req), id, body.institutionId ?? null)   // o service registra o alvo RESOLVIDO (gate P6)
+    res.json({ ok: true })
+  } catch (err) {
+    handleError(res, err, 'users/:id/invite/withdraw POST')
   }
 }

@@ -1,18 +1,152 @@
 import nodemailer from 'nodemailer'
+import { z } from 'zod'
 import logger from '@shared/logger/logger'
 
 // =====================================================================
-// Mailer SMTP (recuperação de senha do setes-app).
-// Configuração via .env: SMTP_HOST/PORT/SECURE/USER/PASSWORD/FROM.
-// Sem SMTP_HOST configurado → modo dev: o conteúdo sai no LOG.
+// Mailer SMTP — a única porta de e-mail do setes-api (recuperação de senha e aviso ao dono da conta — Q-PV38/D-RS4).
+// Configuração via .env: SMTP_HOST/PORT/USER/PASSWORD/FROM (SMTP_SECURE é DERIVADA da porta — ver transporter()).
+// Sem SMTP_HOST → modo DEV: o conteúdo sai no LOG. Em PRODUÇÃO (NODE_ENV=production) o SMTP é OBRIGATÓRIO
+// (D-RS5, Valdo 2026-10-20): o boot recusa subir sem ele (`assertMailerReady`) — o código de recuperação NUNCA vai ao
+// log de produção. Valores reais só no .env vivo, fornecidos pelo Valdo na publicação (nunca no repositório).
 // =====================================================================
 
+/** SMTP configurado = host não vazio (aparado — gate adversarial: `SMTP_HOST` só com espaços contava como configurado e o código ia a lugar nenhum). */
 export function isMailerConfigured(): boolean {
-  return Boolean(process.env.SMTP_HOST)
+  return Boolean((process.env.SMTP_HOST ?? '').trim())
+}
+
+const normalizedNodeEnv = () => (process.env.NODE_ENV ?? '').trim().toLowerCase()
+
+/**
+ * Produção = `NODE_ENV=production` — a casa não tem outro marcador de ambiente no setes-api. Normalizado (espaços e caixa — gate
+ * adversarial: `Production`/`production ` desligavam a exigência do SMTP em silêncio); `prod`/`produção` NÃO são produção, mas o boot
+ * avisa (`nodeEnvWarning`). `npm start` liga `production` por padrão (`scripts/start-production.js` — Q-RS11).
+ */
+export function isProduction(): boolean {
+  return normalizedNodeEnv() === 'production'
+}
+
+/** Aviso do boot/pré-voo quando `NODE_ENV` parece produção mas não é a grafia exata (fail-open silencioso é o que se quer evitar). */
+export function nodeEnvWarning(): string | undefined {
+  const raw = process.env.NODE_ENV
+  if (raw === undefined || raw === '') return undefined
+  const n = normalizedNodeEnv()
+  if (n === 'production') return raw === 'production' ? undefined : `NODE_ENV=${JSON.stringify(raw)} lido como production (normalizado — prefira a grafia exata)`
+  if (/^prod/.test(n)) return `NODE_ENV=${JSON.stringify(raw)} NÃO é reconhecido como produção — a exigência do SMTP (D-RS5) está DESLIGADA; use exatamente "production"`
+  return undefined
+}
+
+/** Porta SMTP configurada (587 por padrão — STARTTLS). NaN quando o valor não é um inteiro de porta. */
+function smtpPort(): number {
+  const raw = (process.env.SMTP_PORT ?? '').trim()
+  if (!raw) return 587
+  return /^\d{1,5}$/.test(raw) && Number(raw) >= 1 && Number(raw) <= 65535 ? Number(raw) : NaN
+}
+
+/**
+ * O que falta ou está errado na configuração SMTP (D-RS5) — lista vazia = completa. NUNCA devolve o valor de SMTP_PASSWORD.
+ * "Completa" = host, porta válida, remetente (SMTP_FROM ou SMTP_USER) e credencial inteira (usuário E senha, ou nenhum dos dois —
+ * relay sem autenticação é configuração legítima, meia credencial não é).
+ */
+export function mailerConfigProblems(): string[] {
+  const problems: string[] = []
+  const host = (process.env.SMTP_HOST ?? '').trim()
+  const user = (process.env.SMTP_USER ?? '').trim()
+  const pass = process.env.SMTP_PASSWORD ?? ''
+  const from = (process.env.SMTP_FROM ?? '').trim()
+  if (!host) problems.push('SMTP_HOST ausente')
+  if (Number.isNaN(smtpPort())) problems.push(`SMTP_PORT inválida (${JSON.stringify(process.env.SMTP_PORT)}) — use 465 (SSL) ou 587 (STARTTLS)`)
+  if (user && !pass) problems.push('SMTP_USER informado sem SMTP_PASSWORD')
+  if (!user && pass) problems.push('SMTP_PASSWORD informada sem SMTP_USER')
+  if (!from && !user) problems.push('remetente ausente (SMTP_FROM ou SMTP_USER)')
+  return problems
+}
+
+/** Resumo da configuração para o log do boot/pré-voo — host, porta, modo TLS, remetente e SE há usuário; nunca a senha. */
+export function describeMailerConfig(): string {
+  if (!isMailerConfigured()) return 'SMTP ausente'
+  const port = smtpPort()
+  const tls = port === 465 ? 'SSL' : port === 587 ? 'STARTTLS' : 'texto/STARTTLS oportunista'
+  const from = process.env.SMTP_FROM ?? process.env.SMTP_USER ?? '(sem remetente)'
+  return `smtp ${process.env.SMTP_HOST}:${Number.isNaN(port) ? '?' : port} (${tls}) de ${from}, ${process.env.SMTP_USER ? 'com' : 'sem'} autenticação`
+}
+
+/**
+ * Boot (D-RS5): em PRODUÇÃO o setes-api NÃO sobe sem SMTP completo — senão o código de recuperação de senha iria ao LOG (ou a lugar
+ * nenhum) e o aviso ao dono da conta (D-RS4) morreria em silêncio. Fora de produção devolve o resumo (ou avisa o modo dev).
+ */
+export function assertMailerReady(): string {
+  const problems = mailerConfigProblems()
+  if (isProduction()) {
+    if (problems.length) {
+      throw new Error(`SMTP obrigatório em produção (D-RS5) — ${problems.join('; ')}. Preencha SMTP_HOST/SMTP_PORT/SMTP_USER/`
+        + `SMTP_PASSWORD/SMTP_FROM no .env vivo (valores fornecidos pelo Valdo na publicação) ANTES de subir o setes-api.`)
+    }
+    return describeMailerConfig()
+  }
+  // fora de produção o resumo NOMEIA um NODE_ENV estranho ("prod", "produção"): o fail-open nunca é silencioso (gate adversarial)
+  const warning = nodeEnvWarning()
+  const prefix = warning ? `⚠️ ${warning} · ` : ''
+  if (!isMailerConfigured()) return `${prefix}SMTP ausente — modo DEV: o código de recuperação de senha vai ao LOG (em produção o boot recusaria — D-RS5)`
+  if (problems.length) return `${prefix}${describeMailerConfig()} ⚠️ incompleta: ${problems.join('; ')} (em produção o boot recusaria — D-RS5)`
+  return `${prefix}${describeMailerConfig()}`
+}
+
+// ---------------------------------------------------------------------
+// D-EA4 (Valdo 2026-10-31): o CANAL DA OPERAÇÃO — `OPS_ALERT_EMAIL`, o e-mail que recebe os ALARMES da Setes (hoje: o alarme do login,
+// Onda 2 do endurecer). É da OPERAÇÃO, não de um processo: qualquer processo o usa pela mesma peça de envio. OBRIGATÓRIO em PRODUÇÃO junto
+// do SMTP (o boot recusa subir sem ele — molde D-RS5); fora de produção vazio = o alarme fica só no log. A forma é a da D-EA26: UM endereço
+// válido (`singleMailAddress`) — uma lista ou um texto qualquer também recusa o boot em produção.
+// ---------------------------------------------------------------------
+
+/** O e-mail da operação, já como UM endereço válido (D-EA26), ou null quando ausente/inválido. */
+export function opsAlertEmail(): string | null {
+  return singleMailAddress(process.env.OPS_ALERT_EMAIL)
+}
+
+/** O que está errado em `OPS_ALERT_EMAIL` (D-EA4) — vazio = ok. Nunca devolve o valor cru (vai mascarado — D-EA21). */
+export function opsAlertEmailProblems(): string[] {
+  const raw = process.env.OPS_ALERT_EMAIL ?? ''
+  if (!raw.trim()) return ['OPS_ALERT_EMAIL ausente']
+  if (!opsAlertEmail()) return [`OPS_ALERT_EMAIL não é UM endereço de e-mail válido (${maskEmail(raw)})`]
+  return []
+}
+
+/**
+ * Boot (D-EA4): em PRODUÇÃO o setes-api NÃO sobe sem `OPS_ALERT_EMAIL` válido — o alarme do login (ataque espalhado por muitas contas)
+ * não pode morrer em silêncio. Fora de produção: vazio = só log; preenchido e inválido = aviso no resumo.
+ */
+export function assertOpsAlertReady(): string {
+  const problems = opsAlertEmailProblems()
+  if (isProduction()) {
+    if (problems.length) {
+      throw new Error(`E-mail da operação obrigatório em produção (D-EA4) — ${problems.join('; ')}. Preencha OPS_ALERT_EMAIL no .env vivo `
+        + `(valor fornecido pelo Valdo na publicação) ANTES de subir o setes-api.`)
+    }
+    return `alarmes para ${maskEmail(opsAlertEmail())}`
+  }
+  if (!(process.env.OPS_ALERT_EMAIL ?? '').trim()) return 'OPS_ALERT_EMAIL ausente — fora de produção os alarmes ficam só no LOG (em produção o boot recusaria — D-EA4)'
+  if (problems.length) return `⚠️ ${problems.join('; ')} — os alarmes ficam só no LOG (em produção o boot recusaria — D-EA4)`
+  return `alarmes para ${maskEmail(opsAlertEmail())}`
+}
+
+/**
+ * Pré-voo (D-EA4, `scripts/pre-deploy-tz-check.ts`): confere `OPS_ALERT_EMAIL` como o SMTP — em PRODUÇÃO ausente/inválido BLOQUEIA o
+ * deploy (o boot também recusaria subir); fora de produção é só aviso. As linhas nunca levam o valor cru (D-EA21).
+ */
+export function opsAlertPreflight(): { blocking: boolean; lines: string[] } {
+  const prod = isProduction()
+  const lines = [`— D-EA4: e-mail da operação — alarmes (${prod ? 'NODE_ENV=production — OBRIGATÓRIO' : 'fora de produção — aviso'})`]
+  const problems = opsAlertEmailProblems()
+  if (!problems.length) return { blocking: false, lines: [...lines, `  ✓ OPS_ALERT_EMAIL = ${maskEmail(opsAlertEmail())}`] }
+  lines.push(prod
+    ? `  ✗ ${problems.join('; ')}: o boot do setes-api RECUSARIA subir — preencha OPS_ALERT_EMAIL no .env vivo antes do deploy.`
+    : `  ⚠️ ${problems.join('; ')} — fora de produção o alarme do login fica só no LOG.`)
+  return { blocking: prod, lines }
 }
 
 function transporter() {
-  const port = Number(process.env.SMTP_PORT ?? 587)
+  const port = smtpPort()
 
   // Regra: 465 = SSL implícito (secure true); 587/25 = STARTTLS (secure false).
   // Se SMTP_SECURE contradisser a porta, a porta manda — evita o erro
@@ -20,14 +154,45 @@ function transporter() {
   const secure = port === 465
 
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
+    host: (process.env.SMTP_HOST ?? '').trim(),
     port,
     secure,
     requireTLS: !secure && port === 587, // 587: exige upgrade STARTTLS
     auth: process.env.SMTP_USER
       ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }
       : undefined,
+    // A-RS11 (gate socrático, LOW): um SMTP mudo não prende o trabalho em segundo plano por 10 min (padrão do nodemailer)
+    connectionTimeout: 15_000,
+    greetingTimeout:   15_000,
+    socketTimeout:     30_000,
+    // D-EA24 (Valdo 2026-11-01): o DNS também com teto explícito (o padrão do nodemailer é 30 s). Conhecimento negativo: estes tetos NÃO
+    // limitam a espera total — o `socketTimeout` conta só SILÊNCIO (servidor que responde aos poucos não estoura); quem precisa de teto
+    // total o põe por cima (o aviso ao Super: 60 s — `SUPER_NOTICE_CAP_MS`)
+    dnsTimeout:        15_000,
   })
+}
+
+/**
+ * Pré-voo (D-RS5, `scripts/pre-deploy-tz-check.ts`): abre a conexão SMTP e autentica (EHLO/STARTTLS/AUTH) SEM enviar nada.
+ * Nunca roda no boot (o SMTP fora do ar não pode derrubar a API — o e-mail já corre em segundo plano). Falha vira texto,
+ * sem a senha; estourou o tempo = falha.
+ */
+export async function verifyMailerConnection(timeoutMs = 15_000): Promise<{ ok: boolean; detail: string }> {
+  const problems = mailerConfigProblems()
+  if (problems.length) return { ok: false, detail: `configuração incompleta: ${problems.join('; ')}` }
+  let timer: NodeJS.Timeout | undefined
+  try {
+    await Promise.race([
+      transporter().verify(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`sem resposta do SMTP em ${timeoutMs} ms`)), timeoutMs) }),
+    ])
+    return { ok: true, detail: describeMailerConfig() }
+  } catch (err) {
+    const e = err as { code?: unknown; responseCode?: unknown; message?: unknown } | null
+    return { ok: false, detail: `${describeMailerConfig()} — ${e?.code ?? ''} ${e?.responseCode ?? ''} ${String(e?.message ?? err)}`.replace(/\s+/g, ' ').trim() }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 export interface MailMessage {
@@ -37,19 +202,94 @@ export interface MailMessage {
   text?:   string
 }
 
+/**
+ * D-EA21 (Valdo 2026-11-01, "(a) Mascarar em todos"): todo e-mail que vai ao LOG sai MASCARADO — `v***@setes.com.br` (1ª letra + domínio).
+ * O logger da casa é o console: o e-mail inteiro aparecia no terminal do operador e no log do servidor, para TODO e-mail que a casa envia
+ * (código de recuperação, aviso ao dono — D-RS4 —, aviso ao Super — D-RS13). Vale para quem loga destinatário, não só para esta peça.
+ */
+// gate adversarial do delta final (ADV-FG-03): a aspa simples é caractere VÁLIDO da parte local (o `z.email()` a aceita e o endereço vai ao
+// transporte) — tratada como separador, o log levava "joao.silva'x***@…" em vez de "j***@…". Endereço citado entre aspas simples num texto
+// ('a@x.com') sai com a aspa da frente no lugar da 1ª letra ("'***@x.com'") — nada da parte local vaza.
+const ADDRESS_CHARS = `[^\\s<>"(),;:[\\]]`
+const ADDRESS = `${ADDRESS_CHARS}+@${ADDRESS_CHARS}+`
+const maskOne = (addr: string): string => `${addr[0]}***${addr.slice(addr.indexOf('@'))}`
+
+export function maskEmail(email: string | null | undefined): string {
+  if (!email) return '(sem e-mail de login)'
+  // gate adversarial do delta (ADV-EA21-01): um valor gravado como LISTA ("a@x, b@y") mascara TODO endereço, não só o 1º
+  if (!new RegExp(ADDRESS).test(email)) return '***'
+  return email.replace(new RegExp(ADDRESS, 'g'), maskOne)
+}
+
+/** Qualquer endereço DENTRO de um texto (mensagem do SMTP, erro do banco, "Recipient address rejected: <x@y>") → mascarado. */
+export function maskEmailsInText(text: string): string {
+  return text.replace(new RegExp(ADDRESS, 'g'), maskOne)
+}
+
+/**
+ * O erro de um envio, pronto para o LOG (D-EA21): código, código de resposta do SMTP e mensagem com TODO endereço mascarado — o
+ * nodemailer põe o destinatário na mensagem e nos campos `response`/`rejected`, que por isso nunca vão ao log crus. NUNCA lança (gate
+ * adversarial do delta, ADV-EA19-01: uma rejeição que não vira texto derrubava o catch de quem loga).
+ */
+export function mailErrorForLog(err: unknown): { code?: unknown; responseCode?: unknown; message: string } {
+  try {
+    const e = err as { code?: unknown; responseCode?: unknown; message?: unknown } | null
+    return { code: e?.code, responseCode: e?.responseCode, message: maskEmailsInText(String(e?.message ?? err)) }
+  } catch {
+    return { message: '(erro sem texto legível)' }
+  }
+}
+
+/**
+ * D-EA26 (Valdo 2026-11-04, "(a) Recusar em todos"): a casa só manda e-mail para UM endereço válido — a regra é UMA e mora AQUI.
+ * Endereço único válido = o valor APARADO (só o espaço do fim — D-EA27) passa no MESMO validador do cadastro (`z.string().email()`); é o valor aparado que vai ao
+ * transporte (o que valida é o que envia). Motivo: o e-mail GRAVADO pode ter entrado fora da porta validada (SQL direto, carga do ERP
+ * Desktop); o nodemailer lê "a@x; b@y" / "a@x, b@y" / "Nome <a@x>, b@y" como LISTA e mandaria o código de recuperação — que troca a senha
+ * da conta — a todos (socrático do delta do item 0, Q-B). Vale para todo e-mail da casa: código de recuperação, aviso ao dono (D-RS4),
+ * aviso ao Super (D-RS13) e o que vier.
+ */
+const SINGLE_ADDRESS = z.string().email()
+
+/** O endereço único válido que [raw] representa (aparado), ou null — o predicado da D-EA26, para quem precisa decidir ANTES de enviar. */
+export function singleMailAddress(raw: string | null | undefined): string | null {
+  // a porta é tipada como texto, o DADO pode não ser (arranjo vindo de JSON/SQL): não-texto é recusa, nunca TypeError (teste da D-EA26)
+  if (typeof raw !== 'string') return null
+  // D-EA27 (Valdo 2026-11-04, "(a) Só o do fim"): "aparado" = SÓ o espaço (U+0020) do FIM — a MESMA igualdade com que o login acha a conta
+  // (PAD SPACE da colação). Espaço no início, tab, quebra, NBSP, BOM etc. nas pontas = RECUSA (o `z.email()` não os aceita): com o `trim()`
+  // do JS o script do Super trocava a senha e avisava "a@x.com" numa conta gravada " a@x.com", com que ninguém entra (gate socrático).
+  const v = raw.replace(/ +$/, '')
+  return v && SINGLE_ADDRESS.safeParse(v).success ? v : null
+}
+
+/** Recusa da D-EA26: o destinatário não é UM endereço válido. A mensagem nunca leva o endereço cru (D-EA21 — vai mascarado). */
+export class MailRecipientRejectedError extends Error {
+  readonly code = 'MAIL_RECIPIENT_INVALID'
+  constructor(raw: string | null | undefined) {
+    super(`destinatário recusado (D-EA26): não é um endereço único válido — ${typeof raw === 'string' ? maskEmail(raw) : `(${typeof raw})`}`)
+    this.name = 'MailRecipientRejectedError'
+  }
+}
+
+/**
+ * A ÚNICA porta de envio. LANÇA `MailRecipientRejectedError` (D-EA26) quando o destinatário não é um endereço único válido — ANTES do
+ * transporte e ANTES do modo dev (a recusa é a mesma com e sem SMTP; o conteúdo da mensagem recusada não vai ao log). Quem chama trata
+ * a recusa como falha de envio (todos já tratam: log mascarado + segue).
+ */
 export async function sendMail(message: MailMessage): Promise<void> {
+  const to = singleMailAddress(message.to)
+  if (!to) throw new MailRecipientRejectedError(message.to)
   if (!isMailerConfigured()) {
     logger.warn('SMTP não configurado — email NÃO enviado (modo dev, conteúdo no log)', {
-      to: message.to, subject: message.subject,
+      to: maskEmail(to), subject: message.subject,          // D-EA21
     })
     return
   }
   await transporter().sendMail({
     from: process.env.SMTP_FROM ?? process.env.SMTP_USER,
-    to:      message.to,
+    to,
     subject: message.subject,
     html:    message.html,
     text:    message.text,
   })
-  logger.info('Email enviado', { to: message.to, subject: message.subject })
+  logger.info('Email enviado', { to: maskEmail(to), subject: message.subject })   // D-EA21
 }

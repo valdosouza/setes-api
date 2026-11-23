@@ -8,6 +8,10 @@ import {
 } from '../shared/catalog-owner'
 import { allocateProductId } from '../shared/product-id'
 import * as catalogOwner from '../shared/catalog-owner'
+import { listGatedRoutes, listGatedModules } from '../shared/auth/module-privilege-gate'
+import { PRIVILEGE_INSERIR, PRIVILEGE_ALTERAR, PRIVILEGE_VISUALIZAR, PRIVILEGE_CATALOGAR } from '../shared/auth/privileges'
+import { adminGuard } from '../gateway/admin.guard'
+import { accessAnswer } from '../test-setup/access-model'
 
 jest.mock('../shared/db/connection', () => ({ __esModule: true, default: { query: jest.fn(), getConnection: jest.fn() } }))
 const mockQuery = (pool as any).query as jest.Mock
@@ -70,41 +74,53 @@ describe('as listas da peça (D-PR52 catálogo de base · D-PR51 o que o ERP Des
   })
 })
 
-describe('montagem no gateway (cerca, D-PR77): NENHUM cadastro monta guarda do dono do catálogo', () => {
+describe('montagem no gateway (cerca, D-PR77 + D-PV2): NENHUM cadastro monta guarda do dono do catálogo — só a guarda por roteador', () => {
   const MODULES = ['merchandise', 'services', 'price-lists', 'categories', 'financial-plans', 'bank-accounts']
   const isGuardLayer = (l: any) => !l.handle?.stack && /catalogOwner|catalog_owner/i.test(String(l.handle?.name ?? ''))
+  const layersOf = (router: any, m: string) =>
+    router.stack.filter((l: any) => l.regexp.test(`/${m}`) && !l.regexp.test('/service-tax-rules') && !l.regexp.test('/bank-charge-agreements'))
+  const gated = (m: string) => listGatedRoutes().filter(r => r.moduleKey === m)
 
-  it('nenhuma camada do roteador é a guarda; cada um dos 6 cadastros chega direto ao roteador do módulo', async () => {
+  it('nenhuma camada do roteador é a guarda do dono; cada um dos 6 cadastros é UM roteador sob `gatedModule` (a guarda por roteador + o roteador do módulo)', async () => {
     const router = (await import('../gateway/router')).default as any
     expect(router.stack.filter(isGuardLayer)).toEqual([])
     for (const m of MODULES) {
-      const layers = router.stack.filter((l: any) => l.regexp.test(`/${m}`) && !l.regexp.test('/service-tax-rules') && !l.regexp.test('/bank-charge-agreements'))
-      expect([m, layers.every((l: any) => !!l.handle.stack)]).toEqual([m, true])
+      // o módulo tem UM roteador só (nenhum roteador irmão montado antes) e está no registro da guarda por roteador
+      expect([m, layersOf(router, m).filter((l: any) => !!l.handle.stack).length]).toEqual([m, 1])
+      expect([m, listGatedModules().includes(m)]).toEqual([m, true])
     }
   })
 
-  it('D-PR45: /services segue com o roteador FISCAL (só PUT /:id/tax-rule e /:id/ibscbs) antes do roteador do cadastro', async () => {
+  it('D-PR45: o enquadramento fiscal do serviço vive no roteador do módulo (só PUT /:id/tax-rule e /:id/ibscbs) — ALTERAR em services pelo verbo, conferido pela guarda do roteador', async () => {
     const router = (await import('../gateway/router')).default as any
-    const layers = router.stack.filter((l: any) => l.regexp.test('/services') && !l.regexp.test('/service-tax-rules'))
-    expect(layers.map((l: any) => (l.handle.stack ? 'router' : 'other'))).toEqual(['router', 'router'])
-    const fiscal = layers[0].handle.stack.filter((l: any) => l.route).map((l: any) => [l.route.path, Object.keys(l.route.methods).join(',')])
+    const cadastro = layersOf(router, 'services').find((l: any) => !!l.handle.stack)
+    const fiscal = cadastro.handle.stack.filter((l: any) => l.route && ['/:id/tax-rule', '/:id/ibscbs'].includes(l.route.path))
+      .map((l: any) => [l.route.path, Object.keys(l.route.methods).join(',')])
     expect(fiscal).toEqual([['/:id/tax-rule', 'put'], ['/:id/ibscbs', 'put']])
-    for (const l of layers[0].handle.stack.filter((x: any) => x.route)) expect(l.route.stack).toHaveLength(2)
-    const cadastro = layers[1].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
-    expect(cadastro).toEqual(expect.arrayContaining(['/', '/:id']))
-    expect(cadastro).not.toContain('/:id/tax-rule')
+    expect(gated('services').filter(r => ['/:id/tax-rule', '/:id/ibscbs'].includes(r.path)).map(r => [r.method, r.path, r.privilegeId, r.interfaces.join('|')]))
+      .toEqual([['PUT', '/:id/tax-rule', PRIVILEGE_ALTERAR, 'services'], ['PUT', '/:id/ibscbs', PRIVILEGE_ALTERAR, 'services']])
+    expect(cadastro.handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)).toEqual(expect.arrayContaining(['/', '/:id']))
   })
 
-  it('/bank-accounts segue com o roteador do CANAL API (só /:id/channel…) antes do cadastro da conta', async () => {
+  it('/bank-accounts: o CANAL API (só /:id/channel…) vive no roteador da conta — toda escrita dele = ALTERAR + adminGuard; a leitura = VISUALIZAR', async () => {
     const router = (await import('../gateway/router')).default as any
-    const layers = router.stack.filter((l: any) => l.regexp.test('/bank-accounts') && !l.regexp.test('/bank-charge-agreements'))
-    expect(layers.map((l: any) => (l.handle.stack ? 'router' : 'other'))).toEqual(['router', 'router'])
-    const channel = layers[0].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
+    const cadastro = layersOf(router, 'bank-accounts').find((l: any) => !!l.handle.stack)
+    const routes = cadastro.handle.stack.filter((l: any) => l.route)
+    expect(routes.map((l: any) => l.route.path)).toEqual(expect.arrayContaining(['/', '/:id', '/banks']))
+    const channel = gated('bank-accounts').filter(r => r.path.includes('channel'))
     expect(channel.length).toBeGreaterThan(0)
-    expect(channel.every((p: string) => p.startsWith('/:id/channel'))).toBe(true)
-    const cadastro = layers[1].handle.stack.filter((l: any) => l.route).map((l: any) => l.route.path)
-    expect(cadastro).toEqual(expect.arrayContaining(['/', '/:id', '/banks']))
-    expect(cadastro.some((p: string) => p.includes('channel'))).toBe(false)
+    expect(channel.every(r => r.path.startsWith('/:id/channel'))).toBe(true)
+    for (const r of channel) {
+      expect([r.method, r.path, r.privilegeId, r.interfaces.join('|')])
+        .toEqual([r.method, r.path, r.method === 'GET' ? PRIVILEGE_VISUALIZAR : PRIVILEGE_ALTERAR, 'bank-accounts'])
+    }
+    // escrita do canal: adminGuard → marcador do ato → controller (3 camadas, o adminGuard na frente); leitura: só o controller
+    for (const l of routes.filter((x: any) => String(x.route.path).includes('channel'))) {
+      const methods = Object.keys(l.route.methods).join(',')
+      const write = !l.route.methods.get
+      expect([l.route.path, methods, l.route.stack.length]).toEqual([l.route.path, methods, write ? 3 : 1])
+      if (write) expect([l.route.path, methods, l.route.stack[0].handle === adminGuard]).toEqual([l.route.path, methods, true])
+    }
   })
 })
 
@@ -153,23 +169,41 @@ describe('quem cunha id no espaço do ERP Desktop NÃO reconfere nada na transa�
 })
 
 describe('rotas de criação na central exigem CATALOGAR (D-PR33)', () => {
-  it('POST /brands, /measures e /packages: a 1ª camada confere o privilégio 10 (CATALOGAR) na interface merchandise', async () => {
+  it('POST /brands, /measures e /packages: o marcador do ato declara o privilégio 10 (CATALOGAR) na interface merchandise — a guarda do roteador o confere (D-PV2/D-PV7)', async () => {
     const routes = (await import('../modules/merchandise/merchandise.routes')).default as any
+    await import('../gateway/router')                                // montar o gateway registra a guarda do módulo
+    const table = listGatedRoutes().filter(r => r.moduleKey === 'merchandise')
     for (const path of ['/brands', '/measures', '/packages']) {
       const layer = routes.stack.find((l: any) => l.route?.path === path && l.route.methods.post)
-      expect([path, layer.route.stack.length]).toEqual([path, 2])
+      expect([path, layer.route.stack.length]).toEqual([path, 2])    // marcador do ato + controller
+      const row = table.find(r => r.method === 'POST' && r.path === path)!
+      expect([path, row.privilegeId, row.interfaces.join('|'), row.dynamic]).toEqual([path, PRIVILEGE_CATALOGAR, 'merchandise', false])
+    }
+    // nenhuma OUTRA rota do módulo pede CATALOGAR; o POST da ficha é INSERIR pelo verbo
+    expect(table.filter(r => r.privilegeId === PRIVILEGE_CATALOGAR).map(r => r.path)).toEqual(['/brands', '/measures', '/packages'])
+    expect(table.find(r => r.method === 'POST' && r.path === '/')!.privilegeId).toBe(PRIVILEGE_INSERIR)
+  })
+
+  it('a guarda do roteador nega as três ao usuário regular sem a concessão (403 PRIVILEGE_REQUIRED) e pergunta à view por CATALOGAR em merchandise', async () => {
+    const { modulePrivilegeGate } = await import('../shared/auth/module-privilege-gate')
+    const routes = (await import('../modules/merchandise/merchandise.routes')).default
+    const gate = modulePrivilegeGate('merchandise', routes)
+    for (const path of ['/brands', '/measures', '/packages']) {
       mockQuery.mockReset()
-      mockQuery.mockImplementation(async (sql: string) => {
-        if (/FROM setes_central\.tb_interface WHERE i18n_key = \?/.test(sql)) return [[{ id: 77 }]]
-        if (/tb_institution_has_interface/.test(sql)) return [[{ 1: 1 }]]
-        if (/tb_user_has_privilege/.test(sql)) return [[]]
-        return [[]]
-      })
+      // outro privilégio da tela (INSERIR) não substitui CATALOGAR
+      mockQuery.mockImplementation(async (sql: string, params: any[] = []) =>
+        [accessAnswer(sql, params, { profile: 'user', contracted: ['merchandise'], granted: { merchandise: ['INSERIR'] } }) ?? [], []])
       const r = res(); const next = jest.fn()
-      await layer.route.stack[0].handle(req('POST', 'user'), r, next)
-      expect([path, r.statusCode, r.body?.code]).toEqual([path, 403, 'PRIVILEGE_REQUIRED'])
-      const priv = mockQuery.mock.calls.find((c: any[]) => /tb_user_has_privilege/.test(c[0]))!
-      expect(priv[1]).toEqual([9, 77, 10])
+      await gate({ ...req('POST', 'user'), path } as any, r, next)
+      expect([path, r.statusCode, r.body?.code, next.mock.calls.length]).toEqual([path, 403, 'PRIVILEGE_REQUIRED', 0])
+      const verdict = mockQuery.mock.calls.find((c: any[]) => /vw_user_access/.test(c[0]))!
+      expect(verdict[1]).toEqual([9, 1, ['merchandise'], 'CATALOGAR'])
+      // com a concessão, a mesma guarda deixa passar
+      mockQuery.mockImplementation(async (sql: string, params: any[] = []) =>
+        [accessAnswer(sql, params, { profile: 'user', contracted: ['merchandise'], granted: { merchandise: ['CATALOGAR'] } }) ?? [], []])
+      const ok = res(); const pass = jest.fn()
+      await gate({ ...req('POST', 'user'), path } as any, ok, pass)
+      expect([path, pass.mock.calls.length]).toEqual([path, 1])
     }
   })
 })

@@ -95,17 +95,13 @@ export async function buildPayer(schemaName: string, institutionId: number, slip
   const missing: FieldError[] = []
   // D-CJ10 (frente do CNPJ alfanumérico): o pagador sai na forma CANÔNICA, NUNCA mutilado — antes `replace(/\D/g,'')` tirava as letras e um
   // CNPJ com 3 letras virava 11 dígitos enviados como JURÍDICA (boleto no documento de OUTRA pessoa — S3 do inventário). PF × PJ pela
-  // presença da especialização (já era certo); o fato em três estados diz se falta ou está errado.
-  const personType: 'F' | 'J' | null = full.person ? 'F' : full.company ? 'J' : null
-  const fact = personType === 'F' ? readFederalIdFact('cpf', full.person?.cpf)
-    : personType === 'J' ? readFederalIdFact('cnpj', full.company?.cnpj) : null
-  const document = fact?.state === 'valid' ? fact.id.value : ''
+  // presença da especialização (já era certo); o fato em três estados diz se falta ou está errado. O CNPJ com letra VAI ao banco na forma
+  // canônica: a sonda D-CJ10 no sandbox do Inter (2026-11-19) aceitou — a recusa provisória da D-CJ20 saiu (passo CNPJ.E5.P1).
+  const fact = full.person ? readFederalIdFact('cpf', full.person.cpf)
+    : full.company ? readFederalIdFact('cnpj', full.company.cnpj) : null
+  const federalId = fact?.state === 'valid' ? fact.id : null
   if (!fact || fact.state === 'absent') missing.push({ field: 'payer.document', message: 'Cliente sem CPF/CNPJ' })
   else if (fact.state === 'invalid') missing.push({ field: 'payer.document', message: 'CPF/CNPJ do cliente inválido no cadastro (forma ou dígito verificador)' })
-  // até a sonda no sandbox do banco confirmar que aceita letra (D-CJ10): recusa LEGÍVEL antes de apresentar ao banco
-  else if (personType === 'J' && !/^[0-9]{14}$/.test(document)) {
-    missing.push({ field: 'payer.document', message: 'CNPJ alfanumérico: o registro do boleto no banco ainda não aceita CNPJ com letras' })
-  }
   const name = (full.entity.nameCompany ?? full.entity.nickTrade ?? '').trim()
   if (!name) missing.push({ field: 'payer.name', message: 'Cliente sem nome' })
   const addr = full.addresses.find(a => a.main === 'S') ?? full.addresses[0]
@@ -126,7 +122,7 @@ export async function buildPayer(schemaName: string, institutionId: number, slip
       missing, 'BANK_PAYER_INCOMPLETE')
   }
   return {
-    document, personType: personType!, name, street,
+    federalId: federalId!, name, street,
     neighborhood: addr!.neighborhood ?? null, city: addr!.cityName!, state: uf, zipCode: zip,
   }
 }

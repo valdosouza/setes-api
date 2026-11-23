@@ -10,6 +10,11 @@ import { invoiceBodyDto } from '../modules/billing/billing.dto'
 import * as taxRule from '../shared/tax-rule'
 
 // IB-2 (D-IB71): a declaração IBS/CBS tem teste próprio (ibscbs-declaration.test.ts) — aqui a fronteira é mockada
+// D-IB99/D-IB100: a opção de apuração do IBS/CBS tem teste próprio (ibscbs-assessment.test.ts) — aqui a fronteira é mockada
+jest.mock('../shared/ibscbs-assessment', () => ({
+  __esModule: true,
+  previewIbscbsAssessmentRefusal: jest.fn().mockResolvedValue(null),
+}))
 jest.mock('../shared/service-ibscbs-declaration', () => ({
   __esModule: true,
   declareServiceIbscbs: jest.fn().mockResolvedValue({ group: null, nbs: null, omitted: ['not-classified'] }),
@@ -283,6 +288,44 @@ describe('validateOrder', () => {
     const last = mockQuery.mock.calls[mockQuery.mock.calls.length - 1]
     expect(String(last[0])).toMatch(/tb_order_billing[\s\S]*deleted = 'N' LIMIT 1/)
     expect(last[1]).toEqual([10, 1])
+  })
+
+  it('D-IB99: opção de apuração sem suporte vira issue BLOQUEANTE também na venda SÓ de mercadoria (a mesma regra do issueInvoice)', async () => {
+    const assessment = jest.requireMock('../shared/ibscbs-assessment') as { previewIbscbsAssessmentRefusal: jest.Mock }
+    const refusal = { code: 'IBSCBS_REGULAR_REGIME_UNSUPPORTED', message: 'Regime regular de IBS/CBS ainda não suportado: …' }
+    assessment.previewIbscbsAssessmentRefusal.mockResolvedValueOnce(refusal)
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{
+      orderItemId: 1, kind: 'Sale', taxRuleId: 99, cfopId: '5405',
+      setFinancial: 'S', origin: 'M',
+    }]])
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues).toEqual([{ scope: 'order', field: 'ibscbsAssessment', message: refusal.message }])
+    // pergunta na data que o faturamento usaria (sem serviço: o dono único da data de emissão), sem trava
+    expect(assessment.previewIbscbsAssessmentRefusal).toHaveBeenCalledWith(expect.anything(), 'setes_setes', 1, expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/))
+  })
+
+  it('D-IB99: a prévia do serviço já trouxe a MESMA recusa → uma issue só (scope ibscbs), sem repetir', async () => {
+    const assessment = jest.requireMock('../shared/ibscbs-assessment') as { previewIbscbsAssessmentRefusal: jest.Mock }
+    const declaration = jest.requireMock('../shared/service-ibscbs-declaration') as { previewServiceIbscbs: jest.Mock }
+    const refusal = { code: 'IBSCBS_REGULAR_REGIME_UNSUPPORTED', message: 'Regime regular de IBS/CBS ainda não suportado: …' }
+    assessment.previewIbscbsAssessmentRefusal.mockResolvedValueOnce(refusal)
+    declaration.previewServiceIbscbs.mockResolvedValueOnce({ competenceDate: '2027-01-05', obligationStart: '2027-01-01', obligatory: true,
+      declared: true, omitted: [], refusal, atObligation: null })
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{
+      orderItemId: 1, kind: 'Sale', taxRuleId: 99, cfopId: '5405',
+      setFinancial: 'S', origin: 'M',
+    }]])
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues).toEqual([{ scope: 'ibscbs', field: 'ibscbs', message: refusal.message }])
+    expect(assessment.previewIbscbsAssessmentRefusal.mock.calls[0][3]).toBe('2027-01-05')   // a MESMA competência da prévia
   })
 
   it('linha manual (M) é respeitada — motor não roda para o item', async () => {

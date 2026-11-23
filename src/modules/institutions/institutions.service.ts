@@ -10,14 +10,16 @@ import { runMigrationsForSchema } from '../../migrations/runner'
 import {
   InstitutionInput, InstitutionListRow, InstitutionFull, SyncApiKeyRow,
 } from './institutions.interface'
-import { md5Password } from '@shared/auth/password'
+import { hashPassword } from '@shared/auth/password'
 import { findLoginEmailOwner, insertUserCascade } from '@shared/user'
+import { inviteToInstitution, hasSuperLink } from '@shared/user/invite'
+import { notifyInvite } from '@shared/user/invite-notice'
 import {
   InstitutionAdminInput,
 } from './institutions.interface'
 import {
   listInstitutions, getInstitution, schemaNameExists, institutionExists,
-  insertInstitutionCascade, updateInstitutionCascade,
+  insertInstitutionCascade, updateInstitutionCascade, getInstitutionActivation,
   setInstitutionActive, deleteInstitution, insertDefaultFlags,
   grantStructuralInterfaces,
   getSyncApiKey, insertSyncApiKey, switchSyncApiKeyTx, getInstitutionFact,
@@ -66,17 +68,31 @@ function dupEntryTo409(err: any): never {
  * O admin é OBRIGATÓRIO (decisão do Valdo, 2026-08-15 — A2): cliente nunca
  * existe sem dono. Antes disso o Super tinha de lembrar de criá-lo na aba
  * Usuários, e um cliente ativo sem nenhum usuário era estado alcançável.
+ *
+ * A-UC6 (CONV.E2.P4 — D-UC4/D-UC12/D-UC16): o e-mail do 1º admin que JÁ é
+ * login não recebe mais 409 — nenhuma credencial nova, nada da credencial
+ * muda (nome e senha do corpo são descartados), e o vínculo `admin` nasce
+ * CONVITE pendente (inativo, o Super como convidante); o login do titular é
+ * o aceite. A decisão 23 segue: o cliente nasce com o seu admin, aguardando
+ * o aceite. O aviso por e-mail sai depois da ativação.
  */
 export async function createInstitution(
   input: InstitutionInput, schemaName: string, admin: InstitutionAdminInput,
   updatedBy: number | null = null
-): Promise<{ id: number; schemaName: string; active: 'S' | 'N'; adminUserId: number }> {
+): Promise<{ id: number; schemaName: string; active: 'S' | 'N'; adminUserId: number; adminInvite?: 'pending' }> {
   if (await schemaNameExists(schemaName)) {
     throw new HttpError(409, `Schema "${schemaName}" já está em uso`)
   }
-  if (await findLoginEmailOwner(admin.email) !== null) {
+  // lido ANTES de qualquer escrita (falhar cedo): sem login, a senha inicial é obrigatória; com login, vira convite (A-UC6)
+  const owner = await findLoginEmailOwner(admin.email)
+  // D-UC22 (Valdo, 2026-11-14): conta de SUPER não vira 1º admin de cliente pelo onboarding — o mesmo 409 genérico da D-UC17
+  if (owner !== null && await hasSuperLink(owner)) {
     throw new HttpError(409, 'E-mail já usado como login de outro usuário',
       [{ field: 'admin.email', message: 'E-mail já usado como login de outro usuário' }])
+  }
+  if (owner === null && !admin.password) {
+    throw new HttpError(400, 'Informe a senha inicial do administrador — o e-mail ainda não é login',
+      [{ field: 'admin.password', message: 'Obrigatória para criar a credencial' }], ErrorCodes.VALIDATION_FAILED)
   }
 
   let id: number
@@ -99,15 +115,22 @@ export async function createInstitution(
       `falhou — ele permanece INATIVO (active='N'). Corrija a causa e reative pela edição.`)
   }
 
+  // D-EA9: o hash (scrypt, assíncrono) do admin inicial calculado ANTES da cascata — nunca com conexão do pool presa
+  const adminHash = owner === null ? await hashPassword(admin.password!) : null
   let adminUserId: number
   try {
     await grantStructuralInterfaces(schemaName, id)
-    adminUserId = await insertUserCascade(
-      { nameCompany: admin.nameCompany, nickTrade: admin.nickTrade,
-        email: admin.email, active: 'S' },
-      md5Password(admin.password),
-      { institutionId: id, kind: 'admin' }
-    )
+    if (owner === null) {
+      adminUserId = await insertUserCascade(
+        { nameCompany: admin.nameCompany, nickTrade: admin.nickTrade,
+          email: admin.email, active: 'S' },
+        adminHash!,
+        { institutionId: id, kind: 'admin', inviterId: updatedBy }
+      )
+    } else {
+      await inviteToInstitution(owner, id, 'admin', updatedBy)
+      adminUserId = owner
+    }
   } catch (err) {
     logger.error('Onboarding do admin falhou — institution permanece inativa', {
       id, schemaName, err,
@@ -118,6 +141,10 @@ export async function createInstitution(
   }
 
   await setInstitutionActive(id, 'S')
+  if (owner !== null) {
+    notifyInvite(owner, id)
+    return { id, schemaName, active: 'S', adminUserId, adminInvite: 'pending' }
+  }
   return { id, schemaName, active: 'S', adminUserId }
 }
 
@@ -126,6 +153,22 @@ export async function editInstitution(
 ): Promise<void> {
   if (!(await institutionExists(id))) {
     throw new HttpError(404, `Estabelecimento ${id} não encontrado`)
+  }
+  // Re-gate socrático da costura A1 (M1): voltar a ATIVO passa pelo MESMO provisionamento do onboarding — as migrations que chegaram
+  // com o estabelecimento inativo (a 075, views do veredito: sem ela toda guarda e o menu daquele cliente dariam 500 até o restart).
+  // DDL fora da transação e ANTES de gravar: se falhar, nada é gravado e a institution segue 'N'.
+  if (input.active === 'S') {
+    const state = await getInstitutionActivation(id)
+    if (state && state.active !== 'S') {
+      try {
+        await runMigrationsForSchema(state.schemaName)
+      } catch (err) {
+        logger.error('Provisionamento na reativação falhou — institution permanece inativa', { id, schemaName: state.schemaName, err })
+        throw new HttpError(500,
+          `O provisionamento do schema "${state.schemaName}" falhou — o estabelecimento ${id} permanece INATIVO (active='N') e nada ` +
+          'foi gravado. Corrija a causa e salve de novo.')
+      }
+    }
   }
   try {
     // a troca D → W cunha id de categoria padrão: reexecuta a transação INTEIRA em deadlock (o resto da cascade é idempotente)

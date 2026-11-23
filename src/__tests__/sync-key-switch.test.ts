@@ -253,7 +253,7 @@ describe('D-PR47 — a origem dos cadastros é DECLARADA no cadastro (W ou D)', 
     const base = {
       entity: { nameCompany: 'X LTDA', nickTrade: 'X' }, personType: 'J', company: { cnpj: '11222333000181' },
       addresses: [], phones: [], socialMedia: [], schemaName: 'setes_x',
-      admin: { nameCompany: 'A', nickTrade: 'A', email: 'a@x.com', password: 'segredo' },
+      admin: { nameCompany: 'A', nickTrade: 'A', email: 'a@x.com', password: 'Vx9-sync-Rq4t' },   // senha pela política vigente do main (D-EA5)
     }
     expect(institutionCreateDto.safeParse(base).success).toBe(false)
     expect(institutionCreateDto.safeParse({ ...base, sourceKind: 'D' }).success).toBe(true)

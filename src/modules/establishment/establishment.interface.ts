@@ -36,6 +36,14 @@ export interface EstablishmentDto {
 }
 
 /**
+ * Resposta do PUT /api/establishment: o DTO + o aviso da D-IB105 (aditivo — o GET não o leva). `validFrom` = início da 1ª opção
+ * FUTURA 2/3 de apuração do IBS/CBS quando ESTE salvamento tirou o estabelecimento do Simples; null = sem aviso. Nunca recusa.
+ */
+export interface EstablishmentUpdateResult extends EstablishmentDto {
+  ibscbsAssessmentNotice: { validFrom: string } | null
+}
+
+/**
  * PUT /api/establishment — subconjunto EDITÁVEL. document/personType
  * NUNCA aparecem aqui (o DTO Zod nem os aceita — mais estreito, não erro).
  */

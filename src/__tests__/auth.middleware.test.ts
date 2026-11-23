@@ -32,6 +32,13 @@ describe('auth.middleware', () => {
     expect((await call(testToken(FINAL))).status).not.toBe(401)
   })
 
+  it('D-AU19 (setes-api:AUTH.E6.P1): token SEM role (o da auth-api — D-AU3) passa no middleware; o perfil vem da sessão viva', async () => {
+    const { role, ...semRole } = FINAL
+    expect(role).toBe('user')
+    expect((await call(testToken(semRole))).status).not.toBe(401)
+    expect((await call(testToken({ ...FINAL, role: '' }))).status).not.toBe(401)
+  })
+
   describe('D-F13 — recusas', () => {
     it('HS256 (o modelo aposentado) → 401, com qualquer segredo — inclusive o do ambiente', async () => {
       process.env.JWT_SECRET = 'segredo-hs256-aposentado'
@@ -62,7 +69,7 @@ describe('auth.middleware', () => {
     })
     it('forma incompleta ou schema fora do padrão → 401', async () => {
       for (const p of [
-        { ...FINAL, institutionId: 0 }, { ...FINAL, institutionId: '2' }, { ...FINAL, role: '' },
+        { ...FINAL, institutionId: 0 }, { ...FINAL, institutionId: '2' },
         { ...FINAL, schemaName: 'outro_schema' }, { ...FINAL, schemaName: 'setes_x`; DROP' }, { userId: 2, role: 'user' },
       ]) {
         expect((await call(testToken(p))).status).toBe(401)

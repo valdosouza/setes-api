@@ -17,7 +17,7 @@ const appPayload = {
   company: { cnpj: '11222333000181' },
   addresses: [], phones: [], socialMedia: [],
   schemaName: 'setes_cliente_novo',
-  admin: { nameCompany: 'Dono', nickTrade: 'Dono', email: 'dono@cliente.com.br', password: 'segredo' },
+  admin: { nameCompany: 'Dono', nickTrade: 'Dono', email: 'dono@cliente.com.br', password: 'Vx9-fence-Rq4t' },   // senha pela política vigente do main (D-EA5)
 }
 
 describe('D-PR47 — contrato do POST /api/institutions com o app', () => {
@@ -40,7 +40,7 @@ describe('D-PR47 — contrato do POST /api/institutions com o app', () => {
   })
 })
 
-const SQL_DIR = path.join(__dirname, '..', '..', '..', 'sql')
+const SQL_DIR = process.env.SQL_DIR ?? path.join(__dirname, '..', '..', '..', 'sql')
 const hasSqlRepo = fs.existsSync(path.join(SQL_DIR, '01_setes_central_ddl.sql')) && fs.existsSync(path.join(SQL_DIR, '02_setes_central_seed.sql'))
 
 ;(hasSqlRepo ? describe : describe.skip)('sql/01 × sql/02 — o seed da Setes carrega toda coluna NOT NULL sem DEFAULT de tb_institution', () => {

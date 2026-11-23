@@ -4,8 +4,11 @@ export interface FieldError {
   message: string
   /** Valor ESPERADO quando o erro é de conferência numérica (Q-N3 da negociação,
    *  2026-09-07): a tela preenche/corrige sem fazer parse da prosa da mensagem.
-   *  Aditivo — consumidores antigos ignoram. */
-  expected?: number
+   *  TEXTO na inscrição federal (D-CJ3, frente do CNPJ alfanumérico): a forma CANÔNICA do que foi enviado
+   *  (ex.: '12ABC34501DE35' para '12.abc.345/01de-35') — a porta de escrita aceita só a canônica e diz qual é.
+   *  NÃO é aditivo para o app anterior à onda 1: o `Failure` dele lê `expected` como `num?` e quebra com texto —
+   *  setes-api e setes-app da onda 1 (`FailureField.expectedText`) publicam JUNTOS (gate de 2026-11-21). */
+  expected?: number | string
 }
 
 export class HttpError extends Error {

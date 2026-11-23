@@ -1,7 +1,7 @@
 import { Router } from 'express'
+import { privilegeAct } from '@shared/auth/module-privilege-gate'
 import * as controller from './service-orders.controller'
-import { requirePrivilege } from '@shared/auth/require-privilege'
-import { PRIVILEGE_FATURAR } from '@shared/auth/privileges'
+import { PRIVILEGE_FATURAR, PRIVILEGE_ALTERAR } from '@shared/auth/privileges'
 
 /**
  * Rotas do módulo service-orders — montadas em /api/service-orders.
@@ -104,7 +104,8 @@ router.post('/', controller.create)
  *       401: { description: Não autenticado }
  *       500: { description: Erro interno }
  */
-router.post('/monthly-run', controller.monthly)
+// D-PV8 (fecha a Q-R5.5): a rotina mensal é ato da COBRANÇA do mês — FATURAR (o DELETE da OS aberta = EXCLUIR, pelo verbo)
+router.post('/monthly-run', privilegeAct(PRIVILEGE_FATURAR), controller.monthly)
 
 /**
  * @swagger
@@ -193,6 +194,26 @@ router.get('/products', controller.productsLookup)
 
 /**
  * @swagger
+ * /api/service-orders/payment-types:
+ *   get:
+ *     summary: Formas HABILITADAS (negociação do faturamento da OS — lista de apoio)
+ *     tags: [ServiceOrders]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: filter
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: 'Envelope { ok, data } — lista { id, description, kind, maxParcels } (até 100)' }
+ *       401: { description: Não autenticado }
+ *       403: { description: Sem o privilégio VISUALIZAR da tela (ou tela não contratada) }
+ */
+// D-PV2: lista de apoio do PRÓPRIO módulo (antes a tela lia o /api de outra — a guarda por roteador exigiria o privilégio daquela tela); declarada ANTES de GET /:id
+router.get('/payment-types', controller.paymentTypesLookup)
+
+/**
+ * @swagger
  * /api/service-orders/{id}:
  *   get:
  *     summary: Retorna a OS completa (itens + totalizer + fatura quando houver)
@@ -205,7 +226,7 @@ router.get('/products', controller.productsLookup)
  *         required: true
  *         schema: { type: integer }
  *     responses:
- *       200: { description: 'Envelope { ok, data } — { id, number, customerId, customerName, status, dtRecord, items[], totalValue, invoiceNumber, dtEmission, ibscbs } — ibscbs (IB-3, D-IB76): { preview, frozen } — preview = a declaração IBS/CBS PREVISTA na OS aberta (mesma composição do faturamento, só-pergunta: competenceDate, obligationStart, obligatory, declared, omitted[], refusal); frozen = a CONGELADA no ramo da nota faturada (classificationCode, placeIndicatorCode, nbs); null = sem itens ou sem ramo — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent (lista FECHADA — IBSCBS_OMISSIONS, D-IB91) · preview.atObligation (D-IB89): antes da obrigação, o veredito { declared, omitted[], refusal } NA DATA DA OBRIGAÇÃO (null depois) · unavailable: true (D-IB87) = a leitura IBS/CBS falhou — preview/frozen null, o detalhe segue' }
+ *       200: { description: 'Envelope { ok, data } — { id, number, customerId, customerName, status, dtRecord, items[], totalValue, invoiceNumber, dtEmission, ibscbs } — ibscbs (IB-3, D-IB76): { preview, frozen } — preview = a declaração IBS/CBS PREVISTA na OS aberta (mesma composição do faturamento, só-pergunta: competenceDate, obligationStart, obligatory, declared, omitted[], refusal); frozen = a CONGELADA no ramo da nota faturada (classificationCode, placeIndicatorCode, nbs); null = sem itens ou sem ramo — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113) · preview.atObligation (D-IB89): antes da obrigação, o veredito { declared, omitted[], refusal } NA DATA DA OBRIGAÇÃO (null depois) · unavailable: true (D-IB87) = a leitura IBS/CBS falhou — preview/frozen null, o detalhe segue' }
  *       401: { description: Não autenticado }
  *       404: { description: OS não encontrada }
  *   delete:
@@ -260,7 +281,8 @@ router.delete('/:id', controller.remove)
  *       404: { description: OS não encontrada }
  *       409: { description: Ordem já faturada }
  */
-router.post('/:id/items', controller.addOrderItem)
+// D-PV21: ato sobre a OS ABERTA = ALTERAR (item novo/mudado/tirado); INSERIR = abrir a OS; EXCLUIR = apagá-la (D-PV8)
+router.post('/:id/items', privilegeAct(PRIVILEGE_ALTERAR), controller.addOrderItem)
 
 /**
  * @swagger
@@ -316,7 +338,7 @@ router.post('/:id/items', controller.addOrderItem)
  *       409: { description: Ordem já faturada }
  */
 router.put('/:id/items/:itemId', controller.updateOrderItem)
-router.delete('/:id/items/:itemId', controller.removeOrderItem)
+router.delete('/:id/items/:itemId', privilegeAct(PRIVILEGE_ALTERAR), controller.removeOrderItem)     // D-PV21
 
 /**
  * @swagger
@@ -351,15 +373,15 @@ router.delete('/:id/items/:itemId', controller.removeOrderItem)
  *               paymentTypeId: { type: integer, description: 'Forma vinculada e habilitada na institution' }
  *               parcels: { type: integer, default: 1, minimum: 1, maximum: 99 }
  *     responses:
- *       201: { description: 'Envelope { ok, data: { invoiceNumber, parcels, totalValue, dtExpiration, paymentTypeId, autoSettled, bankSlipsIssued, chargeableParcels, ibscbs: { declared, omitted[] } } } — ibscbs (IB-2, D-IB65) = a declaração IBS/CBS congelada no ramo: declared = o grupo está CONGELADO no ramo (a nfse-api o leva ao DPS a partir da IB-3 — até lá não é prova de envio); omitted = por que não (antes da obrigação; nunca gravado) — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent (lista FECHADA — IBSCBS_OMISSIONS, D-IB91)' }
+ *       201: { description: 'Envelope { ok, data: { invoiceNumber, parcels, totalValue, dtExpiration, paymentTypeId, autoSettled, bankSlipsIssued, chargeableParcels, ibscbs: { declared, omitted[] } } } — ibscbs (IB-2, D-IB65) = a declaração IBS/CBS congelada no ramo: declared = o grupo está CONGELADO no ramo (a nfse-api o leva ao DPS a partir da IB-3 — até lá não é prova de envio); omitted = por que não (antes da obrigação; nunca gravado) — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113)' }
  *       400: { description: 'Validação / forma indisponível / ordem sem itens' }
  *       401: { description: Não autenticado }
  *       404: { description: OS não encontrada }
  *       409: { description: Ordem já faturada }
- *       422: { description: 'Depois da obrigação (D-IB8/D-IB62/D-IB63): INVOICE_SERVICE_IBSCBS_REQUIRED (classificação cClassTrib+cIndOp e NBS aceitas em todo serviço) ou INVOICE_SERVICE_MULTI_DECLARATION (serviços com declarações diferentes) — fields[] por serviço (product.N); a mensagem nomeia os serviços' }
+ *       422: { description: 'Depois da obrigação (D-IB8/D-IB62/D-IB63): INVOICE_SERVICE_IBSCBS_REQUIRED (classificação cClassTrib+cIndOp e NBS aceitas em todo serviço) ou INVOICE_SERVICE_MULTI_DECLARATION (serviços com declarações diferentes) — fields[] por serviço (product.N); a mensagem nomeia os serviços. D-IB99: IBSCBS_REGULAR_REGIME_UNSUPPORTED quando a opção de apuração do IBS/CBS vigente na competência é o regime regular (2/3), ainda não suportado — nada é gravado' }
  */
 // Q-G23 (Valdo 2026-09-09): FATURAR na interface do ramo (seed 53) — admin/super passam
-router.post('/:id/invoice', requirePrivilege('service-orders', PRIVILEGE_FATURAR), controller.invoice)
+router.post('/:id/invoice', privilegeAct(PRIVILEGE_FATURAR), controller.invoice)
 
 /**
  * @swagger
@@ -403,11 +425,11 @@ router.post('/:id/invoice', requirePrivilege('service-orders', PRIVILEGE_FATURAR
  *               paymentTypeId: { type: integer, description: 'OPCIONAL (D14) — ausente = forma combinada no contrato de cada ordem' }
  *               parcels: { type: integer, enum: [1], default: 1, description: 'D30 — cobrança recorrente é sempre 1 parcela; outro valor → 400 (parcelamento só no faturamento individual)' }
  *     responses:
- *       200: { description: 'Envelope { ok, data: { requested, invoiced, failed, uncharged, partiallyCharged, retryable, ibscbsDeclared, ibscbsOmitted, results[] } } — cada linha traz dtExpiration/paymentTypeId REALMENTE usados, chargedParcels/chargeableParcels, retryable e ibscbs { declared, omitted[] } (IB-2, D-IB65: faturadas COM × SEM o grupo IBS/CBS CONGELADO no ramo — vai ao DPS a partir da IB-3; depois da obrigação a ordem sem declaração cai com o 422 e a mensagem nomeia os serviços) — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent (lista FECHADA — IBSCBS_OMISSIONS, D-IB91)' }
+ *       200: { description: 'Envelope { ok, data: { requested, invoiced, failed, uncharged, partiallyCharged, retryable, ibscbsDeclared, ibscbsOmitted, results[] } } — cada linha traz dtExpiration/paymentTypeId REALMENTE usados, chargedParcels/chargeableParcels, retryable e ibscbs { declared, omitted[] } (IB-2, D-IB65: faturadas COM × SEM o grupo IBS/CBS CONGELADO no ramo — vai ao DPS a partir da IB-3; depois da obrigação a ordem sem declaração cai com o 422 e a mensagem nomeia os serviços) — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113)' }
  *       400: { description: Validação do lote }
  *       401: { description: Não autenticado }
  *       403: { description: Sem o privilégio FATURAR }
  */
-router.post('/batch-invoice', requirePrivilege('service-orders', PRIVILEGE_FATURAR), controller.batchInvoice)
+router.post('/batch-invoice', privilegeAct(PRIVILEGE_FATURAR), controller.batchInvoice)
 
 export default router

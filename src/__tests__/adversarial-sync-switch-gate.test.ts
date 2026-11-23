@@ -11,6 +11,7 @@
 // se prova é se a ESCRITA chega). `it('[RESISTIU] …')` = o ataque foi barrado / a promessa vale.
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
+import { accessAnswer, AccessModel, ModelProfile } from '../test-setup/access-model'
 
 jest.mock('../shared/db/connection', () => ({
   __esModule: true, default: { query: jest.fn(), getConnection: jest.fn(), on: jest.fn(), end: jest.fn() },
@@ -48,11 +49,9 @@ jest.mock('../shared/entity', () => ({
 import pool from '../shared/db/connection'
 import logger from '../shared/logger/logger'
 import * as merch from '../modules/merchandise/merchandise.service'
-import { resetPrivilegeCache } from '../shared/auth/require-privilege'
 import app from '../app'
 
 const q = (pool as any).query as jest.Mock
-const MERCH_IFACE = 40
 const KEY = 'k'.repeat(48)
 
 // ---- modelo do banco (só o que o delta toca) ----
@@ -148,9 +147,9 @@ function db(sql: string, params: any[] = []): any {
     const hasS = list.some(c => c.kind === 'S' && c.active === 'S')
     return [list.filter(c => (hasS ? c.kind === 'S' : true)).map(c => ({ id: c.id, description: `C${c.id}`, name: `C${c.id}` }))]
   }
-  if (/FROM setes_central\.tb_interface WHERE i18n_key/.test(s)) return [String(params[0]) === 'merchandise' ? [{ id: MERCH_IFACE }] : []]
-  if (/tb_institution_has_interface/.test(s)) return [Number(params[1]) === MERCH_IFACE ? [{ 1: 1 }] : []]
-  if (/tb_user_has_privilege/.test(s)) return [[]]
+  // o veredito da guarda do roteador (gatedModule — D-PV2; costura A1): merchandise e services contratadas, nenhuma concessão avulsa
+  const a = accessAnswer(s, params, modelFor)
+  if (a) return [a, []]
   if (/^\s*SELECT/i.test(s)) return [[]]
   throw new Error(`SQL inesperado: ${s.slice(0, 100)}`)
 }
@@ -182,6 +181,12 @@ const SETES_ADMIN = { institutionId: 1, userId: 2, role: 'admin', schemaName: 's
 const ADMIN2 = { institutionId: 2, userId: 9, role: 'admin', schemaName: 'setes_x' }
 const USER2 = { institutionId: 2, userId: 10, role: 'user', schemaName: 'setes_x' }
 const FAKE_SUPER2 = { institutionId: 2, userId: 11, role: 'super', schemaName: 'setes_x' }   // "super" fora da Setes
+const PROFILE: Record<string, ModelProfile> = Object.fromEntries(
+  [SUPER, SUPER_B, SETES_ADMIN, ADMIN2, USER2, FAKE_SUPER2].map(p => [`${p.userId}:${p.institutionId}`, p.role as ModelProfile]))
+function modelFor(userId: number, institutionId: number): AccessModel | null {
+  const profile = PROFILE[`${userId}:${institutionId}`]
+  return profile ? { profile, contracted: ['merchandise', 'services'] } : null
+}
 const bearer = (p: object) => `Bearer ${testToken(p)}`
 const switchUrl = (id: string | number) => `/api/institutions/${id}/sync-api-key/active`
 // corpo do PUT que passa no institutionUpdateDto (a cadeia fiscal é dublada)
@@ -201,7 +206,6 @@ const trocaTx = () => txConns.find(c => txSql(c).some(s => /SELECT schema_name A
 
 beforeEach(() => {
   jest.clearAllMocks()
-  resetPrivilegeCache()
   // fato do dev (2026-11-22): a Setes é D (chave ativa); 2 = cliente nativo web; 3 = outro cliente do ERP Desktop (chave ativa)
   institutions = new Map([[1, { schemaName: 'setes_setes', kind: 'D', endedAt: null, by: null }],
     [2, { schemaName: 'setes_x', kind: 'W', endedAt: null, by: null }], [3, { schemaName: 'setes_y', kind: 'D', endedAt: null, by: null }]])

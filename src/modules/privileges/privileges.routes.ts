@@ -74,6 +74,14 @@ router.get('/:id', controller.getById)
  *   post:
  *     summary: Cria um privilégio (id gerado MAX+1 no backend)
  *     tags: [Privileges]
+ *     responses:
+ *       409:
+ *         description: >-
+ *           D-PV15 (Q-PV17): PRIVILEGE_IN_USE — o app compara o privilégio pelo NOME; o consumido não se renomeia (só a
+ *           caixa pode mudar), não se exclui e o nome dele não se repete em outra linha; fields[] nomeia cada consumidor.
+ *           D-PV63/A-PV28 (UNIQUE do script 77 — o nome do verbo é único em TODAS as linhas): PRIVILEGE_NAME_TAKEN — outro privilégio
+ *           VIVO já tem o nome (sem distinção de maiúsculas nem de espaço no fim; também na corrida); PRIVILEGE_NAME_RETIRED — o nome
+ *           é de um privilégio EXCLUÍDO, nomeado pelo id (a tela não o revive; a volta é por entrega)
  */
 router.post('/', controller.create)
 
@@ -83,6 +91,13 @@ router.post('/', controller.create)
  *   put:
  *     summary: Atualiza um privilégio (somente a description — o id nunca muda)
  *     tags: [Privileges]
+ *     responses:
+ *       409:
+ *         description: >-
+ *           D-PV15 (Q-PV17): PRIVILEGE_IN_USE — o app compara o privilégio pelo NOME; o consumido não se renomeia (só a
+ *           caixa pode mudar), não se exclui e o nome dele não se repete em outra linha; fields[] nomeia cada consumidor.
+ *           D-PV63/A-PV28: PRIVILEGE_NAME_TAKEN (o nome novo é de outro privilégio VIVO) e PRIVILEGE_NAME_RETIRED (é de um EXCLUÍDO,
+ *           nomeado pelo id) — como no POST
  */
 router.put('/:id', controller.update)
 
@@ -92,6 +107,11 @@ router.put('/:id', controller.update)
  *   delete:
  *     summary: Exclui logicamente um privilégio (deleted='S')
  *     tags: [Privileges]
+ *     responses:
+ *       409:
+ *         description: >-
+ *           D-PV15 (Q-PV17): PRIVILEGE_IN_USE — o app compara o privilégio pelo NOME; o consumido não se renomeia (só a
+ *           caixa pode mudar), não se exclui e o nome dele não se repete em outra linha; fields[] nomeia cada consumidor
  */
 router.delete('/:id', controller.remove)
 

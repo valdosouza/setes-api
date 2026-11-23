@@ -6,6 +6,7 @@
 // dublado (o 400 sai antes da escrita; o corpo válido chega ao serviço com os dois campos).
 import request from 'supertest'
 import { testToken } from '../test-setup/test-token'
+import { accessAnswer } from '../test-setup/access-model'
 
 jest.mock('../shared/db/connection', () => ({
   __esModule: true, default: { query: jest.fn(), getConnection: jest.fn(), on: jest.fn(), end: jest.fn() },
@@ -24,7 +25,6 @@ import pool from '../shared/db/connection'
 import * as service from '../modules/merchandise/merchandise.service'
 import * as repo from '../modules/merchandise/merchandise.repository'
 import { merchandiseDto } from '../modules/merchandise/merchandise.dto'
-import { resetPrivilegeCache } from '../shared/auth/require-privilege'
 import app from '../app'
 
 const mockQuery = (pool as any).query as jest.Mock
@@ -231,17 +231,16 @@ describe('repository — leitura (GET da ficha)', () => {
 // ---------------------------------------------------------------------------------------------------------------------------------
 // (iii) rota pelo app real (serviço de escrita dublado)
 // ---------------------------------------------------------------------------------------------------------------------------------
-const MERCH_IFACE = 40
 const SETES_ADMIN = { institutionId: 1, userId: 1, role: 'admin', schemaName: 'setes_setes' }
 const auth = `Bearer ${testToken(SETES_ADMIN)}`
 
 describe('rota /api/merchandise — o 400 sai antes da escrita; o corpo válido chega ao serviço', () => {
   beforeEach(() => {
-    resetPrivilegeCache()
     mockQuery.mockImplementation(async (sql: string, params: any[] = []) => {
+      // o veredito da guarda do roteador (gatedModule('merchandise') — D-PV2): admin com a interface contratada
+      const a = accessAnswer(sql, params, { profile: 'admin', contracted: ['merchandise'] })
+      if (a) return [a, []]
       if (/SELECT source_kind AS kind FROM setes_central\.tb_institution/.test(sql)) return [[{ kind: 'W' }]]
-      if (/FROM setes_central\.tb_interface WHERE i18n_key/.test(sql)) return [String(params[0]) === 'merchandise' ? [{ id: MERCH_IFACE }] : []]
-      if (/tb_institution_has_interface/.test(sql)) return [[{ 1: 1 }]]
       return [[]]
     })
   })

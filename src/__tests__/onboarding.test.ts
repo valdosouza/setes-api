@@ -7,6 +7,8 @@
 import * as repo   from '../modules/institutions/institutions.repository'
 import * as runner from '../migrations/runner'
 import * as userPiece from '../shared/user'
+import * as invitePiece from '../shared/user/invite'
+import * as noticePiece from '../shared/user/invite-notice'
 import { createInstitution } from '../modules/institutions/institutions.service'
 import {
   InstitutionInput, InstitutionAdminInput,
@@ -15,6 +17,8 @@ import {
 jest.mock('../modules/institutions/institutions.repository')
 jest.mock('../migrations/runner')
 jest.mock('../shared/user')
+jest.mock('../shared/user/invite')
+jest.mock('../shared/user/invite-notice')
 
 const mockSchemaExists       = repo.schemaNameExists           as jest.Mock
 const mockInsertCascade      = repo.insertInstitutionCascade   as jest.Mock
@@ -24,6 +28,9 @@ const mockSetActive          = repo.setInstitutionActive       as jest.Mock
 const mockRunMigrations      = runner.runMigrationsForSchema   as jest.Mock
 const mockFindEmailOwner     = userPiece.findLoginEmailOwner   as jest.Mock
 const mockInsertUser         = userPiece.insertUserCascade     as jest.Mock
+const mockInvite             = invitePiece.inviteToInstitution as jest.Mock
+const mockNotify             = noticePiece.notifyInvite        as jest.Mock
+const mockHasSuper           = invitePiece.hasSuperLink        as jest.Mock
 
 const input: InstitutionInput = {
   entity:      { nameCompany: 'Empresa Setes LTDA', nickTrade: 'Setes' },
@@ -52,6 +59,8 @@ describe('createInstitution (POST /api/institutions absorve o onboarding)', () =
     mockRunMigrations.mockResolvedValue(undefined)
     mockFindEmailOwner.mockResolvedValue(null)
     mockInsertUser.mockResolvedValue(77)
+    mockInvite.mockResolvedValue('invited')
+    mockHasSuper.mockResolvedValue(false)
   })
 
   it('cria a cadeia, provisiona o schema, contrata as estruturais, cria o admin e ativa', async () => {
@@ -74,17 +83,62 @@ describe('createInstitution (POST /api/institutions absorve o onboarding)', () =
 
     const [payload, hash, link] = mockInsertUser.mock.calls[0]
     expect(payload).toMatchObject({ email: admin.email, active: 'S' })
-    expect(link).toEqual({ institutionId: 2, kind: 'admin' })
+    expect(link).toEqual({ institutionId: 2, kind: 'admin', inviterId: null })   // D-UC14: convidante = quem opera (updatedBy)
     expect(hash).not.toBe(admin.password)   // md5Password aplicado no service
-    expect(hash).toMatch(/^[0-9A-F]{32}$/)
+    expect(hash).toMatch(/^scrypt\$N=\d+,r=8,p=\d\$/   /* D-EA9: scrypt da peça */)
   })
 
-  it('e-mail do admin já usado como login → 409 ANTES de qualquer escrita', async () => {
+  // ---- A-UC6 (CONV.E2.P4): o e-mail do 1º admin que JÁ é login vira CONVITE admin pendente; o 409 do onboarding deixou de existir ----
+  it('A-UC6: e-mail do admin que já é login → convite admin pendente, nenhuma credencial nova, estabelecimento ativo', async () => {
     mockFindEmailOwner.mockResolvedValue(9)
+    const order: string[] = []
+    mockSetActive.mockImplementation(async () => { order.push('ativa') })
+    mockNotify.mockImplementation(() => { order.push('aviso') })
 
-    await expect(createInstitution(input, 'setes_alpha', admin))
-      .rejects.toMatchObject({ statusCode: 409 })
+    const result = await createInstitution(input, 'setes_alpha', { ...admin, password: undefined }, 501)
+
+    expect(result).toEqual({ id: 2, schemaName: 'setes_alpha', active: 'S', adminUserId: 9, adminInvite: 'pending' })
+    expect(mockInsertUser).not.toHaveBeenCalled()
+    expect(mockInvite).toHaveBeenCalledWith(9, 2, 'admin', 501)
+    expect(mockGrantStructural).toHaveBeenCalledWith('setes_alpha', 2)
+    expect(order).toEqual(['ativa', 'aviso'])                     // o aviso sai depois da ativação
+    expect(mockNotify).toHaveBeenCalledWith(9, 2)
+  })
+
+  it('A-UC6: nome e senha do corpo são descartados (a credencial é do titular) — nada além do convite', async () => {
+    mockFindEmailOwner.mockResolvedValue(9)
+    await createInstitution(input, 'setes_alpha', admin, 501)
+    expect(mockInsertUser).not.toHaveBeenCalled()
+    expect(mockInvite.mock.calls[0]).toEqual([9, 2, 'admin', 501])
+  })
+
+  it('A-UC6: falha ao gravar o convite → institution permanece active=N (a mesma regra da falha do admin)', async () => {
+    mockFindEmailOwner.mockResolvedValue(9)
+    mockInvite.mockRejectedValue(new Error('CHECK'))
+    await expect(createInstitution(input, 'setes_alpha', admin, 501)).rejects.toMatchObject({ statusCode: 500 })
+    expect(mockSetActive).not.toHaveBeenCalled()
+    expect(mockNotify).not.toHaveBeenCalled()
+  })
+
+  it('D-UC22: e-mail de conta de SUPER como 1º admin → 409 genérico ANTES de qualquer escrita (nada de convite)', async () => {
+    mockFindEmailOwner.mockResolvedValue(9)
+    mockHasSuper.mockResolvedValue(true)
+    await expect(createInstitution(input, 'setes_alpha', admin, 501))
+      .rejects.toMatchObject({ statusCode: 409, fields: [{ field: 'admin.email', message: 'E-mail já usado como login de outro usuário' }] })
     expect(mockInsertCascade).not.toHaveBeenCalled()
+    expect(mockInvite).not.toHaveBeenCalled()
+  })
+
+  it('e-mail novo SEM senha → 400 no campo ANTES de qualquer escrita', async () => {
+    await expect(createInstitution(input, 'setes_alpha', { ...admin, password: undefined }))
+      .rejects.toMatchObject({ statusCode: 400, fields: [{ field: 'admin.password' }] })
+    expect(mockInsertCascade).not.toHaveBeenCalled()
+  })
+
+  it('e-mail novo: nenhum convite nem aviso (a criação de hoje)', async () => {
+    await createInstitution(input, 'setes_alpha', admin)
+    expect(mockInvite).not.toHaveBeenCalled()
+    expect(mockNotify).not.toHaveBeenCalled()
   })
 
   it('falha ao criar o admin: institution permanece active=N', async () => {

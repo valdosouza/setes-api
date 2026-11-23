@@ -48,7 +48,7 @@ const router = Router()
  *                       valor unitário; o vendedor é DERIVADO do pedido
  *                       original.
  *     responses:
- *       200: { description: "{ ok, data: { orderId, branch, issues[], rulesResolved, rulesManual, ibscbs } } — ibscbs (IB-3, D-IB76): a declaração IBS/CBS PREVISTA do ramo de serviço { competenceDate, obligationStart, obligatory, declared, omitted[], refusal: {code, message} | null } pela mesma composição do faturamento (só-pergunta, hoje do estabelecimento); antes da obrigação é só aviso; depois, a recusa também vira issue scope ibscbs (bloqueia). null = sem serviço — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent (lista FECHADA — IBSCBS_OMISSIONS, D-IB91) · atObligation (D-IB89): antes da obrigação, o veredito NA DATA DA OBRIGAÇÃO" }
+ *       200: { description: "{ ok, data: { orderId, branch, issues[], rulesResolved, rulesManual, ibscbs } } — ibscbs (IB-3, D-IB76): a declaração IBS/CBS PREVISTA do ramo de serviço { competenceDate, obligationStart, obligatory, declared, omitted[], refusal: {code, message} | null } pela mesma composição do faturamento (só-pergunta, hoje do estabelecimento); antes da obrigação é só aviso; depois, a recusa também vira issue scope ibscbs (bloqueia). null = sem serviço — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113) · atObligation (D-IB89): antes da obrigação, o veredito NA DATA DA OBRIGAÇÃO" }
  *       400: { description: Payload inválido }
  *       401: { description: Sem JWT }
  *       403: { description: Flag billing desabilitada }
@@ -57,7 +57,9 @@ const router = Router()
  *       422: { description: Ordem sem ramo identificado }
  *       500: { description: Erro interno }
  */
-router.post('/validate', controller.validate)
+// D-PV23 (Valdo 2026-10-20, Q-PV14 (a)): /validate GRAVA a regra por item (origin 'A') — FATURAR pela interface do RAMO,
+// o mesmo resolvedor do /invoice (antes: sem guarda nenhuma — LOW do gate adversarial da D-PV2).
+router.post('/validate', requirePrivilegeFor(PRIVILEGE_FATURAR, resolveFromBody), controller.validate)
 
 /**
  * @swagger
@@ -101,13 +103,13 @@ router.post('/validate', controller.validate)
  *                       vendedor derivado. Venda gera comissão POSITIVA por
  *                       item na mesma transação (kind F).
  *     responses:
- *       201: { description: "{ ok, data: { orderId, invoiceNumber, serie, model, totalValue, parcels, autoSettled, bankSlipsIssued, chargeableParcels, ibscbs } } — ibscbs (IB-2, D-IB65): { declared, omitted[] } da declaração IBS/CBS CONGELADA no ramo de serviço (vai ao DPS a partir da IB-3 — declared não é prova de envio); null = nota sem ramo de serviço — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent (lista FECHADA — IBSCBS_OMISSIONS, D-IB91)" }
+ *       201: { description: "{ ok, data: { orderId, invoiceNumber, serie, model, totalValue, parcels, autoSettled, bankSlipsIssued, chargeableParcels, ibscbs } } — ibscbs (IB-2, D-IB65): { declared, omitted[] } da declaração IBS/CBS CONGELADA no ramo de serviço (vai ao DPS a partir da IB-3 — declared não é prova de envio); null = nota sem ramo de serviço — omitted[] ∈ not-classified | no-line | not-applicable | requires-regular | place-indicator | nbs-missing | nbs-not-accepted | divergent | cst-without-group (lista FECHADA — IBSCBS_OMISSIONS, D-IB91; cst-without-group = CST que não leva o grupo IBS/CBS, D-IB113)" }
  *       400: { description: Payload inválido }
  *       401: { description: Sem JWT }
  *       403: { description: Flag billing desabilitada }
  *       404: { description: Ordem não encontrada }
  *       409: { description: Ordem já faturada }
- *       422: { description: "Pendências de validação (REQUIRES_VALIDATION), negociação ausente ou — com ramo de serviço, depois da obrigação (D-IB8/D-IB62/D-IB63) — INVOICE_SERVICE_IBSCBS_REQUIRED / INVOICE_SERVICE_MULTI_DECLARATION (fields[] por item)" }
+ *       422: { description: "Pendências de validação (REQUIRES_VALIDATION), negociação ausente ou — com ramo de serviço, depois da obrigação (D-IB8/D-IB62/D-IB63) — INVOICE_SERVICE_IBSCBS_REQUIRED / INVOICE_SERVICE_MULTI_DECLARATION (fields[] por item); em QUALQUER nota (mercadoria também — D-IB99), IBSCBS_REGULAR_REGIME_UNSUPPORTED quando a opção de apuração do IBS/CBS vigente na competência é o regime regular (2/3), ainda não suportado — nada é gravado" }
  *       500: { description: Erro interno }
  */
 // Q-P5 (cancelamento, 2026-09-08): FATURAR e CANCELAR são privilégios de

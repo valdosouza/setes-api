@@ -1,19 +1,21 @@
 import { Router } from 'express'
 import * as controller from './merchandise.controller'
-import { requirePrivilege } from '@shared/auth/require-privilege'
+import { privilegeAct } from '@shared/auth/module-privilege-gate'
 import { PRIVILEGE_CATALOGAR } from '@shared/auth/privileges'
 
 /**
  * Rotas do módulo merchandise — /api/merchandise (espelha /home/merchandise no app; rótulo da tela "Produtos" — D-PR3). Cadastro de
- * MERCADORIA do cliente (tb_product kind P/M + tb_merchandise + unidades de venda tb_merchandise_trade_unit); gate técnico = flag
- * 'merchandise'. Liberação comercial só para cliente SEM legado (D3 do serviço / D-PR14 — item 7 do roteiro de implantação web).
+ * MERCADORIA do cliente (tb_product kind P/M + tb_merchandise + unidades de venda tb_merchandise_trade_unit); SEM flag (D-PV36): a
+ * licença é o vínculo de interfaces e V/I/A/E são da guarda do roteador (`gatedModule('merchandise', …)` no gateway — D-PV2).
+ * Liberação comercial só para cliente SEM legado (D3 do serviço / D-PR14 — item 7 do roteiro de implantação web).
  * Sub-rota B "Unidades e GTIN" em /:id/trade-units; painel de vínculos em /:id/links (D-PR25). Rotas fixas ANTES de /:id.
  */
 const router = Router()
 
 /** D-PR33: criar no catálogo CENTRAL (compartilhado entre clientes; o 1º criador fixa a descrição) exige o ato CATALOGAR na
- *  interface `merchandise` — admin passa (D32); a interface tem de estar contratada para todos (D-F37). */
-const catalogar = requirePrivilege('merchandise', PRIVILEGE_CATALOGAR)
+ *  interface `merchandise` — admin passa (D32); a interface tem de estar contratada para todos (D-F37). O marcador declara o ato;
+ *  quem confere é a guarda do roteador (`gatedModule('merchandise', …)` no gateway — D-PV2/D-PV7). */
+const catalogar = privilegeAct(PRIVILEGE_CATALOGAR)
 
 /**
  * @swagger

@@ -1,5 +1,6 @@
 import { PoolConnection } from 'mysql2/promise'
 import { IbscbsDeclaration } from '@shared/ibscbs-classification'
+import { assertIbscbsAssessmentSupported } from '@shared/ibscbs-assessment'
 import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 
@@ -272,11 +273,17 @@ export interface IssuedInvoice {
  * Emite a nota: cabeçalho (upsert com REVIVE — D3/D5), ramos por PRESENÇA
  * (upsert; ramo ausente nesta vida vira 'S'), evento E com snapshot.
  * Roda DENTRO da transação do faturamento (o chamador já travou o pedido).
+ *
+ * D-IB99/D-IB100 (fase IBS/CBS — §14): ANTES de cunhar o número, a opção de apuração do IBS/CBS do estabelecimento vigente na
+ * competência (`dtEmission`) precisa ser SUPORTADA — com o regime regular (2/3) registrado, 422 e a transação inteira desfaz
+ * (nunca uma nota errada). Aqui e não nos produtores: é o único ponto por onde TODA nota nasce (venda, conjugada, devolução,
+ * OS, lote, revive) e vale para todo modelo (o título fica errado do mesmo jeito em SE/55/65).
  */
 export async function issueInvoice(
   conn: PoolConnection, s: string, institutionId: number, userId: number,
   input: IssueInvoiceInput
 ): Promise<IssuedInvoice> {
+  await assertIbscbsAssessmentSupported(conn, s, institutionId, input.dtEmission)
   const invoiceNumber = await nextInvoiceNumber(conn, s, institutionId, input.model, input.serie)
   await conn.query(
     `INSERT INTO \`${s}\`.tb_invoice

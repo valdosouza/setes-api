@@ -1,12 +1,14 @@
 import { Router } from 'express'
+import { privilegeAct } from '@shared/auth/module-privilege-gate'
+import { PRIVILEGE_ALTERAR } from '@shared/auth/privileges'
 import * as controller from './bank-accounts.controller'
+import * as channel from './bank-accounts.channel.controller'
+import { adminGuard } from '@gateway/admin.guard'
 
 /**
- * Rotas do CADASTRO do módulo bank-accounts — montadas em /api/bank-accounts SOB a guarda do dono do catálogo
- * (o ERP Desktop também envia as contas bancárias — D-PR51 — e a web cunha o id por MAX+1 no mesmo espaço; sem guarda desde a D-PR77:
- * com origem D a escrita passa e o app orienta o usuário). Cadastro de CLIENTE, grupo Financeiro (sem superGuard — escopo por institution do
- * JWT); gate técnico = flag 'bank-accounts'. As rotas do CANAL API (`/:id/channel…`) vivem em `bank-accounts.channel.routes.ts`,
- * montadas ANTES desta guarda: o canal é fato que o legado não produz (a web é a única escritora — mesmo princípio da D-PR45).
+ * Rotas do módulo bank-accounts — montadas em /api/bank-accounts.
+ * Cadastro de CLIENTE, grupo Financeiro (sem superGuard — escopo por
+ * institution do JWT); gate técnico = flag 'bank-accounts'.
  * Espelho no app: apps/web/lib/app/modules/bank_accounts/.
  */
 const router = Router()
@@ -186,5 +188,155 @@ router.get('/banks', controller.banksLookup)
 router.get('/:id', controller.getOne)
 router.put('/:id', controller.update)
 router.delete('/:id', controller.remove)
+
+/**
+ * @swagger
+ * /api/bank-accounts/{id}/channel:
+ *   get:
+ *     tags: [BankAccounts]
+ *     summary: Canal API da conta (Onda 2 — D-I3/D-I4) — configuração + PRESENÇA/validade dos segredos
+ *     description: |
+ *       "Esta conta corrente fala com o seu banco por API." 1 canal por conta
+ *       (`tb_bank_account_channel`). Devolve `channel` (environment S/P, clientId,
+ *       active, inboundToken), `secrets` (certificate/privateKey/clientSecret =
+ *       presença; `certificateInfo` com validade lida do arquivo), `bankNumber`,
+ *       `adapterSupported` (derivado do banco da conta) e `webhookPath`. Nunca
+ *       devolve conteúdo de segredo.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok, data: { channel, secrets, bankNumber, adapterSupported, webhookPath } }' }
+ *       404: { description: Conta não encontrada }
+ *   put:
+ *     tags: [BankAccounts]
+ *     summary: Cria/altera o canal API da conta (admin)
+ *     description: Banco sem adaptador → 422 BANK_CHANNEL_NO_ADAPTER. O `inboundToken` nasce uma vez (rotação é ato próprio).
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [environment]
+ *             properties:
+ *               environment: { type: string, enum: [S, P] }
+ *               clientId: { type: string, nullable: true, maxLength: 100 }
+ *               active: { type: string, enum: [S, N], default: S }
+ *     responses:
+ *       200: { description: 'Envelope { ok, data } (mesma forma do GET)' }
+ *       403: { description: Só admin }
+ *       422: { description: Banco sem adaptador }
+ *   delete:
+ *     tags: [BankAccounts]
+ *     summary: Desativa (soft delete) o canal da conta (admin) — segredos ficam no cofre
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok }' }
+ */
+router.get('/:id/channel', channel.getChannel)
+// Inventário da D-PV1 (§3): o canal API é parte da conta — toda escrita dele = ALTERAR (o adminGuard segue: segredos
+// e cota do banco são do admin — Q-I7); as leituras (GET canal/webhook) = VISUALIZAR pelo verbo.
+router.put('/:id/channel', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.putChannel)
+router.delete('/:id/channel', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.deleteChannel)
+
+/**
+ * @swagger
+ * /api/bank-accounts/{id}/channel/secrets:
+ *   put:
+ *     tags: [BankAccounts]
+ *     summary: Envia os segredos do canal — WRITE-ONLY (admin)
+ *     description: |
+ *       D-I3: certificado mTLS (PEM), chave privada (PEM) e client_secret vão para
+ *       `SECRETS_PATH/<schema>/bank-account/<id>/<S|P>/…`, NUNCA para o banco de
+ *       dados nem para o repositório. Cada campo é opcional (o que vier é gravado).
+ *       A resposta só traz presença e validade — jamais o conteúdo.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               certificatePem: { type: string }
+ *               privateKeyPem: { type: string }
+ *               clientSecret: { type: string }
+ *     responses:
+ *       200: { description: 'Envelope { ok, data } (forma do GET /channel)' }
+ *       400: { description: PEM inválido }
+ *       409: { description: Canal ainda não configurado }
+ *   delete:
+ *     tags: [BankAccounts]
+ *     summary: Apaga os segredos do canal no cofre (admin)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok, data }' }
+ */
+router.put('/:id/channel/secrets', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.putSecrets)
+router.delete('/:id/channel/secrets', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.deleteSecrets)
+
+/**
+ * @swagger
+ * /api/bank-accounts/{id}/channel/rotate-token:
+ *   post:
+ *     tags: [BankAccounts]
+ *     summary: Gera novo token de entrada do webhook (admin) — a URL cadastrada no banco muda
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok, data } (forma do GET /channel)' }
+ * /api/bank-accounts/{id}/channel/test:
+ *   post:
+ *     tags: [BankAccounts]
+ *     summary: Prova de vida do canal — autentica no banco (token + mTLS) e lê o webhook cadastrado
+ *     description: Não escreve nada no banco. Erros legíveis — BANK_CHANNEL_SECRET_MISSING, BANK_CHANNEL_CERT_EXPIRED, BANK_AUTH_FAILED, BANK_UNAVAILABLE.
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok, data: { ok, webhook, environment } }' }
+ *       409: { description: Canal/segredo/certificado/autenticação }
+ *       503: { description: Banco indisponível }
+ */
+router.post('/:id/channel/rotate-token', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.rotateToken)
+router.post('/:id/channel/test', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.test)   // gasta cota do banco: só admin (LOW-3 do gate, assunção Q-I7)
+
+/**
+ * @swagger
+ * /api/bank-accounts/{id}/channel/webhook:
+ *   get:
+ *     tags: [BankAccounts]
+ *     summary: Webhook cadastrado NO BANCO (estado remoto — nunca flag local)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok, data: { url, createdAt, updatedAt } | null }' }
+ *   put:
+ *     tags: [BankAccounts]
+ *     summary: Cadastra/altera o webhook no banco (admin; Onda 4 — exige URL https pública)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema: { type: object, required: [url], properties: { url: { type: string, format: uri } } }
+ *     responses:
+ *       200: { description: 'Envelope { ok, data }' }
+ *   delete:
+ *     tags: [BankAccounts]
+ *     summary: Remove o webhook no banco (admin)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters: [{ in: path, name: id, required: true, schema: { type: integer } }]
+ *     responses:
+ *       200: { description: 'Envelope { ok }' }
+ */
+router.get('/:id/channel/webhook', channel.getWebhook)
+router.put('/:id/channel/webhook', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.putWebhook)
+router.delete('/:id/channel/webhook', adminGuard, privilegeAct(PRIVILEGE_ALTERAR), channel.deleteWebhook)
 
 export default router

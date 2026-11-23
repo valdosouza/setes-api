@@ -25,4 +25,13 @@ export const PRIVILEGE_TRANSMITIR = 9
 /** Criar item no catálogo CENTRAL compartilhado entre clientes — marca, unidade, embalagem (D-PR33 do cadastro de produtos, Valdo
  *  2026-10-18; seed sql/66: privilégio 10 na interface `merchandise`). O 1º criador fixa a descrição para todos (imutável) — por isso
  *  ato próprio, não o INSERIR da tela. */
-export const PRIVILEGE_CATALOGAR = 10
+export const PRIVILEGE_CATALOGAR  = 10
+/** CONFIGURAR (D-PV25, Valdo 2026-10-20 — seed 68): "pode ajustar o comportamento desta tela" — gravar o valor da
+ *  INSTITUTION ('I') de uma config e o required/caption/mask de um campo da tela X exige CONFIGURAR em X, por qualquer
+ *  caminho (engrenagem ou painel solto). O override PESSOAL ('U') segue aberto (A-PV6). O par existe para toda interface
+ *  com config ou campo no catálogo; "Configurações Gerais" = CONFIGURAR em `general-configs`. */
+export const PRIVILEGE_CONFIGURAR = 11
+/** CONSULTAR (D-PV40, Valdo 2026-10-20 — seed 68): perguntar ao TERCEIRO (banco, fisco) a situação de um documento sem
+ *  mudar estado nele (boleto `refresh`; nfse-api `refresh`; passada do rodízio). TRANSMITIR fica para o que MUDA estado no
+ *  terceiro (registrar, transmitir, simular no sandbox). Princípio D-PV27: o verbo nomeia a FINALIDADE, nunca o transporte. */
+export const PRIVILEGE_CONSULTAR  = 12

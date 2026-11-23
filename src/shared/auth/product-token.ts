@@ -1,5 +1,5 @@
 import fs from 'fs'
-import { createPrivateKey, createPublicKey, KeyObject } from 'crypto'
+import { createPrivateKey, createPublicKey, hkdfSync, KeyObject } from 'crypto'
 import jwt, { JwtHeader } from 'jsonwebtoken'
 import { InstitutionPayload } from '@shared/types/express'
 import { HttpError } from '@shared/errors/http-error'
@@ -16,8 +16,10 @@ import { ErrorCodes } from '@shared/errors/error-codes'
  * (`algorithms: ['RS256']`); `JWT_SECRET` não é lida.
  *
  * Dois tokens com MARCA PRÓPRIA (§22.5 item 6) — um nunca vale pelo outro:
- *  - FINAL  `{ institutionId, userId, role, schemaName }` (TTL 24h) — identidade mínima (PADROES_BANCO §7);
- *    o verificador exige a forma e recusa `scope` (o token de seleção nunca autentica uma rota).
+ *  - FINAL  `{ institutionId, userId, role?, schemaName }` (TTL 24h) — identidade mínima (PADROES_BANCO §7);
+ *    o verificador exige a forma e recusa `scope` (o token de seleção nunca autentica uma rota). Desde a D-AU19 o `role` é
+ *    OPCIONAL na verificação (o token da auth-api não o leva — D-AU3) e nunca decide: o perfil é sempre o VIVO.
+ *    A chave pública da auth-api entra por `JWT_PUBLIC_KEYS` com o `kid` dela (D-AU16).
  *  - SELEÇÃO `{ userId, scope: 'select-institution' }` (TTL 5m) — só para escolher a institution no login com
  *    N vínculos; recusa `institutionId` (o final nunca serve de seleção). A nfse-api já o recusa pela forma.
  *
@@ -90,6 +92,24 @@ function keyRing(): JwtKeyRing {
 /** Testes / troca de chave em runtime. */
 export function resetJwtKeyRing(): void {
   ring = null
+  derived.clear()
+}
+
+const derived = new Map<string, Buffer>()
+/**
+ * Segredo SIMÉTRICO derivado da chave PRIVADA de assinatura (HKDF-SHA256, `purpose` = separação de domínio) — para HMAC de
+ * valores que o banco guarda e que não podem ser revertidos por quem só LÊ o banco (Q-PV38: o código do pedido de troca de
+ * senha). Mesma guarda da chave JWT: fora do banco e do repositório, o boot não sobe sem ela; trocar a chave (rotação do
+ * `JWT_KID`, PADROES §7) invalida o que foi derivado da anterior — limite aceito para valores de vida curta (≤ 15 min).
+ */
+export function deriveProductSecret(purpose: string): Buffer {
+  let key = derived.get(purpose)
+  if (!key) {
+    const ikm = keyRing().privateKey.export({ type: 'pkcs8', format: 'der' })
+    key = Buffer.from(hkdfSync('sha256', ikm, 'setes-api/product-secret', purpose, 32))
+    derived.set(purpose, key)
+  }
+  return key
 }
 /** Boot: carrega e confere as chaves — o servidor NÃO sobe sem elas. Devolve o resumo para o log (nunca a chave). */
 export function assertJwtKeys(): string {
@@ -113,12 +133,18 @@ export function signSelectionToken(userId: number): string {
 
 const unauthorized = (msg: string) => new HttpError(401, msg, undefined, ErrorCodes.UNAUTHORIZED)
 
-/** Verifica assinatura (RS256, `kid` conhecido) e validade. Não confere a FORMA — isso é de quem chama. */
-function verified(token: string): Record<string, unknown> {
+/**
+ * Verifica assinatura (RS256, `kid` conhecido) e validade. Não confere a FORMA — isso é de quem chama.
+ * `ownKidOnly`: só a chave de ASSINATURA deste processo vale (gate do delta do `setes-api:AUTH.E6.P1`, MEDIUM): as chaves de
+ * `JWT_PUBLIC_KEYS` — a da auth-api (D-AU16) e as anteriores da rotação — servem ao token FINAL; o de SELEÇÃO só o setes-api emite
+ * (5 min) e só o dele é trocado aqui por um token final.
+ */
+function verified(token: string, ownKidOnly = false): Record<string, unknown> {
   const decoded = jwt.decode(String(token ?? ''), { complete: true }) as { header: JwtHeader } | null
   if (!decoded || typeof decoded !== 'object' || !decoded.header) throw unauthorized('Token inválido')
   const kid = decoded.header.kid
-  const key = kid ? keyRing().publicKeys.get(kid) : undefined
+  const r = keyRing()
+  const key = kid && (!ownKidOnly || kid === r.kid) ? r.publicKeys.get(kid) : undefined
   if (!key) throw unauthorized('Token inválido')
   try {
     const payload = jwt.verify(token, key, { algorithms: [JWT_ALGORITHM] })
@@ -136,21 +162,38 @@ const isPositiveInt = (v: unknown): v is number => Number.isSafeInteger(v) && (v
 
 /** Token FINAL — a identidade da institution; o token de seleção NÃO serve. Devolve só os 4 campos. */
 export function verifyFinalToken(token: string): InstitutionPayload {
+  return verifyFinalTokenWithIat(token).payload
+}
+
+/**
+ * O token final + o `iat` (segundos). D-EA7 (Valdo 2026-10-31, costura A1): a sessão viva compara o `iat` com o instante em que a senha foi
+ * definida — token sem `iat` inteiro = 401 (molde do `exp`: sem ele a revogação seria falha ABERTA).
+ */
+export function verifyFinalTokenWithIat(token: string): { payload: InstitutionPayload; iat: number } {
   const p = verified(token)
   const ok = p.scope === undefined
     && isPositiveInt(p.institutionId)
     && Number.isSafeInteger(p.userId) && (p.userId as number) >= 0
-    && typeof p.role === 'string' && p.role.length > 0
     && typeof p.schemaName === 'string' && SCHEMA_RE.test(p.schemaName)
   if (!ok) throw unauthorized('Token inválido')
-  return { institutionId: p.institutionId as number, userId: p.userId as number, role: p.role as string, schemaName: p.schemaName as string }
+  if (!isPositiveInt(p.iat)) throw unauthorized('Token inválido')
+  return {
+    // D-AU19 (Valdo 2026-11-15 — `setes-api:AUTH.E6.P1`): `role` TOLERADO e IGNORADO. O token da auth-api não o leva (D-AU3: só a
+    // identidade); o do setes-api ainda o leva até a janela da A2. Nenhum dos dois decide nada: o `authMiddleware` (ÚNICO chamador)
+    // troca o campo pelo PERFIL VIVO (`liveSession`, D-UC9) antes de qualquer leitor. Aqui só passa adiante — texto ou ''.
+    payload: {
+      institutionId: p.institutionId as number, userId: p.userId as number,
+      role: typeof p.role === 'string' ? p.role : '', schemaName: p.schemaName as string,
+    },
+    iat: p.iat as number,
+  }
 }
 
 /** Token de SELEÇÃO — só o usuário e a marca; o token final NÃO serve. */
-export function verifySelectionToken(token: string): { userId: number } {
-  const p = verified(token)
-  if (p.scope !== SELECTION_SCOPE || p.institutionId !== undefined || !isPositiveInt(p.userId)) {
+export function verifySelectionToken(token: string): { userId: number; iat: number } {
+  const p = verified(token, true)
+  if (p.scope !== SELECTION_SCOPE || p.institutionId !== undefined || !isPositiveInt(p.userId) || !isPositiveInt(p.iat)) {
     throw unauthorized('Token de seleção inválido')
   }
-  return { userId: p.userId as number }
+  return { userId: p.userId as number, iat: p.iat as number }
 }

@@ -78,6 +78,19 @@ export async function insertPrivilege(description: string): Promise<number> {
   }
 }
 
+/**
+ * Os privilégios — VIVOS E EXCLUÍDOS — com este nome, comparados na colação da coluna (a MESMA do UNIQUE `uq_privilege_description` do
+ * script 77: sem caixa, sem acento, sem espaço no fim — o espaço do INÍCIO conta: ' ARQUIVAR' não colide, limite conhecido). O nome do
+ * verbo é único em TODAS as linhas (A-PV28).
+ */
+export async function privilegeIdsWithName(description: string): Promise<{ id: number; deleted: boolean }[]> {
+  const [rows] = await pool.query<any[]>(
+    `SELECT id, deleted FROM setes_central.tb_privilege WHERE description = ? ORDER BY id`,
+    [description]
+  )
+  return rows.map(r => ({ id: Number(r.id), deleted: String(r.deleted).toUpperCase() !== 'N' }))   // 'n' é viva para o banco (general_ci)
+}
+
 /** Atualiza a description — o id nunca muda. */
 export async function updatePrivilege(id: number, description: string): Promise<void> {
   await pool.query(
