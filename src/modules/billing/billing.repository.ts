@@ -396,6 +396,10 @@ export interface ComputedItem {
   ipiCst: string | null
   pisCst: string | null
   cofinsCst: string | null
+  /** IBS.E9.P3: o cClassTrib que a regra do item presume, JÁ CONFERIDO pelo faturamento — o que o item DECLARA
+   *  (`tb_order_item_ibscbs`). null = serviço (a declaração do serviço mora no ramo `tb_invoice_service`) ou item que o
+   *  faturamento não trata como mercadoria. Não é resultado do motor: é escolha, por isso fora de `taxes`. */
+  ibscbsClassificationCode: string | null
   icmsExtras: {
     cst: string | null
     origin: string | null
@@ -703,6 +707,20 @@ async function persistItemTaxes(
 ): Promise<void> {
   const key = [orderId, ci.item.id, institutionId]
   const t = ci.taxes
+
+  // IBS.E9.P3 (D-IB9, D-IB133): a classificação de IBS/CBS que o item declara. Só o código — sem valor (o faturamento ainda não
+  // calcula IBS/CBS; coluna nasce com o cálculo, D-NE248). Mesma chave dos registros irmãos, sem `kind`.
+  if (ci.ibscbsClassificationCode) {
+    await conn.query(
+      `INSERT INTO \`${s}\`.tb_order_item_ibscbs
+         (tb_order_id, tb_order_item_id, tb_institution_id, terminal,
+          classification_code, created_at, updated_at, deleted)
+       VALUES (?, ?, ?, 0, ?, NOW(), NOW(), 'N')
+       ON DUPLICATE KEY UPDATE
+         classification_code = VALUES(classification_code), deleted = 'N', updated_at = NOW()`,
+      [...key, ci.ibscbsClassificationCode]
+    )
+  }
 
   if (t.icms || ci.icmsExtras.cst) {
     await conn.query(

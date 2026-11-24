@@ -63,6 +63,12 @@ export interface IiPiece {
   siscomexAliq: number | null
 }
 
+/** Classificação de IBS/CBS que a regra de mercadoria presume (IBS.E9.P3 — `tb_tax_rule_ibscbs`): só o cClassTrib.
+ *  O CST é o prefixo do código e nunca é guardado; alíquota, redução e diferimento não são da regra. */
+export interface IbscbsPiece {
+  classificationCode: string
+}
+
 /** Peças presentes da regra (ausência de chave = tributo não definido). */
 export interface TaxRulePieces {
   icms?: IcmsPiece
@@ -70,6 +76,9 @@ export interface TaxRulePieces {
   ipi?: IpiPiece
   pisCofins?: PisCofinsPiece[]
   ii?: IiPiece
+  /** Na LEITURA: presente = a regra define IBS/CBS (nunca `null`). Na ESCRITA (D-IB137): chave AUSENTE = não mexe na
+   *  classificação gravada; `null` = remove; objeto = grava. Diferente das irmãs, que são substituídas sempre. */
+  ibscbs?: IbscbsPiece | null
 }
 
 export interface TaxRuleFull {

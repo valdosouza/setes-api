@@ -101,7 +101,11 @@ src/
 │   │                        # regular por fora/por dentro, Simples no DAS, totais). Centavos inteiros e
 │   │                        # milionésimos; sem banco/relógio/import de outra peça (cerca
 │   │                        # ibscbs-calculation-fence); vetores neutros em __tests__/vectors/ibscbs.
-│   │                        # Ninguém chama ainda — a ligação no faturamento é do IBS.E9.P3
+│   │                        # Ninguém chama ainda — a ligação no faturamento é do IBS.E9.P4 (D-IB135)
+│   │                        # IBS.E9.P3 (D-IB133 a D-IB136): a regra de tributação traz a classificação
+│   │                        # (peça `ibscbs` em tax-rule, tb_tax_rule_ibscbs, só o cClassTrib) e o
+│   │                        # faturamento a grava por item (tb_order_item_ibscbs, migration 083) — sem
+│   │                        # valor. Mercadoria com regra sem classificação vigente NÃO fatura (422)
 │   ├── errors/http-error.ts # Custom HTTP error class
 │   ├── http/controller-utils.ts # handleError + parseId (todo controller usa)
 │   ├── logger/logger.ts     # Simple console logger with timestamps

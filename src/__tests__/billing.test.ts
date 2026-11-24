@@ -40,10 +40,23 @@ jest.mock('../shared/db/connection', () => ({
 jest.mock('../shared/invoice-series', () => ({ __esModule: true, invoiceSerieFor: jest.fn().mockResolvedValue('1') }))   // F2a A3 (D-F112): série da nota = leitura só no ERP
 
 // isola o motor (testado em tax-rules/tax-calc) — o billing orquestra
+// IBS.E9.P3 (D-IB134): mercadoria sem classificação de IBS/CBS não fatura. Os testes deste arquivo descrevem as peças de ICMS,
+// IPI e PIS/COFINS; a regra simulada ganha uma classificação vigente por padrão ("000001"), a menos que o teste diga a chave
+// `ibscbs` (o caso sem classificação e o de código fora de vigência estão em billing-ibscbs.test.ts).
 jest.mock('../shared/tax-rule', () => {
   const actual = jest.requireActual('../shared/tax-rule')
-  return { ...actual, findTaxRule: jest.fn(), loadPieces: jest.fn() }
+  const loadPiecesInner = jest.fn()
+  const loadPieces = async (...args: unknown[]) => {
+    const pieces = (await loadPiecesInner(...args)) ?? {}   // teste que não descreve as peças = regra sem as outras peças
+    return 'ibscbs' in pieces ? pieces : { ...pieces, ibscbs: { classificationCode: '000001' } }
+  }
+  return { ...actual, findTaxRule: jest.fn(), loadPieces, __loadPiecesInner: loadPiecesInner }
 })
+// a vigência do cClassTrib é do catálogo central (teste próprio: ibscbs-classification.test.ts) — aqui a fronteira é mockada
+jest.mock('../shared/ibscbs-classification', () => ({
+  ...jest.requireActual('../shared/ibscbs-classification'),
+  findClassificationAt: jest.fn().mockResolvedValue({ code: '000001', cst: '000' }),
+}))
 
 // isola os resolvers do catálogo MVA/FCP (testados em state-tax-rates.test)
 jest.mock('../modules/state-tax-rates/state-tax-rates.repository', () => ({
@@ -91,7 +104,7 @@ jest.mock('../shared/commission', () => ({
 
 const mockQuery = (pool as any).query as jest.Mock
 const mockFindTaxRule = (taxRule as any).findTaxRule as jest.Mock
-const mockLoadPieces = (taxRule as any).loadPieces as jest.Mock
+const mockLoadPieces = (taxRule as any).__loadPiecesInner as jest.Mock
 const mockTryAutoSettleByContract = (jest.requireMock('../shared/financial-settlement') as any).tryAutoSettleByContract as jest.Mock
 const mockOrderReturn = jest.requireMock('../shared/order-return') as any
 const mockCommission = jest.requireMock('../shared/commission') as any
@@ -1682,5 +1695,191 @@ describe('invoiceBodyDto — bloco checks (D9/onda do cheque)', () => {
     if (!r.success) {
       expect(r.error.issues[0].message).toBe('Máximo 2 casas decimais')
     }
+  })
+})
+
+// ---------------------------------------------------------------------
+// IBS.E9.P3 — classificação de IBS/CBS da mercadoria no faturamento (D-IB133, D-IB134, D-IB136)
+// ---------------------------------------------------------------------
+
+describe('IBS.E9.P3 — classificação de IBS/CBS da mercadoria', () => {
+  const mockFindClassificationAt = (jest.requireMock('../shared/ibscbs-classification') as any).findClassificationAt as jest.Mock
+  const mockIssueInvoice = (jest.requireMock('../shared/invoice') as any).issueInvoice as jest.Mock
+  const LINE = { code: '000001', cst: '000', applicable: false }   // vigente; SEM a marca do modelo 55 (D-IB136: ignorada)
+  const icms = { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0,
+    deferred: 'N', deferredAliq: null, highlight: 'N' }
+
+  beforeEach(() => {
+    mockFindClassificationAt.mockReset()
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, code: string) => (code === '999999' ? null : { ...LINE, code }))
+  })
+
+  /** Fila do /invoice até o laço dos itens: cada item com a SUA regra (id = 40 + id do item) e as peças dadas. */
+  function queueInvoice(items: any[], piecesByItem: Array<Record<string, unknown>>) {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'A',
+    }))])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({ id: 40 + i.id }))])   // findDeadRuleIds
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    for (const pieces of piecesByItem) mockLoadPieces.mockResolvedValueOnce(pieces)
+  }
+  function queueTxn() {
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])   // observações e aproximado
+    const conn = {
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])     // FOR UPDATE
+    mockNegotiationInTx(conn, null)
+    return conn
+  }
+  const ibscbsWrites = (conn: { query: jest.Mock }) =>
+    conn.query.mock.calls.filter(c => /INSERT INTO `setes_setes`\.tb_order_item_ibscbs\b/.test(String(c[0])))
+
+  it('D-IB134 — regra SEM a classificação: 422 BILLING_IBSCBS_CLASSIFICATION_REQUIRED com o item, e nada é gravado', async () => {
+    queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: undefined }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
+      fields: [{ field: 'item.1', message: expect.stringMatching(/regra de tributação 41 sem classificação de IBS\/CBS/) }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()   // nenhuma transação: nada gravado
+    expect(mockIssueInvoice).not.toHaveBeenCalled()
+    expect(mockFindClassificationAt).not.toHaveBeenCalled()      // sem código não há o que conferir
+  })
+
+  it('D-IB136 — código sem linha vigente na data de emissão: 422 IBSCBS_CLASSIFICATION_NOT_FOUND com o item', async () => {
+    queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: { classificationCode: '999999' } }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+      fields: [{ field: 'item.1', message: expect.stringMatching(/cClassTrib 999999 .* não está vigente em \d{4}-\d{2}-\d{2}/) }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+    // conferido no modelo 55, na data de emissão (a mesma que o faturamento usa para a nota)
+    const [, code, model, date] = mockFindClassificationAt.mock.calls[0]
+    expect([code, model]).toEqual(['999999', '55'])
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+
+  it('dois itens com problema: UM 422 com os dois no fields (código do primeiro); o /validate lista os dois sem lançar', async () => {
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    queueInvoice(items, [{ icms, ibscbs: undefined }, { icms, ibscbs: { classificationCode: '999999' } }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
+      fields: [expect.objectContaining({ field: 'item.1' }), expect.objectContaining({ field: 'item.2' })],
+    })
+
+    // /validate do mesmo pedido: vínculos manuais (o motor não roda), uma pendência por item, nenhum throw
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'M',
+    }))])
+    mockLoadPieces
+      .mockResolvedValueOnce({ icms, ibscbs: undefined })
+      .mockResolvedValueOnce({ icms, ibscbs: { classificationCode: '999999' } })
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues).toEqual([
+      { scope: 'item', itemId: 1, field: 'ibscbsClassification', message: expect.stringMatching(/sem classificação de IBS\/CBS/) },
+      { scope: 'item', itemId: 2, field: 'ibscbsClassification', message: expect.stringMatching(/cClassTrib 999999/) },
+    ])
+    expect(report.rulesManual).toBe(2)
+  })
+
+  it('mercadoria classificada fatura e grava UMA linha por item em tb_order_item_ibscbs, só com o código da regra', async () => {
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    queueInvoice(items, [{ icms, ibscbs: { classificationCode: '000001' } }, { icms, ibscbs: { classificationCode: '200034' } }])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+
+    const writes = ibscbsWrites(conn)
+    expect(writes.map(w => w[1])).toEqual([[10, 1, 1, '000001'], [10, 2, 1, '200034']])   // pedido, item, institution, código
+    const sql = String(writes[0][0]).replace(/\s+/g, ' ')
+    expect(sql).toContain('(tb_order_id, tb_order_item_id, tb_institution_id, terminal, classification_code, created_at, updated_at, deleted)')
+    expect(sql).toContain("VALUES (?, ?, ?, 0, ?, NOW(), NOW(), 'N')")
+    // refaturar regrava a MESMA linha (ressuscita a que o cancelamento apagou) — nunca duplica
+    expect(sql).toContain("ON DUPLICATE KEY UPDATE classification_code = VALUES(classification_code), deleted = 'N'")
+    // a vigência é conferida uma vez por código; a marca do modelo 55 (applicable: false) não recusa (D-IB136)
+    expect(mockFindClassificationAt).toHaveBeenCalledTimes(2)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  // ── gates do passo (socrático e adversarial) ──────────────────────────────────────────────────────────────────────
+  it.each([
+    ['compra', 'Purchase', () => { mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[{ entityId: 90 }]]) }, undefined],
+    ['ajuste', 'Adjust', () => { mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[{ entityId: 55, direction: 'S' }]]) }, { cfopId: '5949' }],
+  ])('D-IB134 vale para %s (A-IB134a): regra sem a classificação → 422, nada gravado', async (_name, kind, queueBranch, adjustment) => {
+    mockOrderBase()
+    ;(queueBranch as () => void)()
+    mockContext()
+    const items = [itemRow({ id: 1, kind })]
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind, taxRuleId: 41, cfopId: '5949', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 41 }]])
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce({ icms, ibscbs: undefined })
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, adjustment } as any)).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED', fields: [expect.objectContaining({ field: 'item.1' })],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it.each([[123456], [' 00001'], ['0000011'], ['００００００'], ['abcdef'], ['null']])(
+    'código %p gravado fora da API: recusado pelo FORMATO, sem consultar o catálogo e sem chegar ao INSERT', async badCode => {
+      queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: { classificationCode: badCode } }])
+      await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+        statusCode: 422, code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+      })
+      expect(mockFindClassificationAt).not.toHaveBeenCalled()
+      expect((pool as any).getConnection).not.toHaveBeenCalled()
+    })
+
+  it('catálogo que responde undefined não conta como vigente', async () => {
+    mockFindClassificationAt.mockResolvedValue(undefined)
+    queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: { classificationCode: '000001' } }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+    })
+  })
+
+  it('só o código CONFERIDO é gravado: produto com kind que o faturamento não trata como mercadoria não ganha linha', async () => {
+    // (item de produto com `kind` fora de Sale/Purchase/Adjust já escapava da regra de tributação antes deste passo — achado
+    //  registrado na árvore; aqui a garantia é que o registro do item nunca recebe um código que ninguém conferiu)
+    queueInvoice([itemRow({ id: 1, kind: 'Transfer' })], [{ icms, ibscbs: { classificationCode: '999999' } }])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(mockFindClassificationAt).not.toHaveBeenCalled()
+    expect(ibscbsWrites(conn)).toHaveLength(0)
+  })
+
+  it('/validate: regra automática sem o código do regime E sem classificação → as duas pendências na mesma volta', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()                                             // emitente no Regime Normal → exige CST
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[]])                     // nenhum vínculo
+    mockFindTaxRule.mockResolvedValueOnce({ id: 42, cfopId: '5102' })
+    mockLoadPieces.mockResolvedValueOnce({ icms: { ...icms, cstNr: null, csosn: '102' }, ibscbs: undefined })
+    mockQuery.mockResolvedValueOnce([{}])                     // clearAutoRuleLink
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues.map(i => i.field)).toEqual(['taxRule', 'ibscbsClassification'])
+    expect(report.rulesResolved).toBe(0)
+  })
+
+  it('a mesma regra em vários itens: uma consulta de vigência só', async () => {
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    queueInvoice(items, [{ icms, ibscbs: { classificationCode: '000001' } }, { icms, ibscbs: { classificationCode: '000001' } }])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(mockFindClassificationAt).toHaveBeenCalledTimes(1)
+    expect(ibscbsWrites(conn)).toHaveLength(2)
   })
 })

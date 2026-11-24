@@ -72,6 +72,13 @@ const iiDto = z.object({
   siscomexAliq: z.number().min(0).max(100).nullish(),
 })
 
+/** IBS.E9.P3 — classificação de IBS/CBS que a regra presume: só o cClassTrib (6 dígitos). O CST é o prefixo e não vem no
+ *  corpo; a existência e a vigência do código são conferidas no service (catálogo central).
+ *  D-IB137: na EDIÇÃO, chave `ibscbs` ausente = não mexe na classificação gravada; `null` = remove. */
+const ibscbsDto = z.object({
+  classificationCode: z.string().regex(/^[0-9]{6}$/, 'cClassTrib tem 6 dígitos'),
+})
+
 export const taxRuleBodyDto = z.object({
   selector:  selectorDto,
   icms:      icmsDto.nullish(),
@@ -83,8 +90,9 @@ export const taxRuleBodyDto = z.object({
                  return new Set(kinds).size === kinds.length
                }, { message: 'No máximo uma peça por kind (P/C)' }),
   ii:        iiDto.nullish(),
+  ibscbs:    ibscbsDto.nullish(),
 }).refine(
-  b => b.icms || b.ipi || (b.pisCofins?.length ?? 0) > 0 || b.ii,
+  b => b.icms || b.ipi || (b.pisCofins?.length ?? 0) > 0 || b.ii || b.ibscbs,
   { message: 'A regra precisa definir pelo menos um tributo (presença = incidência)',
     path: ['selector'] }
 )

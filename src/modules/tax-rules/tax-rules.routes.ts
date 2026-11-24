@@ -14,7 +14,7 @@ const router = Router()
  *     summary: Lista paginada de regras de tributação
  *     description: >-
  *       Seletor + flags de presença das peças (hasIcms/hasIcmsSt/hasIpi/
- *       hasPisCofins/hasIi). Filtro por NCM ou descrição do produto.
+ *       hasPisCofins/hasIi/hasIbscbs). Filtro por NCM ou descrição do produto.
  *       Envelope { ok, data, page, pageSize, total }.
  *     tags: [tax-rules]
  *     security: [{ BearerAuth: [] }]
@@ -190,6 +190,7 @@ router.get('/:id', controller.getById)
  *               ipi: { type: object }
  *               pisCofins: { type: array, items: { type: object } }
  *               ii: { type: object }
+ *               ibscbs: { type: object, description: "IBS.E9.P3 — { classificationCode } = cClassTrib de 6 dígitos que a regra presume (o CST é o prefixo e não vem no corpo); conta como peça. No PUT (D-IB137): chave AUSENTE = não mexe na classificação gravada; null = remove — diferente das irmãs, que são sempre substituídas. Regra sem classificação: a mercadoria que casar com ela NÃO fatura (D-IB134). 422 IBSCBS_CLASSIFICATION_NOT_FOUND quando o código não existe ou não está vigente hoje" }
  *     responses:
  *       201: { description: "{ ok, data: { id } }" }
  *       400: { description: Payload inválido }

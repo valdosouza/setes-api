@@ -24,7 +24,7 @@ function toListRow(row: any): TaxRuleListRow {
     cfopId: row.cfopId,
     hasIcms: !!Number(row.hasIcms), hasIcmsSt: !!Number(row.hasIcmsSt),
     hasIpi: !!Number(row.hasIpi), hasPisCofins: !!Number(row.hasPisCofins),
-    hasIi: !!Number(row.hasIi),
+    hasIi: !!Number(row.hasIi), hasIbscbs: !!Number(row.hasIbscbs),
   }
 }
 
@@ -55,6 +55,7 @@ export const TAX_RULE_SEARCH_CRITERIA: readonly SearchCriterion[] = [
   { key: 'hasIpi', kind: 'bool', labelKey: 'search.tax-rules.hasIpi', expr: 'ipi.id IS NOT NULL' },
   { key: 'hasPisCofins', kind: 'bool', labelKey: 'search.tax-rules.hasPisCofins', expr: 'pc.id IS NOT NULL' },
   { key: 'hasIi', kind: 'bool', labelKey: 'search.tax-rules.hasIi', expr: 'ii.id IS NOT NULL' },
+  { key: 'hasIbscbs', kind: 'bool', labelKey: 'search.tax-rules.hasIbscbs', expr: 'ibscbs.id IS NOT NULL' },
 ]
 
 export async function listTaxRules(
@@ -73,6 +74,7 @@ export async function listTaxRules(
      LEFT JOIN (SELECT pc0.id FROM \`${s}\`.tb_tax_rule_pis_cofins pc0 WHERE pc0.deleted = 'N' GROUP BY pc0.id) pc
        ON pc.id = r.id
      LEFT JOIN \`${s}\`.tb_tax_rule_ii ii ON ii.id = r.id AND ii.deleted = 'N'
+     LEFT JOIN \`${s}\`.tb_tax_rule_ibscbs ibscbs ON ibscbs.id = r.id AND ibscbs.deleted = 'N'
      WHERE r.deleted = 'N' AND r.tb_institution_id = ?
        AND (? IS NULL OR r.ncm LIKE ? OR p.description LIKE ?)${query.criteria.sql}`
   const params = [institutionId, like, like, like, ...query.criteria.params]
@@ -88,7 +90,8 @@ export async function listTaxRules(
             (icmsst.id IS NOT NULL) AS hasIcmsSt,
             (ipi.id IS NOT NULL)    AS hasIpi,
             (pc.id IS NOT NULL)     AS hasPisCofins,
-            (ii.id IS NOT NULL)     AS hasIi
+            (ii.id IS NOT NULL)     AS hasIi,
+            (ibscbs.id IS NOT NULL) AS hasIbscbs
      ${where}
      ORDER BY r.ncm DESC, r.id
      LIMIT ? OFFSET ?`,
@@ -130,6 +133,7 @@ function toPieces(input: TaxRuleBodyDto): TaxRulePieces {
     ipi:       input.ipi ?? undefined,
     pisCofins: input.pisCofins ?? undefined,
     ii:        input.ii ?? undefined,
+    ibscbs:    input.ibscbs,   // D-IB137: ausente (não mexe) ≠ null (remove) — a diferença é preservada até o savePieces
   } as TaxRulePieces
 }
 
@@ -226,7 +230,7 @@ export async function deleteTaxRuleCascade(
     }
     for (const t of ['tb_tax_rule_icms', 'tb_tax_rule_icms_st',
                      'tb_tax_rule_ipi', 'tb_tax_rule_pis_cofins',
-                     'tb_tax_rule_ii']) {
+                     'tb_tax_rule_ii', 'tb_tax_rule_ibscbs']) {
       await conn.query(
         `UPDATE \`${s}\`.${t} SET deleted = 'S', updated_at = NOW()
           WHERE id = ?`, [id])

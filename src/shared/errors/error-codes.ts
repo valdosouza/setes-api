@@ -34,6 +34,7 @@ export const ErrorCodes = {
   ORDER_NO_ITEMS:      'ORDER_NO_ITEMS',
   ORDER_ITEM_ID_DUPLICATED: 'ORDER_ITEM_ID_DUPLICATED',
   BILLING_TOTAL_INVALID: 'BILLING_TOTAL_INVALID',
+  BILLING_IBSCBS_CLASSIFICATION_REQUIRED: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
   PAYMENT_TYPE_UNAVAILABLE: 'PAYMENT_TYPE_UNAVAILABLE',
   // Financeiro
   TITLE_NOT_FOUND:     'TITLE_NOT_FOUND',
@@ -287,6 +288,7 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   ORDER_NO_ITEMS:      'Ordem sem itens — nada a faturar',
   ORDER_ITEM_ID_DUPLICATED: 'Pedido com número de item repetido entre mercadoria e serviço — o faturamento exige número único por pedido',
   BILLING_TOTAL_INVALID: 'Total da nota de mercadoria inválido pela fórmula oficial — confira os valores dos itens',
+  BILLING_IBSCBS_CLASSIFICATION_REQUIRED: 'Item de mercadoria cuja regra de tributação não tem a classificação de IBS/CBS (cClassTrib) — o faturamento exige a classificação desde já (D-IB134)',
   PAYMENT_TYPE_UNAVAILABLE: 'Forma de pagamento não vinculada/habilitada na institution',
   TITLE_NOT_FOUND:     'Título financeiro não encontrado',
   BANK_NOT_FOUND:      'Banco/conta bancária inexistente',

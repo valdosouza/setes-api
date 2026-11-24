@@ -2,7 +2,7 @@ import pool from '@shared/db/connection'
 import { assertSchema } from '@shared/db/schema'
 import { HttpError } from '@shared/errors/http-error'
 import {
-  TaxRulePieces, IcmsPiece, IcmsStPiece, IpiPiece, PisCofinsPiece, IiPiece,
+  TaxRulePieces, IcmsPiece, IcmsStPiece, IpiPiece, PisCofinsPiece, IiPiece, IbscbsPiece,
 } from './types'
 
 /**
@@ -48,6 +48,12 @@ export async function loadPieces(
             afrmm_aliq AS afrmmAliq, siscomex_aliq AS siscomexAliq
        FROM \`${s}\`.tb_tax_rule_ii WHERE id = ? AND deleted = 'N'`, [ruleId])
   if (ii[0]) pieces.ii = ii[0] as IiPiece
+
+  // IBS.E9.P3: a classificação de IBS/CBS que a regra presume (só o cClassTrib — o CST é o prefixo)
+  const [ibscbs] = await pool.query<any[]>(
+    `SELECT classification_code AS classificationCode
+       FROM \`${s}\`.tb_tax_rule_ibscbs WHERE id = ? AND deleted = 'N'`, [ruleId])
+  if (ibscbs[0]) pieces.ibscbs = { classificationCode: String(ibscbs[0].classificationCode) } as IbscbsPiece
 
   return pieces
 }
@@ -146,6 +152,25 @@ export async function savePieces(
       [ruleId, p.ii.iiAliq ?? null, p.ii.irpjAliq ?? null,
        p.ii.csllAliq ?? null, p.ii.afrmmAliq ?? null,
        p.ii.siscomexAliq ?? null])
+  }
+
+  // IBS.E9.P3 (D-IB137, Valdo 2026-11-24): a classificação de IBS/CBS NÃO segue o "soft-delete geral" das irmãs. Chave
+  // ausente = não mexe (a tela de regra que ainda não conhece o campo não apaga a classificação sem querer — a mercadoria
+  // daquela regra pararia de faturar, D-IB134); `null` explícito = remove; objeto = grava (o upsert ressuscita a linha).
+  if (p.ibscbs === null) {
+    await conn.query(
+      `UPDATE \`${s}\`.tb_tax_rule_ibscbs SET deleted = 'S', updated_at = NOW() WHERE id = ?`,
+      [ruleId])
+  }
+  if (p.ibscbs) {
+    await conn.query(
+      `INSERT INTO \`${s}\`.tb_tax_rule_ibscbs
+         (id, classification_code, created_at, updated_at, deleted)
+       VALUES (?, ?, NOW(), NOW(), 'N')
+       ON DUPLICATE KEY UPDATE
+         classification_code = VALUES(classification_code),
+         deleted = 'N', updated_at = NOW()`,
+      [ruleId, p.ibscbs.classificationCode])
   }
 }
 

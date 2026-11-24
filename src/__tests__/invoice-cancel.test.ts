@@ -264,7 +264,7 @@ describe('buildCancelPlan — bloqueios num único código (Q-P4)', () => {
       .mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
       .mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
       .mockResolvedValueOnce([[]])                          // Onda 3: última transmissão ao fisco
-    for (let i = 0; i < 11; i++) conn.query.mockResolvedValueOnce([{}])
+    for (let i = 0; i < 12; i++) conn.query.mockResolvedValueOnce([{}])   // IBS.E9.P3: 8 tabelas do item (+ tb_order_item_ibscbs)
     conn.query.mockResolvedValueOnce([[{ nextEvent: 2 }]]).mockResolvedValueOnce([{}])
     conn.query.mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}])
     const r = await cancelInvoice(conn as any, ...scope, { orderId: 100, reason: 'OS errada' })
@@ -315,8 +315,8 @@ describe('cancelInvoice — executar', () => {
       payments: [{ parcel: 1, event: 1, paidValue: '45.00' }],
       slips: [{ id: 10, lastKind: 'E' }, { id: 11, lastKind: 'C' }],
     })
-    // execução: financial S, bills S, 7 snapshots S, 2 ramos S, MAX(event)+1, INSERT C, nota S, pedido A
-    for (let i = 0; i < 9; i++) conn.query.mockResolvedValueOnce([{}])
+    // execução: financial S, bills S, 8 snapshots S (IBS.E9.P3: + tb_order_item_ibscbs), 2 ramos S, MAX(event)+1, INSERT C, nota S, pedido A
+    for (let i = 0; i < 10; i++) conn.query.mockResolvedValueOnce([{}])
     conn.query.mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}])
     conn.query.mockResolvedValueOnce([[{ nextEvent: 2 }]]).mockResolvedValueOnce([{}])
     conn.query.mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}])
@@ -343,6 +343,8 @@ describe('cancelInvoice — executar', () => {
     const after = sqls.slice(PLAN_QUERIES)
     expect(after[0]).toMatch(/UPDATE `setes_setes`.tb_financial SET deleted = 'S'/)
     expect(after[1]).toMatch(/tb_financial_bills SET deleted = 'S'/)
+    // IBS.E9.P3: a classificação de IBS/CBS que o item declara morre com os outros registros do item (soft-delete)
+    expect(after.some(q => /UPDATE `setes_setes`\.tb_order_item_ibscbs SET deleted = 'S'/.test(q))).toBe(true)
     expect(after.filter(q => /tb_order_item_(icms|icms_fcp|ipi|ii|pis|cofins|issqn) SET deleted = 'S'/.test(q))).toHaveLength(7)
     expect(after.some(q => /tb_invoice_merchandise SET deleted = 'S'/.test(q))).toBe(true)
     expect(after.some(q => /tb_invoice_service SET deleted = 'S'/.test(q))).toBe(true)
@@ -359,7 +361,7 @@ describe('cancelInvoice — executar', () => {
   it('sem cheque: não consulta o caixa (D16 só quando toca dinheiro)', async () => {
     const conn = fakeConn()
     planQueries(conn)
-    for (let i = 0; i < 11; i++) conn.query.mockResolvedValueOnce([{}])
+    for (let i = 0; i < 12; i++) conn.query.mockResolvedValueOnce([{}])   // IBS.E9.P3: 8 tabelas do item (+ tb_order_item_ibscbs)
     conn.query.mockResolvedValueOnce([[{ nextEvent: 2 }]]).mockResolvedValueOnce([{}])
     conn.query.mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}])
     const r = await cancelInvoice(conn as any, ...scope, { orderId: 100, reason: 'erro' })

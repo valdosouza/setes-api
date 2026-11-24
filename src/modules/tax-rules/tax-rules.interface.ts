@@ -26,6 +26,7 @@ export interface TaxRuleListRow {
   hasIpi: boolean
   hasPisCofins: boolean
   hasIi: boolean
+  hasIbscbs: boolean
 }
 
 /** GET :id — seletor + peças completas. */

@@ -27,6 +27,7 @@ import {
 import { assertSchema } from '@shared/db/schema'
 import { previewServiceIbscbs } from '@shared/service-ibscbs-declaration'
 import { previewIbscbsAssessmentRefusal } from '@shared/ibscbs-assessment'
+import { findClassificationAt } from '@shared/ibscbs-classification'
 import { CancelBody, CancelWaiverBody } from './billing.dto'
 import { resolveOrderParcels, MaterializedParcel as ResolvedParcel } from '@shared/order-installment'
 import { hasServiceOrderCycle } from '@shared/service-order'
@@ -168,6 +169,37 @@ function buildCriteria(
   }
 }
 
+/**
+ * IBS.E9.P3 — a classificação de IBS/CBS do item de MERCADORIA, conferida no faturamento e na validação pela MESMA função.
+ * D-IB134: regra sem a peça `ibscbs` não fatura, já em 2026 (não espera a data da obrigação). D-IB136: o código precisa existir
+ * e estar vigente na data de emissão — só isso; a marca "vale para a NF-e" (modelo 55) não é carregada no catálogo e o campo
+ * `applicable` da linha é ignorado de propósito (IBS.E9.P4). Uma consulta por código (as regras de um pedido são poucas).
+ */
+interface IbscbsItemProblem {
+  code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED' | 'IBSCBS_CLASSIFICATION_NOT_FOUND'
+  message: string
+}
+function ibscbsItemChecker(emissionDate: string) {
+  const vigentByCode = new Map<string, boolean>()
+  return async (itemId: number, ruleId: number, pieces: TaxRulePieces): Promise<IbscbsItemProblem | null> => {
+    const code = pieces.ibscbs?.classificationCode
+    if (!code) {
+      return { code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
+        message: `Item ${itemId}: regra de tributação ${ruleId} sem classificação de IBS/CBS (cClassTrib) — informe na regra` }
+    }
+    // gate adversarial: o código lido do banco é conferido no FORMATO antes de ir ao catálogo e ao registro do item
+    // (linha gravada fora da API — número, espaços, dígitos não ASCII — nunca chega ao INSERT)
+    let vigent = vigentByCode.get(code)
+    if (vigent === undefined) {
+      vigent = typeof code === 'string' && /^[0-9]{6}$/.test(code)
+        && (await findClassificationAt(pool, code, '55', emissionDate)) != null
+      vigentByCode.set(code, vigent)
+    }
+    return vigent ? null : { code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+      message: `Item ${itemId}: cClassTrib ${code} da regra de tributação ${ruleId} não existe no catálogo ou não está vigente em ${emissionDate}` }
+  }
+}
+
 export async function validateOrder(
   institution: InstitutionPayload, input: ValidateBodyDto
 ): Promise<ValidationReport> {
@@ -256,13 +288,22 @@ export async function validateOrder(
   // revisão. Sem o check, o cálculo despacharia pelo código restante e a
   // nota sairia no regime errado em silêncio.
   const validatePiecesCache = new Map<number, TaxRulePieces>()
-  const ruleMissingCode = async (ruleId: number): Promise<'csosn' | 'cst' | null> => {
+  const validatePiecesOf = async (ruleId: number): Promise<TaxRulePieces> => {
     let pieces = validatePiecesCache.get(ruleId)
     if (!pieces) {
       pieces = (await loadPieces(schemaName, ruleId)) ?? {}
       validatePiecesCache.set(ruleId, pieces)
     }
-    return icmsMissingCodeForCrt(pieces, ctx.emitterCrt)
+    return pieces
+  }
+  const ruleMissingCode = async (ruleId: number): Promise<'csosn' | 'cst' | null> =>
+    icmsMissingCodeForCrt(await validatePiecesOf(ruleId), ctx.emitterCrt)
+  // IBS.E9.P3: a mesma conferência do faturamento, na data que ele usaria — vira pendência da lista (a tela descobre aqui)
+  let ibscbsProblemOf: ReturnType<typeof ibscbsItemChecker> | null = null
+  const pushIbscbsIssue = async (itemId: number, ruleId: number): Promise<void> => {
+    ibscbsProblemOf ??= ibscbsItemChecker(await invoiceEmissionDateFor(schemaName, institutionId))
+    const problem = await ibscbsProblemOf(itemId, ruleId, await validatePiecesOf(ruleId))
+    if (problem) issues.push({ scope: 'item', itemId, field: 'ibscbsClassification', message: problem.message })
   }
   const missingCodeMessage = (itemId: number, ruleId: number, code: 'csosn' | 'cst') =>
     `Item ${itemId}: regra de tributação ${ruleId} sem ${code === 'csosn'
@@ -314,6 +355,7 @@ export async function validateOrder(
         issues.push({ scope: 'item', itemId: item.id, field: 'taxRule',
           message: missingCodeMessage(item.id, manual.taxRuleId, missing) })
       }
+      await pushIbscbsIssue(item.id, manual.taxRuleId)
       rulesManual++
       continue
     }
@@ -332,11 +374,14 @@ export async function validateOrder(
           schemaName, institutionId, input.orderId, item.id, item.kind)
         issues.push({ scope: 'item', itemId: item.id, field: 'taxRule',
           message: missingCodeMessage(item.id, rule.id, missing) })
+        await pushIbscbsIssue(item.id, rule.id)   // as duas pendências da regra saem na MESMA volta (gates do IBS.E9.P3)
         continue
       }
       await upsertItemRuleAuto(
         schemaName, institutionId, input.orderId, item.id, item.kind,
         rule.id, rule.cfopId)
+      // o vínculo fica (a regra casa); a classificação que falta é pendência própria, com o 422 próprio no /invoice
+      await pushIbscbsIssue(item.id, rule.id)
       rulesResolved++
     } else {
       // link 'A' de validação anterior NÃO sobrevive a um match que falhou
@@ -609,6 +654,12 @@ async function invoiceOrderOnce(
   const creditAliqPct = Number(
     (await getConfigContent(institution, 'billing', 'sn_credit_aliq')) ?? '0')
 
+  // Q-TZ1 + D-IB64/D-IB88: a data de emissão (= competência fiscal da declaração IBS/CBS = base dos vencimentos) pelo DONO ÚNICO.
+  // IBS.E9.P3: lida ANTES do laço dos itens — a classificação de IBS/CBS de cada item é conferida nessa data.
+  const baseDate = await invoiceEmissionDateFor(schemaName, institutionId)
+  const ibscbsProblemOf = ibscbsItemChecker(baseDate)
+  const ibscbsProblems: Array<{ itemId: number } & IbscbsItemProblem> = []
+
   const computed: ComputedItem[] = []
   const piecesCache = new Map<number, TaxRulePieces>() // N itens, poucas regras
   for (let idx = 0; idx < items.length; idx++) {
@@ -626,6 +677,14 @@ async function invoiceOrderOnce(
         pieces = await loadPieces(schemaName, link.taxRuleId)
         piecesCache.set(link.taxRuleId, pieces)
       }
+    }
+    // IBS.E9.P3 (D-IB134): mercadoria sem classificação de IBS/CBS vigente não fatura — junta todos os itens e recusa depois do laço
+    // `ibscbsChecked`: só o código CONFERIDO vai ao registro do item — o mesmo predicado decide a recusa e a gravação.
+    let ibscbsChecked: string | null = null
+    if (link && !isService && MERCHANDISE_KINDS.includes(item.kind)) {
+      const problem = await ibscbsProblemOf(item.id, link.taxRuleId, pieces)
+      if (problem) ibscbsProblems.push({ itemId: item.id, ...problem })
+      else ibscbsChecked = pieces.ibscbs!.classificationCode
     }
 
     // MVA/FCP por UF×NCM: ST pela UF do DESTINATÁRIO; NR (alíquota interna
@@ -703,6 +762,7 @@ async function invoiceOrderOnce(
       ipiCst: pieces.ipi?.cst ?? null,
       pisCst: pieces.pisCofins?.find(p => p.kind === 'P')?.cst ?? null,
       cofinsCst: pieces.pisCofins?.find(p => p.kind === 'C')?.cst ?? null,
+      ibscbsClassificationCode: ibscbsChecked,
       icmsExtras: {
         cst: pieces.icms?.cstNr ?? pieces.icms?.csosn ?? null,
         origin: item.origin,
@@ -723,6 +783,12 @@ async function invoiceOrderOnce(
           }
         : null,
     })
+  }
+
+  if (ibscbsProblems.length > 0) {
+    // um 422 só, com todos os itens; o código é o do primeiro problema (regra sem a peça × código fora de vigência)
+    throw new HttpError(422, 'Mercadoria sem classificação de IBS/CBS válida — revise as regras de tributação',
+      ibscbsProblems.map(p => ({ field: `item.${p.itemId}`, message: p.message })), ibscbsProblems[0].code)
   }
 
   // total da nota = mercadorias + frete + despesas + ST + IPI (itens com financeiro)
@@ -747,8 +813,7 @@ async function invoiceOrderOnce(
   // do faturamento, depois do FOR UPDATE em tb_order — um PUT da negociação
   // concorrente não pode mais deixar tb_financial nascendo de uma grade que
   // já não existe; o retry em deadlock re-resolve junto com a transação.
-  // Q-TZ1 + D-IB64/D-IB88: a data de emissão (= competência fiscal da declaração IBS/CBS = base dos vencimentos) pelo DONO ÚNICO
-  const baseDate = await invoiceEmissionDateFor(schemaName, institutionId)
+  // (a data de emissão — `baseDate` — já foi lida antes do laço dos itens: IBS.E9.P3)
   // D-NE215/D-NE27: o vNF do ramo de mercadoria pela fórmula oficial (peça do núcleo), datada pela emissão. NÃO muda o total da
   // nota nem a base do financeiro (acima) — esses seguem como eram.
   const merchandiseTotalValue = merchandiseInvoiceTotalOf(computed, baseDate)
