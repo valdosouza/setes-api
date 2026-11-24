@@ -32,6 +32,8 @@ export const ErrorCodes = {
   ORDER_INVOICED:      'ORDER_INVOICED',
   ORDER_CANCELLED:     'ORDER_CANCELLED',
   ORDER_NO_ITEMS:      'ORDER_NO_ITEMS',
+  ORDER_ITEM_ID_DUPLICATED: 'ORDER_ITEM_ID_DUPLICATED',
+  BILLING_TOTAL_INVALID: 'BILLING_TOTAL_INVALID',
   PAYMENT_TYPE_UNAVAILABLE: 'PAYMENT_TYPE_UNAVAILABLE',
   // Financeiro
   TITLE_NOT_FOUND:     'TITLE_NOT_FOUND',
@@ -152,6 +154,7 @@ export const ErrorCodes = {
   RETURN_INVALID:      'RETURN_INVALID',
   RETURN_REQUIRES_ENTRY: 'RETURN_REQUIRES_ENTRY',
   ORIGIN_NOT_INVOICED: 'ORIGIN_NOT_INVOICED',
+  RETURN_ORIGIN_LEGACY: 'RETURN_ORIGIN_LEGACY',
   NOTHING_RETURNABLE:  'NOTHING_RETURNABLE',
   // Cancelamento de nota (prompt_cancelamento_nota.md, 2026-09-08)
   INVOICE_NOT_FOUND:   'INVOICE_NOT_FOUND',
@@ -282,6 +285,8 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   ORDER_INVOICED:      'Ordem já faturada — alterações só via financeiro',
   ORDER_CANCELLED:     'Pedido cancelado com nota fiscal (D3/D4) — somente leitura; faturar de novo exige pedido/OS novo',
   ORDER_NO_ITEMS:      'Ordem sem itens — nada a faturar',
+  ORDER_ITEM_ID_DUPLICATED: 'Pedido com número de item repetido entre mercadoria e serviço — o faturamento exige número único por pedido',
+  BILLING_TOTAL_INVALID: 'Total da nota de mercadoria inválido pela fórmula oficial — confira os valores dos itens',
   PAYMENT_TYPE_UNAVAILABLE: 'Forma de pagamento não vinculada/habilitada na institution',
   TITLE_NOT_FOUND:     'Título financeiro não encontrado',
   BANK_NOT_FOUND:      'Banco/conta bancária inexistente',
@@ -393,6 +398,7 @@ export const ErrorCatalog: Record<ErrorCode, string> = {
   RETURN_INVALID:      'Devolução inválida contra o pedido original (saldo/itens/valores/âncora)',
   RETURN_REQUIRES_ENTRY: 'Devolução de mercadoria exige ajuste de ENTRADA',
   ORIGIN_NOT_INVOICED: 'Pedido de venda de origem ainda não foi faturado',
+  RETURN_ORIGIN_LEGACY: 'A venda de origem foi feita no ERP Desktop — a NF-e de devolução pela web ainda não atende vendas do Desktop',
   NOTHING_RETURNABLE:  'Pedido de origem sem saldo devolvível',
   INVOICE_NOT_FOUND:   'Nota fiscal não encontrada',
   INVOICE_NOT_CANCELLABLE: 'Nota não pode ser cancelada (pedido não faturado, nota já cancelada ou sincronizada da origem)',

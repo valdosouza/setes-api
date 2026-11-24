@@ -197,7 +197,7 @@ describe('buildReturnPlan', () => {
     })
   })
 
-  it('R1 socrático: itens IRMÃOS do mesmo plano acumulam — 7+7 contra venda de 10 reprova', async () => {
+  it('R1 socrático: itens IRMÃOS do mesmo plano acumulam — 7+7 contra venda de 10 reprova (sem a marcação de emitir a NF-e, como sempre)', async () => {
     mockOriginalSale({ items: [
       { id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 },
     ] })
@@ -206,7 +206,65 @@ describe('buildReturnPlan', () => {
       adjustItem({ id: 2, quantity: 7 }),
     ])
     expect(plan).toBeNull()
-    expect(issues.some(i => i.itemId === 2 && i.field === 'quantity')).toBe(true)
+    expect(issues).toEqual([expect.objectContaining({ itemId: 2, field: 'quantity' })])
+    // e 2+3 contra 10 (cabem somadas) seguem com o plano — nada muda sem a marcação
+    mockOriginalSale({ items: [
+      { id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 },
+    ] })
+    const fits = await buildReturnPlan('setes_setes', 1, 77, 55, [
+      adjustItem({ id: 1, quantity: 2 }), adjustItem({ id: 2, quantity: 3 }),
+    ])
+    expect(fits.issues).toEqual([])
+    expect(fits.plan!.links.map(l => l.itemId)).toEqual([1, 2])
+  })
+
+  it('D-NE112 + D-NE267 — COM a marcação (refuseRepeatedLines): linhas da devolução para o mesmo item da venda são RECUSADAS, todas — nunca somadas', async () => {
+    // 7+7 contra venda de 10 (somadas passariam do saldo) e 2+3 (somadas caberiam): recusa nos dois casos
+    for (const [q1, q2] of [[7, 7], [2, 3]]) {
+      mockOriginalSale({ items: [
+        { id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 },
+      ] })
+      const { issues, plan } = await buildReturnPlan('setes_setes', 1, 77, 55, [
+        adjustItem({ id: 1, quantity: q1 }),
+        adjustItem({ id: 2, quantity: q2 }),
+      ], { refuseRepeatedLines: true })
+      expect(plan).toBeNull()
+      expect(issues).toEqual([
+        { itemId: 1, field: 'product', message: expect.stringContaining('Mais de uma linha da devolução para o mesmo item da venda (produto 100)') },
+        { itemId: 2, field: 'product', message: expect.stringContaining('junte em uma só') },
+      ])
+    }
+  })
+
+  it('D-NE112 não pega a devolução normal: uma linha por produto segue com o plano (e o saldo continua conferido)', async () => {
+    mockOriginalSale({ items: [
+      { id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 },
+      { id: 34, kind: 'Sale', productId: 200, quantity: 4, unitValue: 20, priceListId: 2 },
+    ] })
+    const ok = await buildReturnPlan('setes_setes', 1, 77, 55, [
+      adjustItem({ id: 1, quantity: 7 }), adjustItem({ id: 2, productId: 200, quantity: 4, unitValue: 20 }),
+    ], { refuseRepeatedLines: true })
+    expect(ok.issues).toEqual([])
+    expect(ok.plan!.links.map(l => [l.itemId, l.itemIdOri])).toEqual([[1, 33], [2, 34]])
+    mockOriginalSale({ items: [
+      { id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 },
+    ] })
+    const over = await buildReturnPlan('setes_setes', 1, 77, 55, [adjustItem({ id: 1, quantity: 11 })], { refuseRepeatedLines: true })
+    expect(over.issues).toEqual([expect.objectContaining({ itemId: 1, field: 'quantity' })])
+  })
+
+  it('D-NE113 — originLegacy: venda vinda do ERP Desktop (tb_order.origin = D) é marcada; venda nascida na web (origem nula) e origem inexistente não', async () => {
+    mockOriginalSale({ sale: [{ salesmanId: 9, customerId: 55, status: 'F', origin: 'D' }], items: [{ id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 }] })
+    const legacy = await buildReturnPlan('setes_setes', 1, 77, 55, [adjustItem({ id: 1, quantity: 1 })])
+    expect(legacy.originLegacy).toBe(true)
+    expect(legacy.plan).not.toBeNull()          // o plano nasce igual: quem recusa é o faturamento COM a marcação de emitir a NF-e
+
+    mockOriginalSale({ items: [{ id: 33, kind: 'Sale', productId: 100, quantity: 10, unitValue: 50, priceListId: 2 }] })
+    expect((await buildReturnPlan('setes_setes', 1, 77, 55, [adjustItem({ id: 1, quantity: 1 })])).originLegacy).toBe(false)
+
+    mockQuery.mockResolvedValueOnce([[]])       // origem não existe
+    const missing = await buildReturnPlan('setes_setes', 1, 77, 55, [adjustItem({ id: 1, quantity: 1 })])
+    expect(missing).toMatchObject({ plan: null, originLegacy: false })
   })
 
   it('epsilon: soma fracionada em float não rejeita devolução total legítima (R5)', async () => {

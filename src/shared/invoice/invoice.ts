@@ -279,6 +279,13 @@ export interface IssuedInvoice {
  * (nunca uma nota errada). Aqui e não nos produtores: é o único ponto por onde TODA nota nasce (venda, conjugada, devolução,
  * OS, lote, revive) e vale para todo modelo (o título fica errado do mesmo jeito em SE/55/65).
  */
+/**
+ * D-NE246 (Valdo, 2026-11-23): o indicador de presença (`indPres`) da nota de mercadoria nasce 3 — operação não presencial,
+ * teleatendimento — enquanto o pedido não tiver o campo (D-NE233: o valor é do pedido quando ele passar a tê-lo). Acabou o 0 fixo.
+ * Com 3 o fisco exige o `indIntermed` (rej. 434 — RF-NFE-40): é de quem monta o XML (0, sem intermediador), não há coluna aqui.
+ */
+export const DEFAULT_PRESENCE_INDICATOR = 3
+
 export async function issueInvoice(
   conn: PoolConnection, s: string, institutionId: number, userId: number,
   input: IssueInvoiceInput
@@ -306,16 +313,16 @@ export async function issueInvoice(
           base_icms_st_value, icms_st_value, ipi_value, total_value,
           freight_value, insurance_value, expenses_value, discount_value,
           total_qtty, indPres, created_at, updated_at, deleted)
-       VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, NOW(), NOW(), 'N')
+       VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NOW(), NOW(), 'N')
        ON DUPLICATE KEY UPDATE
          base_icms_value = VALUES(base_icms_value), icms_value = VALUES(icms_value),
          base_icms_st_value = VALUES(base_icms_st_value), icms_st_value = VALUES(icms_st_value),
          ipi_value = VALUES(ipi_value), total_value = VALUES(total_value),
          freight_value = VALUES(freight_value), insurance_value = 0,
          expenses_value = VALUES(expenses_value), discount_value = VALUES(discount_value),
-         total_qtty = VALUES(total_qtty), indPres = 0, deleted = 'N', updated_at = NOW()`,
+         total_qtty = VALUES(total_qtty), indPres = VALUES(indPres), deleted = 'N', updated_at = NOW()`,
       [input.orderId, institutionId, m.baseIcms, m.icms, m.baseIcmsSt, m.icmsSt, m.ipi,
-       m.totalValue, m.freight, m.expenses, m.discount, m.quantity]
+       m.totalValue, m.freight, m.expenses, m.discount, m.quantity, DEFAULT_PRESENCE_INDICATOR]
     )
   } else {
     await conn.query(

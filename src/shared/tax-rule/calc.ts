@@ -42,16 +42,20 @@ export function calcMerchandiseValue(unitValue: number, quantity: number, discou
  * cada item arredondada PARA BAIXO em 2 casas; o ÚLTIMO item recebe o
  * resíduo (`total − soma dos anteriores`) — fecha o total exato por
  * construção (T2 do tributacao.md).
+ *
+ * D-FAT2 (Valdo, 2026-11-22): quando TODOS os itens valem zero (soma da base = 0) não há proporção — o total é dividido em
+ * PARTES IGUAIS, com o mesmo piso em 2 casas e o resíduo no último. Antes o total sumia (todos recebiam zero) e a nota não fechava.
  */
 export function prorateWithResidue(baseValues: number[], total: number): number[] {
   if (baseValues.length === 0) return []
   const sumBase = baseValues.reduce((a, b) => a + b, 0)
-  if (sumBase === 0 || total === 0) return baseValues.map(() => 0)
+  if (total === 0) return baseValues.map(() => 0)
+  const equalParts = sumBase === 0
 
   const shares: number[] = []
   let allocated = 0
   for (let i = 0; i < baseValues.length - 1; i++) {
-    const proportion = floorTo(baseValues[i] / sumBase, 4)
+    const proportion = equalParts ? 1 / baseValues.length : floorTo(baseValues[i] / sumBase, 4)
     const share = floorTo(total * proportion, 2)
     shares.push(share)
     allocated += share
@@ -175,7 +179,7 @@ export function calcIcms(
       const operationValue = round2(base * ctx.aliq / 100)
       const deferredValue = round2(operationValue * ctx.deferredAliqPct / 100)
       return {
-        base, aliq: ctx.aliq, operationValue, deferredValue,
+        base, aliq: ctx.aliq, operationValue, deferredValue, deferredAliq: ctx.deferredAliqPct,
         value: round2(operationValue - deferredValue),
       }
     }
@@ -246,8 +250,8 @@ export function calcIcmsCsosn(
     baseReductionPct: ctx.baseReduction,
   })
   const operationValue = round2(base * ctx.aliq / 100)
-  const deferredValue = ctx.destinationIsResale
-    ? round2(operationValue * ctx.deferredAliqPct / 100) : 0
+  const deferredAliq = ctx.destinationIsResale ? ctx.deferredAliqPct : 0   // a alíquota que o cálculo de fato usou
+  const deferredValue = round2(operationValue * deferredAliq / 100)
   const value = round2(operationValue - deferredValue)
 
   const creditAliq = round2(ctx.creditAliqPct ?? 0)
@@ -269,6 +273,7 @@ export function calcIcmsCsosn(
     value: group?.icms ? value : 0,
     operationValue,
     deferredValue,
+    deferredAliq,
     baseSt: group?.st ? baseSt : undefined,
     valueSt: group?.st ? valueSt : undefined,
     creditAliq: group?.credit ? creditAliq : undefined,

@@ -19,6 +19,10 @@ const adjustmentDto = z.object({
 export const validateBodyDto = z.object({
   orderId: z.number().int().positive(),
   adjustment: adjustmentDto.nullish(),
+  // D-NE267 (Valdo, 2026-11-23): a marcação "vou emitir a NF-e" da TELA do faturamento (web e mobile mandam o mesmo campo; como o
+  // checkbox de autorização do ERP Desktop). Não é configuração nem fato da nota — é intenção, por requisição: com ela o
+  // faturamento confere o conteúdo que a NF-e exige (D-NE260); sem ela, nada muda.
+  authorizeNfe: z.boolean().optional(),
 })
 export type ValidateBodyDto = z.infer<typeof validateBodyDto>
 
@@ -79,6 +83,10 @@ export const invoiceBodyDto = z.object({
   // carga real; true = MVA original do cadastro.
   useMvaOriginal: z.boolean().optional().default(false),
   adjustment: adjustmentDto.nullish(),
+  // D-NE267 (Valdo, 2026-11-23): a marcação "vou emitir a NF-e" da TELA do faturamento (web e mobile mandam o mesmo campo; como o
+  // checkbox de autorização do ERP Desktop). Não é configuração nem fato da nota — é intenção, por requisição: com ela o
+  // faturamento confere o conteúdo que a NF-e exige (D-NE260); sem ela, nada muda.
+  authorizeNfe: z.boolean().optional(),
   checks: z.array(checksByParcelDto).optional(),
 })
 export type InvoiceBodyDto = z.infer<typeof invoiceBodyDto>

@@ -4,7 +4,7 @@
 // derivado do último evento; E nasce no faturamento com snapshot; número
 // MAX+1 ignora canceladas; cabeçalho e ramos REVIVEM por upsert.
 import {
-  stateFromLastEvent, nextInvoiceNumber, issueInvoice, insertInvoiceEvent, lockInvoice,
+  stateFromLastEvent, nextInvoiceNumber, issueInvoice, DEFAULT_PRESENCE_INDICATOR, insertInvoiceEvent, lockInvoice,
 } from '../shared/invoice'
 import type { IbscbsDeclaration } from '../shared/ibscbs-classification'
 
@@ -67,6 +67,12 @@ describe('issueInvoice', () => {
     // D-IB64: dt_emission = a data que o PRODUTOR calculou UMA vez (hoje do estabelecimento — Q-TZ1), a mesma do evento E
     expect(conn.query.mock.calls[1][1]).toEqual([100, 1, 1, '7', '1', 209, '2026-09-08', 250, '55', 'obs'])
     expect(sqls[2]).toMatch(/tb_invoice_merchandise[\s\S]*ON DUPLICATE KEY UPDATE/)
+    // D-NE246: o indPres nasce 3 (teleatendimento) no INSERT e no revive — nenhum 0 fixo sobra no SQL
+    expect(DEFAULT_PRESENCE_INDICATOR).toBe(3)
+    expect(sqls[2]).toMatch(/indPres = VALUES\(indPres\)/)
+    expect(sqls[2]).not.toMatch(/indPres = 0/)
+    expect(sqls[2]).toMatch(/total_qtty, indPres, created_at[\s\S]*VALUES \(\?, \?, 0, \?, \?, \?, \?, \?, \?, \?, 0, \?, \?, \?, \?, NOW\(\)/)
+    expect((conn.query.mock.calls[2][1] as unknown[]).at(-1)).toBe(3)
     expect(sqls[3]).toMatch(/UPDATE `setes_setes`.tb_invoice_service SET deleted = 'S'/)
     expect(sqls[5]).toMatch(/INSERT INTO `setes_setes`.tb_invoice_event/)
     // snapshot do fato: número/série/modelo/valor + autor

@@ -2,7 +2,9 @@ import { PoolConnection } from 'mysql2/promise'
 import pool from '@shared/db/connection'
 import { HttpError } from '@shared/errors/http-error'
 import { assertSchema } from '@shared/db/schema'
-import { ItemTaxCalcResult } from '@shared/tax-rule'
+import {
+  ItemTaxCalcResult, IcmsCalcResult, FcpCalcResult, IpiCalcResult, PisCofinsCalcResult, IssqnCalcResult,
+} from '@shared/tax-rule'
 import {
   applyTitleAutomation, TitleAutomationConfig,
 } from '@shared/title-automation'
@@ -16,6 +18,7 @@ import { IssLiability } from '@shared/entity-tax/entity-tax.types'
 import { persistReturn, assertReturnableInTx, ReturnPlan } from '@shared/order-return'
 import logger from '@shared/logger/logger'
 import { assertOrderOpen } from '@shared/order'
+import { assertBillingInputsUnchanged } from './billing.input-print'
 import {
   OrderBranch, BillingOrderItem, ItemTaxRuleLink, InvoiceResult,
 } from './billing.interface'
@@ -420,6 +423,10 @@ export interface PersistInvoiceParams {
   serie: string
   items: ComputedItem[]
   totalValue: number
+  /** D-NE215/D-NE27: o vNF do ramo de mercadoria pela fórmula oficial (`billing.total.ts`); null = nota sem mercadoria. */
+  merchandiseTotalValue: number | null
+  /** D-FAT1: a impressão do que o pedido entregou ao cálculo (`billingInputPrint`), conferida sob a trava do pedido. */
+  inputPrint: string
   /** Resolução das parcelas DENTRO da transação, após o FOR UPDATE em tb_order
    *  (gate socrático 2026-09-06 — TOCTOU): composição @shared/order-installment
    *  + validação dos cheques; o retry em deadlock re-resolve junto. */
@@ -478,6 +485,11 @@ async function persistInvoiceOnce(
     // guarda travante — MESMO predicado do service (D3/D4: 'C' nunca refatura)
     assertOrderOpen(String(ord[0].status), params.orderId)
 
+    // D-FAT1: o que o pedido entregou ao cálculo (lido fora da transação) é CONFERIDO aqui, sob a trava do pedido — mudou no
+    // intervalo = `BillingInputChanged` (o service refaz leitura e cálculo); nunca imposto de item antigo na nota. Vale para todo
+    // faturamento (antes só havia conferência com item de serviço, e só de id|kind|produto).
+    await assertBillingInputsUnchanged(conn, s, institutionId, params.orderId, params.inputPrint)
+
     // parcelas resolvidas SOB o lock do pedido (negociação não pode mudar por baixo)
     const parcels = await params.resolveParcels(conn)
 
@@ -521,10 +533,9 @@ async function persistInvoiceOnce(
       if (params.returnPlan) {
         throw new Error(`Devolução ${params.orderId} com ramo de serviço — a invariante do saldo devolvível (assertReturnableInTx) não admite`)
       }
-      // D-IB71 no 2º produtor (gate socrático da IB-2): os itens foram lidos FORA da transação (billing.service) — relidos
-      // aqui SOB o lock do pedido (travante: não abre o retrato da transação); mudou no intervalo = 409, nunca uma
+      // D-IB71 no 2º produtor (gate socrático da IB-2): os itens foram lidos FORA da transação (billing.service) — a releitura
+      // SOB o lock do pedido é a do D-FAT1, no começo da transação (`assertBillingInputsUnchanged`, travante): nunca uma
       // declaração de serviços que já não estão no pedido (a OS relê em freezeServiceOrderIss).
-      await assertBillingItemsUnchanged(conn, s, institutionId, params.orderId, params.items)
     }
     const serviceDraft = serviceItems.length > 0
       ? buildServiceBranch(serviceItems, { liability: params.serviceLiability, descriptionFormat: params.dpsDescriptionFormat, noteText: params.noteText || null })
@@ -541,7 +552,7 @@ async function persistInvoiceOnce(
       noteText: params.noteText || null,
       merchandise: agg ? {
         baseIcms: agg.baseIcms, icms: agg.icms, baseIcmsSt: agg.baseIcmsSt, icmsSt: agg.icmsSt,
-        ipi: agg.ipi, totalValue: params.totalValue, freight: agg.freight,
+        ipi: agg.ipi, totalValue: params.merchandiseTotalValue ?? params.totalValue, freight: agg.freight,
         expenses: agg.expenses, discount: agg.discount, quantity: agg.quantity,
       } : null,
       service: serviceDraft && ibscbs ? { ...serviceDraft, ibscbs } : null,
@@ -657,27 +668,35 @@ async function persistInvoiceOnce(
   }
 }
 
-/** Os itens vivos do pedido (mesmo critério de `listBillingItems`: item vivo com produto) relidos SOB o lock do pedido,
- *  com trava compartilhada, = os que o faturamento calculou? Diferença = 409 RESOURCE_BUSY (tente de novo). */
-async function assertBillingItemsUnchanged(
-  conn: PoolConnection, s: string, institutionId: number, orderId: number, items: ComputedItem[]
-): Promise<void> {
-  const [rows] = await conn.query<any[]>(
-    `SELECT i.id, i.kind, i.tb_product_id AS productId
-       FROM \`${s}\`.tb_order_item i
-       JOIN \`${s}\`.tb_product p ON p.id = i.tb_product_id AND p.tb_institution_id = i.tb_institution_id
-      WHERE i.tb_order_id = ? AND i.tb_institution_id = ? AND i.terminal = 0 AND i.deleted = 'N'
-      LOCK IN SHARE MODE`,
-    [orderId, institutionId])
-  const key = (id: unknown, kind: unknown, productId: unknown) => `${Number(id)}|${String(kind)}|${Number(productId)}`
-  const now = new Set((rows as any[]).map(r => key(r.id, r.kind, r.productId)))
-  const computed = new Set(items.map(ci => key(ci.item.id, ci.item.kind, ci.item.productId)))
-  if (now.size !== computed.size || [...now].some(k => !computed.has(k))) {
-    throw new HttpError(409, `Itens do pedido ${orderId} mudaram durante o faturamento — tente de novo`, undefined, 'RESOURCE_BUSY')
-  }
-}
+/**
+ * D-NE248 (Valdo, 2026-11-23): o CÁLCULO do faturamento é registrado por item, inteiro — todo campo que o motor devolve tem coluna.
+ * Este mapa é a cerca: é tipado pelas chaves dos resultados do motor (`Record<keyof …>`), então campo ou tributo novo no motor
+ * quebra a compilação até alguém dizer onde ele é gravado. `null` = decidido que NÃO tem coluna, com o motivo ao lado.
+ */
+export const TAX_CALC_RECORD = Object.freeze({
+  tables: {
+    icms: 'tb_order_item_icms', fcp: 'tb_order_item_icms_fcp', fcpSt: 'tb_order_item_icms_fcp', ipi: 'tb_order_item_ipi',
+    pisCofins: 'tb_order_item_pis | tb_order_item_cofins', issqn: 'tb_order_item_issqn',
+    ii: null,   // o faturamento NÃO entrega `ii` ao motor (sem cálculo, sem registro) — nasce com o passo da importação
+  } satisfies Record<keyof ItemTaxCalcResult, string | null>,
+  icms: {
+    base: 'base_value', aliq: 'aliq', value: 'value', operationValue: 'operation_value', deferredValue: 'deferred_value',
+    deferredAliq: 'deferred_aliq', baseSt: 'base_value_st', valueSt: 'value_st', creditAliq: 'cred_calc_aliq',
+    creditValue: 'cred_expl_value',
+  } satisfies Record<keyof IcmsCalcResult, string>,
+  fcp: { base: 'vbcfcp', value: 'vfcp' } satisfies Record<keyof FcpCalcResult, string>,
+  fcpSt: { base: 'vbcfcpst', value: 'vfcpst' } satisfies Record<keyof FcpCalcResult, string>,
+  ipi: { base: 'base_value', aliq: 'aliq_value', value: 'tag_value' } satisfies Record<keyof IpiCalcResult, string>,
+  pisCofins: {
+    kind: null,   // não é valor: escolhe a tabela (P = tb_order_item_pis, C = tb_order_item_cofins)
+    base: 'base_value', aliq: 'aliq_value', value: 'tag_value',
+  } satisfies Record<keyof PisCofinsCalcResult, string | null>,
+  issqn: {
+    base: 'base_value', aliq: 'aliq_value', value: 'tag_value', withheldValue: 'withheld_value',
+  } satisfies Record<keyof IssqnCalcResult, string>,
+})
 
-/** Grava o resultado do cálculo nas tabelas de imposto por item do baseline. */
+/** Grava o resultado do cálculo nas tabelas de imposto por item do baseline (o mapa campo → coluna é `TAX_CALC_RECORD`). */
 async function persistItemTaxes(
   conn: PoolConnection, s: string, institutionId: number,
   orderId: number, ci: ComputedItem
@@ -694,8 +713,9 @@ async function persistItemTaxes(
           aliq_rd_base_st, base_value_st, aliq_st, value_st, mva,
           cred_calc_aliq, cred_expl_value,
           freight_value, insurance_Value, expenses_value, tb_cfop_id,
+          operation_value, deferred_aliq, deferred_value,
           created_at, updated_at, deleted)
-       VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NOW(), NOW(), 'N')
+       VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
        ON DUPLICATE KEY UPDATE
          cst = VALUES(cst), origem = VALUES(origem),
          determ_base = VALUES(determ_base), determ_base_st = VALUES(determ_base_st),
@@ -706,7 +726,9 @@ async function persistItemTaxes(
          aliq_st = VALUES(aliq_st), value_st = VALUES(value_st), mva = VALUES(mva),
          cred_calc_aliq = VALUES(cred_calc_aliq), cred_expl_value = VALUES(cred_expl_value),
          freight_value = VALUES(freight_value), expenses_value = VALUES(expenses_value),
-         tb_cfop_id = VALUES(tb_cfop_id), deleted = 'N', updated_at = NOW()`,
+         tb_cfop_id = VALUES(tb_cfop_id),
+         operation_value = VALUES(operation_value), deferred_aliq = VALUES(deferred_aliq),
+         deferred_value = VALUES(deferred_value), deleted = 'N', updated_at = NOW()`,
       [...key,
        ci.icmsExtras.cst, ci.icmsExtras.origin,
        ci.icmsExtras.modBc, ci.icmsExtras.modBcSt, ci.icmsExtras.dischargeId,
@@ -717,7 +739,9 @@ async function persistItemTaxes(
        t.icms?.baseSt !== undefined ? ci.icmsExtras.stAliq : null,
        t.icms?.valueSt ?? null, ci.icmsExtras.mvaPct,
        t.icms?.creditAliq ?? null, t.icms?.creditValue ?? null,
-       ci.freightShare, ci.expensesShare, ci.link.cfopId]
+       ci.freightShare, ci.expensesShare, ci.link.cfopId,
+       // D-NE248 (migration 082): o que o motor calculou e antes era descartado — NULL = o motor não calculou (nunca zero)
+       t.icms?.operationValue ?? null, t.icms?.deferredAliq ?? null, t.icms?.deferredValue ?? null]
     )
   }
 
@@ -745,13 +769,13 @@ async function persistItemTaxes(
     await conn.query(
       `INSERT INTO \`${s}\`.tb_order_item_ipi
          (tb_order_id, tb_order_item_id, tb_institution_id, terminal,
-          cst, class_frame_code, base_value, aliq_value,
+          cst, class_frame_code, base_value, aliq_value, tag_value,
           created_at, updated_at, deleted)
-       VALUES (?, ?, ?, 0, ?, '999', ?, ?, NOW(), NOW(), 'N')
+       VALUES (?, ?, ?, 0, ?, '999', ?, ?, ?, NOW(), NOW(), 'N')
        ON DUPLICATE KEY UPDATE
          cst = VALUES(cst), base_value = VALUES(base_value),
-         aliq_value = VALUES(aliq_value), deleted = 'N', updated_at = NOW()`,
-      [...key, ci.ipiCst, t.ipi.base, t.ipi.aliq]
+         aliq_value = VALUES(aliq_value), tag_value = VALUES(tag_value), deleted = 'N', updated_at = NOW()`,
+      [...key, ci.ipiCst, t.ipi.base, t.ipi.aliq, t.ipi.value]   // D-NE248 (082): o VALOR do IPI passa a ser registrado
     )
   }
 
@@ -789,15 +813,16 @@ async function persistItemTaxes(
     await conn.query(
       `INSERT INTO \`${s}\`.tb_order_item_issqn
          (tb_order_id, tb_order_item_id, tb_institution_id, terminal,
-          base_value, aliq_value, tag_value, listservice, tax_code,
+          base_value, aliq_value, tag_value, listservice, tax_code, withheld_value,
           created_at, updated_at, deleted)
-       VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
+       VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
        ON DUPLICATE KEY UPDATE
          base_value = VALUES(base_value), aliq_value = VALUES(aliq_value),
          tag_value = VALUES(tag_value), listservice = VALUES(listservice),
-         tax_code = VALUES(tax_code), deleted = 'N', updated_at = NOW()`,
+         tax_code = VALUES(tax_code), withheld_value = VALUES(withheld_value), deleted = 'N', updated_at = NOW()`,
       [...key, t.issqn.base, t.issqn.aliq, t.issqn.value,
-       ci.issqnExtras?.serviceListId ?? null, ci.issqnExtras?.municipalCode ?? null]
+       ci.issqnExtras?.serviceListId ?? null, ci.issqnExtras?.municipalCode ?? null,
+       t.issqn.withheldValue]   // D-NE248 (082): o ISS retido calculado passa a ser registrado
     )
   }
 }

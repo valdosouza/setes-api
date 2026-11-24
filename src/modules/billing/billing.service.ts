@@ -59,6 +59,9 @@ import {
   ValidationReport, ValidationIssue, InvoiceResult, BillingOrderItem,
 } from './billing.interface'
 import { ValidateBodyDto, InvoiceBodyDto } from './billing.dto'
+import { merchandiseInvoiceTotalOf } from './billing.total'
+import { invoiceContentIssues, loadInvoiceContent, noteTextIssue } from './billing.content'
+import { billingInputPrint, BillingInputChanged } from './billing.input-print'
 
 /**
  * Orquestração do faturamento (W2 Onda 3, rodada R4):
@@ -215,12 +218,17 @@ export async function validateOrder(
     } else if (anchor) {
       // devolução de MERCADORIA — item de serviço fica fora do plano
       // (achado LOW do gate adversarial 2026-08-24)
-      const { issues: retIssues } = await buildReturnPlan(
+      const { issues: retIssues, originLegacy } = await buildReturnPlan(
         schemaName, institutionId, anchor.orderIdOri,
         branch.recipientEntityId,
         items.filter(i => i.productKind !== 'S')
           .map(i => ({ id: i.id, kind: i.kind, productId: i.productId,
-            quantity: i.quantity, unitValue: i.unitValue })))
+            quantity: i.quantity, unitValue: i.unitValue })),
+        { refuseRepeatedLines: input.authorizeNfe === true })
+      // D-NE113 + D-NE267: com a marcação de emitir a NF-e, devolução de venda do ERP Desktop é recusada (sem ela, segue)
+      if (input.authorizeNfe === true && originLegacy) {
+        issues.push({ scope: 'order', field: 'returnedOrderId', message: `A venda ${anchor.orderIdOri} foi feita no ERP Desktop — a NF-e de devolução pela web ainda não atende vendas do Desktop` })
+      }
       issues.push(...retIssues.map(ri => ({
         scope: (ri.itemId !== undefined ? 'item' : 'order') as 'item' | 'order',
         itemId: ri.itemId, field: ri.field, message: ri.message,
@@ -346,6 +354,14 @@ export async function validateOrder(
     }
   }
 
+  // D-NE260 + D-NE267: com a marcação de emitir a NF-e (a opção da TELA do faturamento, como no ERP Desktop) e nota com
+  // mercadoria, a conferência do conteúdo que a NF-e exige entra na lista — destinatário e itens, com o campo. Sem a marcação,
+  // nenhuma leitura nova. (O texto da nota só existe no /invoice: é conferido lá.)
+  if (input.authorizeNfe === true && items.some(i => i.productKind !== 'S')) {
+    issues.push(...invoiceContentIssues(
+      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, items)))
+  }
+
   // Q-A8: condições de cobrança são pré-requisito do faturamento — a tela
   // descobre AQUI, não no 422 do invoice.
   if (!(await hasOrderBilling(schemaName, institutionId, input.orderId))) {
@@ -369,7 +385,41 @@ export async function validateOrder(
   return { orderId: input.orderId, branch: branch.branch, issues, rulesResolved, rulesManual, ibscbs }
 }
 
+/** D-NE220: os ids de item que aparecem mais de uma vez no pedido (em `kind` diferentes), em ordem crescente. */
+export function duplicatedItemIds(items: ReadonlyArray<{ id: number }>): number[] {
+  const seen = new Set<number>()
+  const repeated = new Set<number>()
+  for (const it of items) {
+    const id = Number(it.id)
+    if (seen.has(id)) repeated.add(id)
+    seen.add(id)
+  }
+  return [...repeated].sort((a, b) => a - b)
+}
+
+/** D-FAT1: quantas vezes o faturamento refaz leitura + cálculo quando o pedido muda antes da trava. */
+export const BILLING_INPUT_ATTEMPTS = 3
+
+/**
+ * D-FAT1: fatura; se o pedido mudou entre a leitura e a trava (`BillingInputChanged`, da transação — nada foi gravado), refaz a
+ * leitura e o cálculo inteiros. Depois de `BILLING_INPUT_ATTEMPTS` tentativas = 409 RESOURCE_BUSY (alguém está editando o pedido).
+ */
 export async function invoiceOrder(
+  institution: InstitutionPayload, input: InvoiceBodyDto
+): Promise<InvoiceResult> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await invoiceOrderOnce(institution, input)
+    } catch (err) {
+      if (!(err instanceof BillingInputChanged)) throw err
+      if (attempt >= BILLING_INPUT_ATTEMPTS) {
+        throw new HttpError(409, `Itens do pedido ${input.orderId} mudaram durante o faturamento — tente de novo`, undefined, 'RESOURCE_BUSY')
+      }
+    }
+  }
+}
+
+async function invoiceOrderOnce(
   institution: InstitutionPayload, input: InvoiceBodyDto
 ): Promise<InvoiceResult> {
   const { schemaName, institutionId } = institution
@@ -405,6 +455,15 @@ export async function invoiceOrder(
     throw new HttpError(422, 'Ordem sem itens — nada a faturar',
       [{ field: 'items', message: 'Inclua ao menos um item' }], 'ORDER_NO_ITEMS')
   }
+  // D-NE220: o id do item é ÚNICO por pedido entre os `kind` — as tabelas de imposto por item e o nItem da NF-e usam só o id. A PK
+  // de tb_order_item aceita o mesmo id com `kind` diferente (linhas do sincronizador), então a cerca é aqui: recusa, nunca imposto
+  // de um item gravado por cima do outro. (Sem índice único: UNIQUE + upsert trocaria a linha errada — PADROES_BANCO §9, regra 10.)
+  const repeatedIds = duplicatedItemIds(items)
+  if (repeatedIds.length > 0) {
+    throw new HttpError(422, 'Pedido com número de item repetido — corrija os itens antes de faturar',
+      repeatedIds.map(id => ({ field: `item.${id}`, message: `O item ${id} aparece mais de uma vez no pedido` })),
+      'ORDER_ITEM_ID_DUPLICATED')
+  }
 
   const links = await getItemRuleLinks(schemaName, institutionId, input.orderId)
   const linkByItem = new Map(links.map(l => [`${l.orderItemId}|${l.kind}`, l]))
@@ -417,8 +476,10 @@ export async function invoiceOrder(
   // gate duro de NCM/regra da mercadoria.
   const serviceItems = items.filter(i => i.productKind === 'S')
   const serviceRuleByItem = new Map<string, ServiceTaxRuleResolved>()
+  let serviceLinksRead: Awaited<ReturnType<typeof getItemServiceRuleLinks>> = []   // D-FAT1: entra na impressão do pedido
   if (serviceItems.length > 0) {
     const serviceLinks = await getItemServiceRuleLinks(schemaName, institutionId, input.orderId)
+    serviceLinksRead = serviceLinks
     const serviceLinkByItem = new Map(serviceLinks.map(l => [`${l.orderItemId}|${l.kind}`, l]))
     const missingService = serviceItems.filter(i => !serviceLinkByItem.has(`${i.id}|${i.kind}`))
     if (missingService.length > 0) {
@@ -499,12 +560,19 @@ export async function invoiceOrder(
           [{ field: 'adjustment', message: 'Sentido do ajuste deve ser E' }],
           'RETURN_REQUIRES_ENTRY')
       }
-      const { issues: retIssues, plan } = await buildReturnPlan(
+      const { issues: retIssues, plan, originLegacy } = await buildReturnPlan(
         schemaName, institutionId, anchor.orderIdOri,
         branch.recipientEntityId,
         items.filter(i => i.productKind !== 'S')
           .map(i => ({ id: i.id, kind: i.kind, productId: i.productId,
-            quantity: i.quantity, unitValue: i.unitValue })))
+            quantity: i.quantity, unitValue: i.unitValue })),
+        { refuseRepeatedLines: input.authorizeNfe === true })
+      // D-NE113 + D-NE267: com a marcação de emitir a NF-e, devolução de venda do ERP Desktop é recusada — ANTES das issues do
+      // plano (a causa é a origem, não o saldo). Sem a marcação, a devolução de venda do Desktop segue como sempre foi.
+      if (input.authorizeNfe === true && originLegacy) {
+        throw new HttpError(422, `A venda ${anchor.orderIdOri} foi feita no ERP Desktop — a NF-e de devolução pela web ainda não atende vendas do Desktop`,
+          [{ field: 'returnedOrderId', message: 'Venda feita no ERP Desktop' }], 'RETURN_ORIGIN_LEGACY')
+      }
       if (retIssues.length > 0 || !plan) {
         throw new HttpError(422, 'Devolução inválida contra o pedido original',
           retIssues.map(ri => ({
@@ -513,6 +581,19 @@ export async function invoiceOrder(
           })), 'RETURN_INVALID')
       }
       returnPlan = plan
+    }
+  }
+
+  // D-NE260 + D-NE267: a conferência do conteúdo é REFEITA aqui com a marcação que ESTE pedido de faturamento traz (a marcação não
+  // é gravada; o /validate anterior não vale como garantia — padrão R5-Q3). Pendência = 422, antes de qualquer gravação —
+  // e DEPOIS da devolução: na venda do ERP Desktop a causa a dizer é a origem (`RETURN_ORIGIN_LEGACY`), não o cadastro.
+  if (input.authorizeNfe === true && items.some(i => i.productKind !== 'S')) {
+    const content = invoiceContentIssues(
+      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, items))
+    if (content.length > 0) {
+      throw new HttpError(422, 'Dados que a NF-e exige estão incompletos — corrija o cadastro antes de faturar',
+        content.map(i => ({ field: i.itemId !== undefined ? `item.${i.itemId}` : i.field ?? i.scope, message: i.message })),
+        'REQUIRES_VALIDATION')
     }
   }
 
@@ -668,6 +749,9 @@ export async function invoiceOrder(
   // já não existe; o retry em deadlock re-resolve junto com a transação.
   // Q-TZ1 + D-IB64/D-IB88: a data de emissão (= competência fiscal da declaração IBS/CBS = base dos vencimentos) pelo DONO ÚNICO
   const baseDate = await invoiceEmissionDateFor(schemaName, institutionId)
+  // D-NE215/D-NE27: o vNF do ramo de mercadoria pela fórmula oficial (peça do núcleo), datada pela emissão. NÃO muda o total da
+  // nota nem a base do financeiro (acima) — esses seguem como eram.
+  const merchandiseTotalValue = merchandiseInvoiceTotalOf(computed, baseDate)
   const resolveParcels = async (db: Queryable): Promise<ResolvedParcel[]> => {
     const resolved = await resolveOrderParcels(db, schemaName, institutionId, input.orderId,
       { noteBase: financialBase, baseDate })
@@ -769,6 +853,14 @@ export async function invoiceOrder(
 
   const noteText = [...generalNotes, ...regimeTexts, issqnText, approxTaxText]
     .filter((t): t is string => !!t).join('\n')
+  // D-NE49 + D-NE267: com a marcação, o texto da nota acima do tamanho da NF-e é recusado com o campo — nunca truncado
+  if (input.authorizeNfe === true && hasMerchandise) {
+    const tooLong = noteTextIssue(noteText)
+    if (tooLong) {
+      throw new HttpError(422, 'Dados que a NF-e exige estão incompletos — corrija antes de faturar',
+        [{ field: tooLong.field ?? 'note', message: tooLong.message }], 'REQUIRES_VALIDATION')
+    }
+  }
 
   // LOW-9 (seed 58): como o xDescServ do DPS é montado — 'I' itens · 'O' observação
   // da nota · 'A' ambos. Lido ANTES da transação (mesma regra da config acima).
@@ -850,6 +942,8 @@ export async function invoiceOrder(
     model, serie,
     items: computed,
     totalValue,
+    merchandiseTotalValue,
+    inputPrint: billingInputPrint({ items, links, serviceLinks: serviceLinksRead, freight, expenses }),
     resolveParcels,
     checks: input.checks ?? [],
     financialKind: polarity.kind,

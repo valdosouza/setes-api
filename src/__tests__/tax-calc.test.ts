@@ -34,6 +34,21 @@ describe('prorateWithResidue (T2 — rateio com resíduo no último)', () => {
 
   it('total zero devolve tudo zerado', () => {
     expect(prorateWithResidue([100, 200], 0)).toEqual([0, 0])
+    expect(prorateWithResidue([0, 0], 0)).toEqual([0, 0])
+  })
+
+  it('D-FAT2 — todos os itens em valor zero: o total é dividido em partes iguais, com o resíduo no último (antes sumia)', () => {
+    expect(prorateWithResidue([0, 0, 0], 10)).toEqual([3.33, 3.33, 3.34])
+    expect(prorateWithResidue([0, 0], 10)).toEqual([5, 5])
+    expect(prorateWithResidue([0], 7.77)).toEqual([7.77])
+    const seven = prorateWithResidue([0, 0, 0, 0, 0, 0, 0], 100)
+    expect(seven.slice(0, 6)).toEqual([14.28, 14.28, 14.28, 14.28, 14.28, 14.28])
+    expect(seven.reduce((a, b) => a + Math.round(b * 100), 0)).toBe(10000)   // fecha em centavos
+  })
+
+  it('D-FAT2 não muda o rateio quando algum item tem valor (item zero segue sem cota)', () => {
+    expect(prorateWithResidue([0, 100], 10)).toEqual([0, 10])
+    expect(prorateWithResidue([100, 0], 10)).toEqual([10, 0])
   })
 })
 

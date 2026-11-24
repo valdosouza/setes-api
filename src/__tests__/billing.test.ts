@@ -5,9 +5,11 @@
 import pool from '../shared/db/connection'
 import { parseCrt, parseDeadline, addDays, adjustMva, deriveProductSt } from '../modules/billing/billing.context'
 import * as repo from '../modules/billing/billing.repository'
-import { validateOrder, invoiceOrder } from '../modules/billing/billing.service'
+import { validateOrder, invoiceOrder, duplicatedItemIds, BILLING_INPUT_ATTEMPTS } from '../modules/billing/billing.service'
 import { invoiceBodyDto } from '../modules/billing/billing.dto'
 import * as taxRule from '../shared/tax-rule'
+import * as fs from 'fs'
+import * as path from 'path'
 
 // IB-2 (D-IB71): a declaração IBS/CBS tem teste próprio (ibscbs-declaration.test.ts) — aqui a fronteira é mockada
 // D-IB99/D-IB100: a opção de apuração do IBS/CBS tem teste próprio (ibscbs-assessment.test.ts) — aqui a fronteira é mockada
@@ -19,6 +21,17 @@ jest.mock('../shared/service-ibscbs-declaration', () => ({
   __esModule: true,
   declareServiceIbscbs: jest.fn().mockResolvedValue({ group: null, nbs: null, omitted: ['not-classified'] }),
   previewServiceIbscbs: jest.fn().mockResolvedValue(null),
+}))
+// D-FAT1: a conferência do pedido sob a trava tem teste próprio (billing-input-print.test.ts) — aqui a fronteira é mockada
+jest.mock('../modules/billing/billing.input-print', () => ({
+  ...jest.requireActual('../modules/billing/billing.input-print'),
+  assertBillingInputsUnchanged: jest.fn().mockResolvedValue(undefined),
+}))
+// NFE.E1.P2 (D-NE260/D-NE267): a LEITURA do conteúdo da NF-e tem teste próprio (billing-content.test.ts) — aqui a fronteira é
+// mockada (as regras puras são as reais); só é chamada com a marcação `authorizeNfe`
+jest.mock('../modules/billing/billing.content', () => ({
+  ...jest.requireActual('../modules/billing/billing.content'),
+  loadInvoiceContent: jest.fn(),
 }))
 jest.mock('../shared/db/connection', () => ({
   __esModule: true,
@@ -82,6 +95,18 @@ const mockLoadPieces = (taxRule as any).loadPieces as jest.Mock
 const mockTryAutoSettleByContract = (jest.requireMock('../shared/financial-settlement') as any).tryAutoSettleByContract as jest.Mock
 const mockOrderReturn = jest.requireMock('../shared/order-return') as any
 const mockCommission = jest.requireMock('../shared/commission') as any
+const mockInputPrint = jest.requireMock('../modules/billing/billing.input-print') as any
+const mockContent = jest.requireMock('../modules/billing/billing.content') as any
+/** Um conteúdo que a NF-e aceita (destinatário PJ contribuinte e um item com unidade). */
+const goodContent = (over: { recipient?: any; items?: any[] } = {}) => ({
+  recipient: {
+    personType: 'J', name: 'Cliente Bom Ltda', document: '11.222.333/0001-81', stateRegistration: '123.456.789',
+    stateRegistrationIndicator: '1',
+    address: { street: 'Rua das Flores', number: '100', complement: null, neighborhood: 'Centro', zipCode: '80000-000', cityCode: '4106902', state: 'PR' },
+    phone: '(41) 3333-4444', email: 'nfe@cliente.com.br', ...over.recipient,
+  },
+  items: over.items ?? [{ itemId: 1, description: 'Peça usinada', ncm: '84713012', unit: 'UN', taxableUnit: 'UN', gtin: null }],
+})
 
 const inst = { institutionId: 1, userId: 7, role: 'admin', schemaName: 'setes_setes' }
 
@@ -183,6 +208,7 @@ function mockBranchSale(entityId = 55) {
 function mockContext(over: {
   emitterRegime?: string; recipientRegime?: string | null
   emitterState?: number | null; recipientState?: number | null
+  recipientIssRetido?: 'S' | 'N'
 } = {}) {
   // loadContext: getEntityTax(emitter) → getEntityLocation(emitter)
   //            → getEntityTax(recipient) → getEntityLocation(recipient)
@@ -197,7 +223,7 @@ function mockContext(over: {
   mockQuery.mockResolvedValueOnce(
     over.recipientRegime === null ? [[]] : [[{
       consumer: 'N', taxRegime: over.recipientRegime ?? '3 - Regime Normal',
-      byPassSt: 'N', indIeDest: '1', issRetido: 'N',
+      byPassSt: 'N', indIeDest: '1', issRetido: over.recipientIssRetido ?? 'N',
     }]])
   mockQuery.mockResolvedValueOnce([[{
     stateId: over.recipientState === undefined ? 41 : over.recipientState,
@@ -326,6 +352,57 @@ describe('validateOrder', () => {
     const report = await validateOrder(inst as any, { orderId: 10 })
     expect(report.issues).toEqual([{ scope: 'ibscbs', field: 'ibscbs', message: refusal.message }])
     expect(assessment.previewIbscbsAssessmentRefusal.mock.calls[0][3]).toBe('2027-01-05')   // a MESMA competência da prévia
+  })
+
+  // ── NFE.E1.P2.T1 (D-NE260, D-NE267): conferência do conteúdo só com a marcação de emitir a NF-e ───────────────────────
+  const queueManualItem = () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{
+      orderItemId: 1, kind: 'Sale', taxRuleId: 99, cfopId: '5405', setFinancial: 'S', origin: 'M',
+    }]])
+  }
+
+  it('D-NE267 — /validate SEM a marcação: o conteúdo nem é lido e a lista é a de sempre', async () => {
+    queueManualItem()
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+    expect(report.issues).toEqual([])
+    queueManualItem()
+    await validateOrder(inst as any, { orderId: 10, authorizeNfe: false })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+  })
+
+  it('D-NE260 — /validate COM a marcação: as pendências do conteúdo entram na lista, com o campo (destinatário sem CEP e item sem unidade)', async () => {
+    queueManualItem()
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent({
+      recipient: { address: { street: 'Rua das Flores', number: '100', complement: null, neighborhood: 'Centro', zipCode: null, cityCode: '4106902', state: 'PR' } },
+      items: [{ itemId: 1, description: 'Peça usinada', ncm: '84713012', unit: null, taxableUnit: null, gtin: null }],
+    }))
+    const report = await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })
+    expect(mockContent.loadInvoiceContent).toHaveBeenCalledWith('setes_setes', 1, 55, [expect.objectContaining({ id: 1, productId: 100 })])
+    expect(report.issues).toEqual([
+      { scope: 'recipient', field: 'zipCode', message: 'CEP do destinatário não informado' },
+      { scope: 'item', itemId: 1, field: 'unit', message: 'Item 1: produto sem unidade de venda cadastrada' },
+    ])
+  })
+
+  it('D-NE260 — /validate COM a marcação e conteúdo bom: nenhuma pendência nova', async () => {
+    queueManualItem()
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent())
+    expect((await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })).issues).toEqual([])
+  })
+
+  it('D-NE267 — pedido SÓ de serviço com a marcação: o conteúdo da NF-e não é conferido (não há nota de mercadoria)', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, productKind: 'S' })]])
+    mockQuery.mockResolvedValueOnce([[]])
+    await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
   })
 
   it('linha manual (M) é respeitada — motor não roda para o item', async () => {
@@ -487,6 +564,29 @@ describe('invoiceOrder', () => {
 
     await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false }))
       .rejects.toMatchObject({ statusCode: 422, code: 'REQUIRES_VALIDATION' })
+  })
+
+  it('D-NE220 — id de item repetido entre os kind -> 422 ORDER_ITEM_ID_DUPLICATED com o item no detalhe, antes de ler vínculo ou gravar', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[
+      itemRow({ id: 1, kind: 'Sale' }), itemRow({ id: 2, kind: 'Sale' }),
+      itemRow({ id: 1, kind: 'Service', productKind: 'S' }),
+    ]])
+    const before = mockQuery.mock.calls.length
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'ORDER_ITEM_ID_DUPLICATED',
+      fields: [{ field: 'item.1', message: expect.stringContaining('item 1') }],
+    })
+    expect(mockQuery.mock.calls.length).toBe(before + 7)   // status, ramo, 4 do contexto, itens — nenhuma leitura depois
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it('D-NE220 — duplicatedItemIds: ids distintos passam (1/Sale e 2/Service); repetidos saem em ordem, uma vez cada', () => {
+    expect(duplicatedItemIds([{ id: 1 }, { id: 2 }])).toEqual([])
+    expect(duplicatedItemIds([{ id: 3 }, { id: 1 }, { id: 3 }, { id: 1 }, { id: 3 }])).toEqual([1, 3])
+    expect(duplicatedItemIds([])).toEqual([])
   })
 
   it('pendência de cadastro (destinatário sem UF) -> 422 antes de tudo', async () => {
@@ -657,16 +757,19 @@ describe('invoiceOrder', () => {
       .mockResolvedValueOnce([[{ id: 5, description: 'BOLETO', kind: 'O', maxParcels: 6 }]]) // assertPaymentRules (Q-N1)
       .mockResolvedValueOnce([[]])                  // kinds
       .mockResolvedValueOnce([{}])                  // issqn item
-      .mockResolvedValueOnce([[{ id: 1, kind: 'Sale', productId: 100 }]]) // IB-2: itens relidos SOB o lock (iguais)
       .mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}]) // financeiro p1
       .mockResolvedValueOnce([{}])                  // status F
 
     const result = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
 
     expect(result.model).toBe('SE')                 // só serviço → SE
-    // IB-2 (gate socrático): a releitura dos itens é TRAVANTE (não abre o retrato) e vem antes da declaração
-    const reread = conn.query.mock.calls.find(c => /FROM `setes_setes`\.tb_order_item i[\s\S]*LOCK IN SHARE MODE/.test(String(c[0])))
-    expect(reread?.[1]).toEqual([10, 1])
+    // D-NE248 (082): o ISS retido que o motor calculou é registrado (aqui o tomador não retém → 0, não NULL)
+    const issqn = conn.query.mock.calls.find(c => /INSERT INTO `setes_setes`\.tb_order_item_issqn\b/.test(String(c[0])))!
+    expect(String(issqn[0])).toMatch(/tax_code, withheld_value,[\s\S]*withheld_value = VALUES\(withheld_value\)/)
+    expect((issqn[1] as unknown[]).at(-1)).toBe(0)
+    // IB-2 (gate socrático) + D-FAT1: a releitura do pedido sob a trava (travante, antes da declaração) é a conferência única do
+    // começo da transação — provada em billing-input-print.test.ts; aqui, que ela foi chamada com a impressão do service
+    expect(mockInputPrint.assertBillingInputsUnchanged).toHaveBeenCalledWith(conn, 'setes_setes', 1, 10, expect.stringContaining('I|1|Sale|100|2|50|0'))
     const sqls = conn.query.mock.calls.map(c => c[0] as string)
     // natureza por PRESENÇA chega à peça: serviço com total, mercadoria ausente
     const inv = jest.requireMock('../shared/invoice') as any
@@ -867,6 +970,334 @@ describe('invoiceOrder', () => {
     expect(billCalls[0][1]).toContain('C')
   })
 
+  // ── D-NE248 (NFE.E1.P1.T3): o cálculo é registrado por item, inteiro ──────────────────────────────────────────────
+  const icmsPiece = (over: Record<string, unknown> = {}) => ({
+    cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0,
+    deferred: 'N', deferredAliq: null, highlight: 'N', ...over,
+  })
+  /** Fatura UM item de mercadoria (2 × 50,00) com as peças dadas; a conexão responde `[{}]` a toda gravação. */
+  async function invoiceWithPieces(pieces: Record<string, unknown>, ctxOver: Parameters<typeof mockContext>[0] = {}, items: any[] = [itemRow({ id: 1 })], freight = 0) {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext(ctxOver)
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A',
+    }))])
+    mockQuery.mockResolvedValueOnce([[{ id: 42 }]])           // findDeadRuleIds
+    mockQuery.mockResolvedValueOnce([[{ freight }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce(pieces)
+    mockQuery.mockResolvedValueOnce([[]])                     // getRuleObservationNotes
+    mockQuery.mockResolvedValueOnce([[]])                     // getGeneralObservations
+    mockQuery.mockResolvedValueOnce([[]])                     // getNcmApproxRates
+    const conn = {
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])     // FOR UPDATE
+    mockNegotiationInTx(conn, null)
+    const result = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    const call = (table: RegExp) => conn.query.mock.calls.find(c => table.test(String(c[0])))
+    return { result, conn, call }
+  }
+
+  it('D-NE248 — CST 51: grava o ICMS da operação, a alíquota e o valor do diferimento que o motor calculou (antes eram descartados)', async () => {
+    const { call } = await invoiceWithPieces({ icms: icmsPiece({ cstNr: '51', deferred: 'S', deferredAliq: 33.33 }) })
+    const icms = call(/INSERT INTO `setes_setes`\.tb_order_item_icms\b/)!
+    expect(String(icms[0])).toMatch(/operation_value, deferred_aliq, deferred_value,/)
+    expect(String(icms[0])).toMatch(/operation_value = VALUES\(operation_value\), deferred_aliq = VALUES\(deferred_aliq\),\s+deferred_value = VALUES\(deferred_value\)/)
+    // base 100,00 × 18% = 18,00 (vICMSOp); 18,00 × 33,33% = 6,00 (vICMSDif)
+    expect((icms[1] as unknown[]).slice(-3)).toEqual([18, 33.33, 6])
+  })
+
+  it('D-NE248 — CST 00: o motor não calcula diferimento → as três colunas ficam NULL (nunca zero)', async () => {
+    const { call } = await invoiceWithPieces({ icms: icmsPiece() })
+    expect((call(/INSERT INTO `setes_setes`\.tb_order_item_icms\b/)![1] as unknown[]).slice(-3)).toEqual([null, null, null])
+  })
+
+  it('D-NE248 — CSOSN: o ICMS da operação é gravado (base × alíquota) e o diferimento é 0 com alíquota 0 quando a regra não difere — o que o motor devolveu, como devolveu', async () => {
+    const { call } = await invoiceWithPieces({ icms: icmsPiece({ cstNr: null, csosn: '101' }) }, { emitterRegime: '1 - Simples Nacional' })
+    expect((call(/INSERT INTO `setes_setes`\.tb_order_item_icms\b/)![1] as unknown[]).slice(-3)).toEqual([18, 0, 0])
+  })
+
+  it('D-NE248 — CSOSN com diferimento e destinatário revendedor: alíquota e valor do diferimento gravados', async () => {
+    const { call } = await invoiceWithPieces({ icms: icmsPiece({ cstNr: null, csosn: '900', deferredAliq: 50 }) }, { emitterRegime: '1 - Simples Nacional' })
+    expect((call(/INSERT INTO `setes_setes`\.tb_order_item_icms\b/)![1] as unknown[]).slice(-3)).toEqual([18, 50, 9])
+  })
+
+  it('D-NE248 — IPI: o VALOR calculado é gravado em tag_value (a tabela só tinha base e alíquota)', async () => {
+    const { call } = await invoiceWithPieces({ icms: icmsPiece(), ipi: { cst: '50', aliq: 10 } })
+    const ipi = call(/INSERT INTO `setes_setes`\.tb_order_item_ipi\b/)!
+    expect(String(ipi[0])).toMatch(/base_value, aliq_value, tag_value,[\s\S]*tag_value = VALUES\(tag_value\)/)
+    expect((ipi[1] as unknown[]).slice(-3)).toEqual([100, 10, 10])   // base 100,00 × 10% = 10,00
+  })
+
+  it('D-NE267 — /invoice SEM a marcação: o conteúdo não é lido e a nota sai como sempre, mesmo com texto longo', async () => {
+    const { result } = await invoiceWithPieces({ icms: icmsPiece() })
+    expect(result.totalValue).toBe(100)
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+  })
+
+  it('D-NE260 — /invoice COM a marcação e pendência de conteúdo: 422 REQUIRES_VALIDATION com os campos, antes de abrir conexão', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 42 }]])           // findDeadRuleIds
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent({
+      recipient: { name: 'N'.repeat(73) },
+      items: [{ itemId: 1, description: 'Peça usinada', ncm: '84713012', unit: null, taxableUnit: null, gtin: '123' }],
+    }))
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })).rejects.toMatchObject({
+      statusCode: 422, code: 'REQUIRES_VALIDATION',
+      fields: [
+        { field: 'name', message: 'Nome do destinatário com 73 caracteres — o máximo da NF-e é 60' },
+        { field: 'item.1', message: 'Item 1: produto sem unidade de venda cadastrada' },
+        { field: 'item.1', message: expect.stringContaining('GTIN') },
+      ],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it('D-NE260 — /invoice COM a marcação e conteúdo bom: fatura', async () => {
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent())
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece() })
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+    const conn = { beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(conn, null)
+    const result = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })
+    expect(result.totalValue).toBe(100)
+    expect(mockContent.loadInvoiceContent).toHaveBeenCalledTimes(1)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('D-NE49 — /invoice COM a marcação e texto da nota acima de 5000 caracteres: 422 com o campo note (nunca trunca); sem a marcação, fatura', async () => {
+    const queue = () => {
+      mockOrderBase()
+      mockBranchSale()
+      mockContext()
+      mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+      mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+      mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+      mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+      mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+      mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece() })
+      mockQuery.mockResolvedValueOnce([[]])                                      // getRuleObservationNotes
+      mockQuery.mockResolvedValueOnce([[{ note: 'x'.repeat(5001) }]])            // getGeneralObservations: texto de 5001
+      mockQuery.mockResolvedValueOnce([[]])                                      // getNcmApproxRates
+    }
+    queue()
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent())
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })).rejects.toMatchObject({
+      statusCode: 422, code: 'REQUIRES_VALIDATION',
+      fields: [{ field: 'note', message: 'Observações da nota com 5001 caracteres — o máximo da NF-e é 5000' }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+    // sem a marcação o mesmo pedido fatura (o texto vai inteiro para a nota interna, como sempre)
+    queue()
+    const conn = { beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(conn, null)
+    const ok = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(ok.totalValue).toBe(100)
+    expect((jest.requireMock('../shared/invoice') as any).issueInvoice.mock.calls[0][4].noteText.length).toBe(5001)
+  })
+
+  it('D-FAT2 — todos os itens em valor zero com frete 10,00: o frete é dividido em partes iguais (5,00 em cada item) e o total da nota fecha em 10,00 (antes o frete sumia)', async () => {
+    const inv = jest.requireMock('../shared/invoice') as any
+    const { result, conn } = await invoiceWithPieces({ icms: icmsPiece() }, {},
+      [itemRow({ id: 1, unitValue: 0 }), itemRow({ id: 2, unitValue: 0 })], 10)
+    expect(result.totalValue).toBe(10)
+    const icms = conn.query.mock.calls.filter((c: any[]) => /INSERT INTO `setes_setes`\.tb_order_item_icms\b/.test(String(c[0])))
+    expect(icms.length).toBe(2)
+    // freight_value do item = antepenúltimo bloco: [..., freight, expenses, cfop, vICMSOp, pDif, vICMSDif]
+    expect(icms.map((c: any[]) => (c[1] as unknown[]).at(-6))).toEqual([5, 5])
+    expect(inv.issueInvoice.mock.calls[0][4].merchandise).toMatchObject({ freight: 10, totalValue: 10 })   // vNF = vFrete 10,00
+  })
+
+  // ── D-FAT1 (NFE.E1.P1.T4): a nota só grava cálculo conferido com o pedido travado ─────────────────────────────────────
+  it('D-FAT1 — pedido de MERCADORIA também é conferido sob a trava, com a impressão de itens, vínculo, frete e despesas', async () => {
+    const { conn } = await invoiceWithPieces({ icms: icmsPiece() })
+    expect(mockInputPrint.assertBillingInputsUnchanged).toHaveBeenCalledTimes(1)
+    expect(mockInputPrint.assertBillingInputsUnchanged).toHaveBeenCalledWith(conn, 'setes_setes', 1, 10,
+      'I|1|Sale|100|2|50|0\nL|1|Sale|42|5102|S\nF|0\nE|0')
+    // a conferência vem logo depois da trava do pedido e antes de qualquer gravação
+    expect(String(conn.query.mock.calls[0][0])).toContain('FOR UPDATE')
+    expect(conn.query.mock.calls.findIndex((c: any[]) => /INSERT INTO/.test(String(c[0])))).toBeGreaterThan(0)
+  })
+
+  it('D-FAT1 — o pedido mudou antes da trava: nada é gravado na 1ª tentativa (rollback), o faturamento RELÊ e RECALCULA, e a nota sai com o imposto do item novo', async () => {
+    const { BillingInputChanged } = jest.requireActual('../modules/billing/billing.input-print')
+    mockInputPrint.assertBillingInputsUnchanged.mockRejectedValueOnce(new BillingInputChanged(10))
+    // 1ª leitura: quantidade 2 (100,00); alguém edita; 2ª leitura: quantidade 5 (250,00)
+    const queue = (quantity: number) => {
+      mockOrderBase(); mockBranchSale(); mockContext()
+      mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, quantity })]])
+      mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+      mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+      mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+      mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+      mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece() })
+      mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+    }
+    queue(2)
+    queue(5)
+    const mk = () => ({
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    })
+    const first = mk(); const second = mk()
+    first.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    second.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(second, null)
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+
+    const result = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+
+    expect(result.totalValue).toBe(250)
+    expect(first.rollback).toHaveBeenCalledTimes(1)
+    expect(first.commit).not.toHaveBeenCalled()
+    expect(first.release).toHaveBeenCalledTimes(1)
+    expect(first.query.mock.calls.some((c: any[]) => /INSERT|UPDATE `/.test(String(c[0])))).toBe(false)   // nada gravado
+    expect(second.commit).toHaveBeenCalledTimes(1)
+    const icms = second.query.mock.calls.find((c: any[]) => /INSERT INTO `setes_setes`\.tb_order_item_icms\b/.test(String(c[0])))!
+    expect(icms[1]).toEqual(expect.arrayContaining([250, 45]))                                             // base 250,00 e ICMS 45,00 — do item NOVO
+    expect(mockInputPrint.assertBillingInputsUnchanged.mock.calls.map((c: any[]) => c[4])).toEqual([
+      'I|1|Sale|100|2|50|0\nL|1|Sale|42|5102|S\nF|0\nE|0', 'I|1|Sale|100|5|50|0\nL|1|Sale|42|5102|S\nF|0\nE|0',
+    ])
+    expect((jest.requireMock('../shared/invoice') as any).issueInvoice).toHaveBeenCalledTimes(1)          // uma nota só
+  })
+
+  it('D-FAT1 — o pedido muda nas 3 tentativas → 409 RESOURCE_BUSY, nenhuma nota, toda conexão devolvida', async () => {
+    const { BillingInputChanged } = jest.requireActual('../modules/billing/billing.input-print')
+    mockInputPrint.assertBillingInputsUnchanged.mockRejectedValue(new BillingInputChanged(10))
+    try {
+      const conns: any[] = []
+      ;((pool as any).getConnection as jest.Mock).mockImplementation(async () => {
+        const c = { beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+        c.query.mockResolvedValueOnce([[{ status: 'A' }]])
+        conns.push(c)
+        return c
+      })
+      for (let i = 0; i < BILLING_INPUT_ATTEMPTS; i++) {
+        mockOrderBase(); mockBranchSale(); mockContext()
+        mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, quantity: i + 1 })]])
+        mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+        mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+        mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+        mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+        mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece() })
+        mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+      }
+      await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'RESOURCE_BUSY' })
+      expect(BILLING_INPUT_ATTEMPTS).toBe(3)
+      expect(conns.length).toBe(3)
+      for (const c of conns) {
+        expect(c.rollback).toHaveBeenCalledTimes(1)
+        expect(c.commit).not.toHaveBeenCalled()
+        expect(c.release).toHaveBeenCalledTimes(1)
+      }
+      expect((jest.requireMock('../shared/invoice') as any).issueInvoice).not.toHaveBeenCalled()
+    } finally {
+      mockInputPrint.assertBillingInputsUnchanged.mockReset().mockResolvedValue(undefined)
+      ;((pool as any).getConnection as jest.Mock).mockReset()
+    }
+  })
+
+  it('D-NE215 — o faturamento entrega ao ramo de mercadoria o vNF da fórmula oficial; sem FCP-ST é o mesmo número do total da nota', async () => {
+    const inv = jest.requireMock('../shared/invoice') as any
+    const { result } = await invoiceWithPieces({ icms: icmsPiece(), ipi: { cst: '50', aliq: 10 } })
+    expect(result.totalValue).toBe(110)                                              // 100,00 + IPI 10,00 — como era
+    expect(inv.issueInvoice.mock.calls[0][4].totalValue).toBe(110)
+    expect(inv.issueInvoice.mock.calls[0][4].merchandise.totalValue).toBe(110)       // vNF = vProd 100,00 + vIPI 10,00
+  })
+
+  it('D-NE215 — com FCP-ST o vNF do ramo inclui a parcela (fórmula oficial); o total da nota e o financeiro NÃO mudam neste passo', async () => {
+    const stRates = jest.requireMock('../modules/state-tax-rates/state-tax-rates.repository') as any
+    stRates.resolveMvaAliq.mockResolvedValue({ internalAliq: 18, mvaOriginal: 40 })
+    stRates.resolveFcpAliq.mockResolvedValue({ aliq: 2 })
+    try {
+      const inv = jest.requireMock('../shared/invoice') as any
+      const { result, conn } = await invoiceWithPieces({
+        icms: icmsPiece({ cstNr: '10' }), icmsSt: { modBcSt: '4', propagateBaseReduction: 'N' },
+      })
+      const m = inv.issueInvoice.mock.calls[0][4].merchandise
+      expect(m.icmsSt).toBeGreaterThan(0)
+      // a diferença entre o vNF do ramo e o total da nota é EXATAMENTE o FCP-ST que o motor calculou e gravou no item (vfcpst)
+      const fcp = conn.query.mock.calls.find((c: any[]) => /INSERT INTO `setes_setes`\.tb_order_item_icms_fcp\b/.test(String(c[0])))!
+      const vfcpst = (fcp[1] as number[]).at(-1)!
+      expect(vfcpst).toBeGreaterThan(0)
+      expect(Math.round((m.totalValue - result.totalValue) * 100)).toBe(Math.round(vfcpst * 100))
+      expect(Math.round(result.totalValue * 100)).toBe(10000 + Math.round(m.icmsSt * 100))   // total da nota: como era (sem FCP-ST)
+    } finally {
+      stRates.resolveMvaAliq.mockResolvedValue(null)
+      stRates.resolveFcpAliq.mockResolvedValue(null)
+    }
+  })
+
+  it('D-NE248 — serviço com tomador que RETÉM o ISS: o ISS retido calculado (5% de 100,00 = 5,00) é gravado em withheld_value', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext({ recipientIssRetido: 'S' })
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, productKind: 'S' })]])
+    mockQuery.mockResolvedValueOnce([[]])                 // links (mercadoria)
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', serviceTaxRuleId: 2, origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 2, cityId: 2, cityName: 'X', serviceListId: '1.02', aliq: 5, municipalCode: null, nationalCode: '010201', active: 'S' }]])
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockQuery.mockResolvedValueOnce([[]])                 // getGeneralObservations
+    const conn = {
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(conn, null)
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    const issqn = conn.query.mock.calls.find((c: any[]) => /INSERT INTO `setes_setes`\.tb_order_item_issqn\b/.test(String(c[0])))!
+    // params: ...key(3), base, alíquota, valor, listservice, tax_code, ISS retido
+    expect((issqn[1] as unknown[]).slice(3)).toEqual([100, 5, 5, '1.02', null, 5])
+  })
+
+  it('D-NE248 — cerca: todo campo que o motor devolve tem coluna (TAX_CALC_RECORD); o imposto de importação fica fora porque o faturamento não o entrega ao motor', () => {
+    const r = repo.TAX_CALC_RECORD
+    expect(r.icms).toMatchObject({ operationValue: 'operation_value', deferredAliq: 'deferred_aliq', deferredValue: 'deferred_value' })
+    expect(r.ipi.value).toBe('tag_value')
+    expect(r.issqn.withheldValue).toBe('withheld_value')
+    expect(r.tables.ii).toBeNull()
+    // as colunas do mapa existem no SQL que o faturamento grava e na migration 082 (as novas)
+    const src = fs.readFileSync(path.join(__dirname, '..', 'modules', 'billing', 'billing.repository.ts'), 'utf8')
+    const persist = src.slice(src.indexOf('async function persistItemTaxes'))
+    for (const col of [...Object.values(r.icms), ...Object.values(r.fcp), ...Object.values(r.fcpSt), ...Object.values(r.ipi),
+      ...Object.values(r.pisCofins).filter((c): c is string => c !== null), ...Object.values(r.issqn)]) {
+      expect(persist).toContain(col)
+    }
+    const m082 = fs.readFileSync(path.join(__dirname, '..', 'migrations', 'sql', '082_order_item_tax_calc_record.sql'), 'utf8')
+    for (const col of ['operation_value', 'deferred_aliq', 'deferred_value', 'tag_value', 'withheld_value']) {
+      expect(m082).toMatch(new RegExp('ADD COLUMN IF NOT EXISTS `' + col + '` DECIMAL\\(\\d+,\\d+\\) DEFAULT NULL'))
+    }
+    // quando o faturamento passar a entregar `ii` ao motor, este teste quebra e obriga a criar o registro do imposto de importação
+    const service = fs.readFileSync(path.join(__dirname, '..', 'modules', 'billing', 'billing.service.ts'), 'utf8')
+    const calcInput = service.slice(service.indexOf('const calcInput: ItemTaxCalcInput = {'), service.indexOf('const serviceRule = isService'))
+    expect(calcInput.length).toBeGreaterThan(200)
+    expect(calcInput).not.toMatch(/\bii\s*:/)
+  })
+
   it('P2.9: emitente Simples fatura por CSOSN (regra com csosn, sem cstNr)', async () => {
     mockOrderBase()
     mockBranchSale()
@@ -1023,9 +1454,58 @@ describe('comissão e devolução', () => {
     })
     expect(mockOrderReturn.getAnchor).toHaveBeenCalledWith('setes_setes', 1, 10, { includeDeleted: true })
     expect(mockOrderReturn.buildReturnPlan).toHaveBeenCalledWith(
-      'setes_setes', 1, 77, 55, expect.any(Array))
+      'setes_setes', 1, 77, 55, expect.any(Array), { refuseRepeatedLines: false })   // sem a marcação: o acúmulo de sempre
     expect(report.issues.some(i =>
       i.itemId === 1 && i.field === 'quantity' && i.scope === 'item')).toBe(true)
+  })
+
+  it('D-NE113 + D-NE267 — devolução de venda do ERP Desktop COM a marcação: /validate avisa e /invoice recusa com RETURN_ORIGIN_LEGACY (antes das issues do plano); SEM a marcação segue como sempre', async () => {
+    const legacyPlan = { issues: [{ itemId: 1, field: 'quantity', message: 'saldo insuficiente' }], plan: null, originLegacy: true }
+    // /validate com a marcação
+    mockOrderBase()
+    mockBranchAdjust(55, 'E')
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[]]) // itens
+    mockOrderReturn.getAnchor.mockResolvedValueOnce({ orderIdOri: 77 })
+    mockOrderReturn.buildReturnPlan.mockResolvedValueOnce(legacyPlan)
+    mockQuery.mockResolvedValueOnce([[]]) // links
+    const report = await validateOrder(inst as any, { orderId: 10, adjustment: { cfopId: '1202' }, authorizeNfe: true })
+    expect(report.issues).toEqual(expect.arrayContaining([
+      { scope: 'order', field: 'returnedOrderId', message: expect.stringContaining('A venda 77 foi feita no ERP Desktop') },
+    ]))
+    // /validate SEM a marcação: só as issues do plano
+    mockOrderBase()
+    mockBranchAdjust(55, 'E')
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[]])
+    mockOrderReturn.getAnchor.mockResolvedValueOnce({ orderIdOri: 77 })
+    mockOrderReturn.buildReturnPlan.mockResolvedValueOnce(legacyPlan)
+    mockQuery.mockResolvedValueOnce([[]])
+    const plain = await validateOrder(inst as any, { orderId: 10, adjustment: { cfopId: '1202' } })
+    expect(plain.issues.some(i => i.field === 'returnedOrderId')).toBe(false)
+
+    const queueInvoice = () => {
+      mockOrderBase()
+      mockBranchAdjust(55, 'E')
+      mockContext()
+      mockQuery.mockResolvedValueOnce([[itemRow({ id: 1, kind: 'Adjust' })]])
+      mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Adjust', taxRuleId: 42, cfopId: '1202', setFinancial: 'S', origin: 'A' }]])
+      mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+      mockOrderReturn.getAnchor.mockResolvedValueOnce({ orderIdOri: 77 })
+      mockOrderReturn.buildReturnPlan.mockResolvedValueOnce(legacyPlan)
+    }
+    // /invoice com a marcação: a causa é a origem — não o saldo nem o cadastro (a conferência do conteúdo nem chega a rodar)
+    queueInvoice()
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, adjustment: { cfopId: '1202' }, authorizeNfe: true }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'RETURN_ORIGIN_LEGACY', message: expect.stringContaining('A venda 77 foi feita no ERP Desktop') })
+    expect(mockContent.loadInvoiceContent).not.toHaveBeenCalled()
+    // a marcação chega ao plano: com ela, linhas repetidas são recusadas (D-NE112); sem ela, o acúmulo de sempre
+    expect(mockOrderReturn.buildReturnPlan.mock.calls.at(-1)![5]).toEqual({ refuseRepeatedLines: true })
+    // /invoice sem a marcação: a devolução de venda do Desktop segue o caminho de sempre (aqui, as issues do plano)
+    queueInvoice()
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, adjustment: { cfopId: '1202' } }))
+      .rejects.toMatchObject({ statusCode: 422, code: 'RETURN_INVALID' })
+    expect(mockOrderReturn.buildReturnPlan.mock.calls.at(-1)![5]).toEqual({ refuseRepeatedLines: false })
   })
 
   it('invoice: devolução inválida -> 422 RETURN_INVALID (gate DURO revalidado)', async () => {
@@ -1144,6 +1624,11 @@ describe('comissão e devolução', () => {
     // alíquota veio do lançamento postado — não re-resolve pela fonte atual
     expect(mockCommission.resolveCommissionAliq).not.toHaveBeenCalled()
     // saldo REVALIDADO sob lock da origem ANTES de gravar (R2/HIGH dos gates)
+    // D-FAT1 em cenário de DEVOLUÇÃO: a conferência do pedido sob a trava (releituras travantes — billing-input-print.test.ts) roda
+    // ANTES da invariante do saldo devolvível, que exige ser a primeira leitura não travante da transação
+    expect(mockInputPrint.assertBillingInputsUnchanged).toHaveBeenCalledTimes(1)
+    expect(mockInputPrint.assertBillingInputsUnchanged.mock.invocationCallOrder[0])
+      .toBeLessThan(mockOrderReturn.assertReturnableInTx.mock.invocationCallOrder[0])
     expect(mockOrderReturn.assertReturnableInTx).toHaveBeenCalledWith(
       conn, 'setes_setes', 1, 10, plan)
     expect(mockOrderReturn.persistReturn).toHaveBeenCalledWith(

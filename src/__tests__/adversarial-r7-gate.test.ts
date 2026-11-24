@@ -80,7 +80,9 @@ describe('cerca por varredura — quem ESCREVE nas tabelas que o ERP Desktop ali
     expect(central).not.toMatch(/\bDELETE\s+FROM\b|\bREPLACE\s+INTO\b/i)
     expect(mentions('tb_institution_has_measure')).toEqual(['shared/catalog-owner/index.ts', 'shared/central-catalog/index.ts'])
     expect(mentions('tb_institution_has_package')).toEqual(['shared/catalog-owner/index.ts', 'shared/central-catalog/index.ts'])
-    expect(mentions('tb_measure')).toEqual(['modules/merchandise/merchandise.repository.ts', 'shared/catalog-owner/index.ts', 'shared/central-catalog/index.ts'])
+    // NFE.E1.P2: `billing.content.ts` só LÊ a abreviatura da medida (conferência do conteúdo da NF-e) — a prova de que não escreve vem logo abaixo
+    expect(mentions('tb_measure')).toEqual(['modules/billing/billing.content.ts', 'modules/merchandise/merchandise.repository.ts', 'shared/catalog-owner/index.ts', 'shared/central-catalog/index.ts'])
+    expect(read(path.join(SRC, 'modules', 'billing', 'billing.content.ts'))).not.toMatch(/\bINSERT\s+(IGNORE\s+)?INTO\b|\bDELETE\s+FROM\b|\bREPLACE\s+INTO\b|\bUPDATE\s+\S+\s+SET\b|\bTRUNCATE\b/i)
     expect(mentions('tb_package')).toEqual(['modules/merchandise/merchandise.repository.ts', 'shared/catalog-owner/index.ts', 'shared/central-catalog/index.ts'])
     expect(mentions('tb_stock_list')).toEqual(['shared/catalog-owner/index.ts'])
     expect(mentions('tb_stock_balance')).toEqual(['shared/catalog-owner/index.ts'])
