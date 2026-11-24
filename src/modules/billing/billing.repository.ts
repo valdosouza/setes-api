@@ -463,6 +463,15 @@ export interface PersistInvoiceParams {
 /** Tentativas da transação do faturamento em deadlock (D-G4 — Rodada 4 do contrato). */
 const INVOICE_DEADLOCK_ATTEMPTS = 3
 
+/**
+ * Texto do número do título (`tb_financial_bills.number`): `pedido/nota-parcela`. D-NE266 (Valdo, 2026-11-23, "Como no Desktop" —
+ * FIN-07 do ERP Desktop): nota faturada SEM número fiscal (D-NE257) leva o pedido no lugar da nota — `pedido/pedido-parcela`.
+ * Se o título é regravado quando o número chega é do NFE.E1.P6 (sem decisão aqui).
+ */
+export function billNumberOf(orderId: number, invoiceNumber: string | null, parcel: number): string {
+  return `${orderId}/${invoiceNumber ?? orderId}-${parcel}`
+}
+
 /** D-G4 (2026-09-04): ver `@shared/db/deadlock-retry` — reexecuta a transação inteira. */
 export async function persistInvoice(
   schemaName: string, institutionId: number, params: PersistInvoiceParams
@@ -515,7 +524,7 @@ async function persistInvoiceOnce(
 
     // nota + ramos + evento E pela PEÇA @shared/invoice (cancelamento D3/D4/
     // D5/D17, 2026-09-08): número MAX+1 por modelo+série IGNORA canceladas
-    // (deleted='S'), cabeçalho e ramos REVIVEM por upsert no refaturamento,
+    // (deleted='S') — menos no 55, que nasce SEM número (D-NE257) —, cabeçalho e ramos REVIVEM por upsert no refaturamento,
     // status '0' = pronta, NÃO transmitida (autorização = fase guardada);
     // note = motor de observações (T6/P11), texto já concatenado.
     // natureza da nota = PRESENÇA do ramo (D1–D11 de notas mercadoria ×
@@ -587,7 +596,7 @@ async function persistInvoiceOnce(
            situation = 'N', operation = VALUES(operation), stage = 'N',
            deleted = 'N', updated_at = NOW()`,
         [institutionId, params.orderId, p.parcel,
-         `${params.orderId}/${invoiceNumber}-${p.parcel}`, params.financialKind,
+         billNumberOf(params.orderId, invoiceNumber, p.parcel), params.financialKind,
          params.financialOperation]
       )
     }

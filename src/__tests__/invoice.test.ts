@@ -5,6 +5,7 @@
 // MAX+1 ignora canceladas; cabeçalho e ramos REVIVEM por upsert.
 import {
   stateFromLastEvent, nextInvoiceNumber, issueInvoice, DEFAULT_PRESENCE_INDICATOR, insertInvoiceEvent, lockInvoice,
+  MODELS_NUMBERED_AT_TRANSMISSION, isNumberedAtTransmission,
 } from '../shared/invoice'
 import type { IbscbsDeclaration } from '../shared/ibscbs-classification'
 
@@ -45,11 +46,10 @@ describe('nextInvoiceNumber (D4)', () => {
 })
 
 describe('issueInvoice', () => {
-  it('cabeçalho por upsert (REVIVE), ramos por PRESENÇA, evento E com snapshot', async () => {
+  it('cabeçalho por upsert (REVIVE), ramos por PRESENÇA, evento E com snapshot — o 55 nasce SEM número fiscal (D-NE257)', async () => {
     const conn = fakeConn()
     conn.query
-      .mockResolvedValueOnce([[{ nextNumber: 7 }]]) // MAX+1
-      .mockResolvedValueOnce([{}])                  // tb_invoice upsert
+      .mockResolvedValueOnce([{}])                  // tb_invoice upsert (o 55 não cunha: nenhum MAX+1 antes)
       .mockResolvedValueOnce([{}])                  // merchandise upsert
       .mockResolvedValueOnce([{}])                  // service → deleted='S' (ausente nesta vida)
       .mockResolvedValueOnce([[{ nextEvent: 3 }]]) // MAX(event)+1 (2ª vida: E1, C2, E3)
@@ -61,22 +61,52 @@ describe('issueInvoice', () => {
         freight: 0, expenses: 0, discount: 0, quantity: 2,
       }, service: null, dtEmission: '2026-09-08',
     })
-    expect(r).toEqual({ invoiceNumber: '7', event: 3 })
+    expect(r).toEqual({ invoiceNumber: null, event: 3 })
     const sqls = conn.query.mock.calls.map(c => String(c[0]))
-    expect(sqls[1]).toMatch(/INSERT INTO `setes_setes`.tb_invoice[\s\S]*ON DUPLICATE KEY UPDATE[\s\S]*deleted = 'N'/)
+    // D-NE257 (NFE.E1.P3.T1): nenhum MAX+1, nenhuma leitura de faixa, ambiente ou habilitação — só os 5 comandos da nota
+    expect(conn.query).toHaveBeenCalledTimes(5)
+    expect(sqls.some(q => /MAX\(number_seq\)|fiscal_api|number_void|establishment_issuer/.test(q))).toBe(false)
+    expect(sqls[0]).toMatch(/INSERT INTO `setes_setes`.tb_invoice[\s\S]*ON DUPLICATE KEY UPDATE[\s\S]*deleted = 'N'/)
+    // o INSERT e o REVIVE são o mesmo comando: o parâmetro `number` vai NULL e o revive regrava `number = VALUES(number)` —
+    // a nota refaturada volta a ficar sem número (cada vida recebe o dela na transmissão)
+    expect(sqls[0]).toMatch(/number = VALUES\(number\)/)
     // D-IB64: dt_emission = a data que o PRODUTOR calculou UMA vez (hoje do estabelecimento — Q-TZ1), a mesma do evento E
-    expect(conn.query.mock.calls[1][1]).toEqual([100, 1, 1, '7', '1', 209, '2026-09-08', 250, '55', 'obs'])
-    expect(sqls[2]).toMatch(/tb_invoice_merchandise[\s\S]*ON DUPLICATE KEY UPDATE/)
+    expect(conn.query.mock.calls[0][1]).toEqual([100, 1, 1, null, '1', 209, '2026-09-08', 250, '55', 'obs'])
+    expect(sqls[1]).toMatch(/tb_invoice_merchandise[\s\S]*ON DUPLICATE KEY UPDATE/)
     // D-NE246: o indPres nasce 3 (teleatendimento) no INSERT e no revive — nenhum 0 fixo sobra no SQL
     expect(DEFAULT_PRESENCE_INDICATOR).toBe(3)
-    expect(sqls[2]).toMatch(/indPres = VALUES\(indPres\)/)
-    expect(sqls[2]).not.toMatch(/indPres = 0/)
-    expect(sqls[2]).toMatch(/total_qtty, indPres, created_at[\s\S]*VALUES \(\?, \?, 0, \?, \?, \?, \?, \?, \?, \?, 0, \?, \?, \?, \?, NOW\(\)/)
-    expect((conn.query.mock.calls[2][1] as unknown[]).at(-1)).toBe(3)
-    expect(sqls[3]).toMatch(/UPDATE `setes_setes`.tb_invoice_service SET deleted = 'S'/)
-    expect(sqls[5]).toMatch(/INSERT INTO `setes_setes`.tb_invoice_event/)
-    // snapshot do fato: número/série/modelo/valor + autor
-    expect(conn.query.mock.calls[5][1]).toEqual([1, 100, 3, 'E', '2026-09-08', '7', '1', '55', 250, null, null, 7])
+    expect(sqls[1]).toMatch(/indPres = VALUES\(indPres\)/)
+    expect(sqls[1]).not.toMatch(/indPres = 0/)
+    expect(sqls[1]).toMatch(/total_qtty, indPres, created_at[\s\S]*VALUES \(\?, \?, 0, \?, \?, \?, \?, \?, \?, \?, 0, \?, \?, \?, \?, NOW\(\)/)
+    expect((conn.query.mock.calls[1][1] as unknown[]).at(-1)).toBe(3)
+    expect(sqls[2]).toMatch(/UPDATE `setes_setes`.tb_invoice_service SET deleted = 'S'/)
+    expect(sqls[4]).toMatch(/INSERT INTO `setes_setes`.tb_invoice_event/)
+    // snapshot do fato: número (NULL no 55)/série/modelo/valor + autor
+    expect(conn.query.mock.calls[4][1]).toEqual([1, 100, 3, 'E', '2026-09-08', null, '1', '55', 250, null, null, 7])
+  })
+
+  it.each(['SE', '65'])('modelo %s segue numerando no faturamento: MAX+1 por modelo e série, número no cabeçalho e no evento E', async (model) => {
+    const conn = fakeConn()
+    conn.query
+      .mockResolvedValueOnce([[{ nextNumber: 12 }]]) // MAX+1
+      .mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}]).mockResolvedValueOnce([{}])
+      .mockResolvedValueOnce([[{ nextEvent: 1 }]]).mockResolvedValueOnce([{}])
+    const r = await issueInvoice(conn as any, 'setes_setes', 1, 7, {
+      orderId: 300, recipientEntityId: 209, model, serie: '2', totalValue: 10,
+      noteText: null, merchandise: null, service: null, dtEmission: '2026-11-23',
+    })
+    expect(r).toEqual({ invoiceNumber: '12', event: 1 })
+    expect(String(conn.query.mock.calls[0][0])).toMatch(/MAX\(number_seq\)[\s\S]*FOR UPDATE/)
+    expect(conn.query.mock.calls[0][1]).toEqual([1, model, '2'])
+    expect(conn.query.mock.calls[1][1][3]).toBe('12')
+    expect(conn.query.mock.calls[5][1][5]).toBe('12')
+  })
+
+  it('D-NE257: só o 55 é numerado na transmissão — lista fechada e congelada', () => {
+    expect([...MODELS_NUMBERED_AT_TRANSMISSION]).toEqual(['55'])
+    expect(Object.isFrozen(MODELS_NUMBERED_AT_TRANSMISSION)).toBe(true)
+    expect(isNumberedAtTransmission('55')).toBe(true)
+    expect(['SE', '65', '', '5', '055'].map(isNumberedAtTransmission)).toEqual([false, false, false, false, false])
   })
 
   it('nota SÓ de serviço: ramo de mercadoria vira S, serviço upsert', async () => {
@@ -146,10 +176,16 @@ describe('issueInvoice — D-IB99: opção de apuração do IBS/CBS sem suporte 
   it('sem linha (D-IB1: vale 1) → a nota nasce normalmente', async () => {
     assessmentPiece.assertIbscbsAssessmentSupported.mockImplementation(actualAssessment.assertIbscbsAssessmentSupported)
     const conn = fakeConn()
-    conn.query.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ nextNumber: 4 }]]).mockResolvedValue([[{ nextEvent: 1 }]])
+    conn.query.mockResolvedValueOnce([[]]).mockResolvedValue([[{ nextEvent: 1 }]])
     const r = await issueInvoice(conn as any, 'setes_setes', 1, 7, input)
-    expect(r.invoiceNumber).toBe('4')
-    expect(String(conn.query.mock.calls[1][0])).toMatch(/MAX\(number_seq\)/)
+    expect(r).toEqual({ invoiceNumber: null, event: 1 })   // 55: nasce sem número (D-NE257)
+    expect(String(conn.query.mock.calls[1][0])).toMatch(/INSERT INTO `setes_setes`.tb_invoice/)
+
+    const se = fakeConn()
+    se.query.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[{ nextNumber: 4 }]]).mockResolvedValue([[{ nextEvent: 1 }]])
+    const rSe = await issueInvoice(se as any, 'setes_setes', 1, 7, { ...input, model: 'SE', merchandise: null })
+    expect(rSe.invoiceNumber).toBe('4')
+    expect(String(se.query.mock.calls[1][0])).toMatch(/MAX\(number_seq\)/)
   })
 })
 

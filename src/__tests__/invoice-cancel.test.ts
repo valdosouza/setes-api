@@ -292,6 +292,46 @@ describe('buildCancelPlan — bloqueios num único código (Q-P4)', () => {
 })
 
 describe('cancelInvoice — executar', () => {
+  // NFE.E1.P3.T2 (D-NE257): a nota do 55 nasce SEM número fiscal — o cancelamento não quebra, fala pelo id do pedido e devolve
+  // null; com número (o que o NFE.E1.P6 trará de volta) os MESMOS leitores mostram o número. CARACTERIZAÇÃO: o cancelamento não
+  // mudou neste passo (já tolerava número nulo, da nota sincronizada); o caso existe para ninguém quebrar isso depois.
+  it.each([
+    [null, 'Cancelamento da nota 100: erro de digitação'],
+    ['3138', 'Cancelamento da nota 3138: erro de digitação'],
+  ] as Array<[string | null, string]>)('nota do 55 com número %s: plano, execução, observação do boleto e evento C', async (number, note) => {
+    const conn = fakeConn()
+    planQueries(conn, {
+      invoice: [{ id: 100, number, serie: '1', model: '55', value: '250.00', status: '0' }],
+      slips: [{ id: 10, lastKind: 'E' }],
+    })
+    const plan = await buildCancelPlan(conn as any, 'setes_setes', 1, 100)
+    expect(plan.invoice.number).toBe(number)
+    expect(plan.blocks).toEqual([])
+
+    const exec = fakeConn()
+    planQueries(exec, {
+      invoice: [{ id: 100, number, serie: '1', model: '55', value: '250.00', status: '0' }],
+      slips: [{ id: 10, lastKind: 'E' }],
+    })
+    exec.query.mockResolvedValue([[{ nextEvent: 2 }]])
+    const r = await cancelInvoice(exec as any, ...scope, { orderId: 100, reason: 'erro de digitação' })
+    expect(r.invoiceNumber).toBe(number)
+    expect(r.event).toBe(2)
+    expect(slip.cancelBankSlip.mock.calls[0][5]).toBe(note)
+    const eventInsert = exec.query.mock.calls.find(c => /INSERT INTO `setes_setes`.tb_invoice_event/.test(String(c[0])))!
+    expect(eventInsert[1].slice(3, 9)).toEqual(['C', expect.any(String), number, '1', '55', 250])
+  })
+
+  it('nota do 55 SEM número já cancelada: a recusa cita o id do pedido, nunca "null"', async () => {
+    const conn = fakeConn()
+    planQueries(conn, {
+      invoice: [{ id: 100, number: null, serie: '1', model: '55', value: '250.00', status: '0' }],
+      last: [{ lifeEvent: 1, lastEvent: 2, lastKind: 'C' }],
+    })
+    await expect(buildCancelPlan(conn as any, 'setes_setes', 1, 100))
+      .rejects.toMatchObject({ statusCode: 409, code: 'INVOICE_NOT_CANCELLABLE', message: 'Nota 100 já cancelada' })
+  })
+
   it('D16: cheque a estornar sem caixa aberto → 409 NO_OPEN_CASHIER antes de gravar', async () => {
     const conn = fakeConn()
     fs.findOpenCashierIdTx.mockResolvedValueOnce(null)
