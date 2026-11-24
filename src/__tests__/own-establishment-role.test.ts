@@ -40,7 +40,7 @@ const CURRENT = {
   socialMedia: [],
 }
 const CURRENT_TAX: EntityTaxRow = {
-  consumer: 'N', taxRegime: '1 - Simples Nacional', simplesRegime: '2', simplesAssessment: '1', simplesTotalTaxAliquot: 6, specialTaxRegime: null,
+  consumer: 'N', taxRegime: '1 - Simples Nacional', simplesRegime: '2', simplesAssessment: '1', simplesTotalTaxAliquot: 6, simplesActivity: null, specialTaxRegime: null,
   cnae: null, byPassSt: 'N', indIeDest: '9', issExigibilidade: '01', issProcessNr: null, issRetido: 'N', issIndIncFiscal: 'N',
   autoSendInvoice: 'N', autoSendInvoiceJustXml: 'N',
 }

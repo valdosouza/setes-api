@@ -106,6 +106,11 @@ src/
 │   │                        # (peça `ibscbs` em tax-rule, tb_tax_rule_ibscbs, só o cClassTrib) e o
 │   │                        # faturamento a grava por item (tb_order_item_ibscbs, migration 083) — sem
 │   │                        # valor. Mercadoria com regra sem classificação vigente NÃO fatura (422)
+│   │                        # IBS.E9.P5 (D-IB138 a D-IB141): o Simples no DAS de 2027 em diante — `ibscbs-simples-rate`
+│   │                        # (percentual do mês por estabelecimento, tb_establishment_simples_rate), `ibscbs-simples-activity`
+│   │                        # (cAtivSN: padrão em tb_entity_tax, exceção em tb_merchandise) e `ibscbs-simples-das` (quando vale
+│   │                        # e a declaração do item, tb_order_item_ibscbs_simples, migration 084). Piso 2027-01-01 no código
+│   │                        # (a config `billing/ibscbs_simples_start` só adia); sem o percentual do mês o faturamento RECUSA (422)
 │   ├── errors/http-error.ts # Custom HTTP error class
 │   ├── http/controller-utils.ts # handleError + parseId (todo controller usa)
 │   ├── logger/logger.ts     # Simple console logger with timestamps

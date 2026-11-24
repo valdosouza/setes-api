@@ -28,6 +28,8 @@ export interface EstablishmentDto {
   simplesAssessment: string | null
   /** pTotTribSN (Q-N37) — % aproximado da alíquota efetiva do Simples; só com simplesRegime '3', e aí obrigatório. */
   simplesTotalTaxAliquot: number | null
+  /** cAtivSN padrão do estabelecimento (IBS.E9.P5, D-IB139): 01-04; null = 01. */
+  simplesActivity:  string | null
   specialTaxRegime: string | null
   cnae:             string | null
   addresses:   AddressRow[]
@@ -57,6 +59,7 @@ export interface EstablishmentUpdateInput {
   simplesRegime?:    string | null
   simplesAssessment?: string | null
   simplesTotalTaxAliquot?: number | null
+  simplesActivity?:  string | null
   specialTaxRegime?: string | null
   cnae?:             string | null
   addresses:   AddressInput[]

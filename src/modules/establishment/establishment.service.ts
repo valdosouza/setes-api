@@ -13,6 +13,10 @@ import {
   createIbscbsAssessment, changeIbscbsAssessment, removeIbscbsAssessment,
   firstFutureRegularAssessmentFrom, leavesRegularOptionRegimes,
 } from '@shared/ibscbs-assessment'
+import { assertSimplesActivity } from '@shared/ibscbs-simples-activity'
+import {
+  SimplesRate, SimplesRateInput, listSimplesRates, createSimplesRate, changeSimplesRate, removeSimplesRate,
+} from '@shared/ibscbs-simples-rate'
 
 /**
  * Regra do módulo establishment — SEM 404 de "não encontrado": o
@@ -25,7 +29,7 @@ import {
  * toggle F/J/N nunca mudam por aqui).
  */
 
-function toDto(chain: EntityFiscalFull, tax: { taxRegime: string | null; simplesRegime: string | null; simplesAssessment: string | null; simplesTotalTaxAliquot: number | null; specialTaxRegime: string | null; cnae: string | null }): EstablishmentDto {
+function toDto(chain: EntityFiscalFull, tax: { taxRegime: string | null; simplesRegime: string | null; simplesAssessment: string | null; simplesTotalTaxAliquot: number | null; simplesActivity: string | null; specialTaxRegime: string | null; cnae: string | null }): EstablishmentDto {
   const taxRegime = tax.taxRegime
   // Institution sempre nasce com documento (F ou J) — nunca 'N' (decisão
   // registrada no institutionCreateDto: schemaName + admin obrigatórios,
@@ -47,6 +51,7 @@ function toDto(chain: EntityFiscalFull, tax: { taxRegime: string | null; simples
     simplesRegime:    tax.simplesRegime,
     simplesAssessment: tax.simplesAssessment,
     simplesTotalTaxAliquot: tax.simplesTotalTaxAliquot,
+    simplesActivity:  tax.simplesActivity,
     specialTaxRegime: tax.specialTaxRegime,
     cnae:             tax.cnae,
     addresses:   chain.addresses,
@@ -70,6 +75,7 @@ export async function fetchEstablishment(
     taxRegime: tax?.taxRegime ?? null, simplesRegime: tax?.simplesRegime ?? null,
     simplesAssessment: tax?.simplesAssessment ?? null,
     simplesTotalTaxAliquot: tax?.simplesTotalTaxAliquot == null ? null : Number(tax.simplesTotalTaxAliquot),
+    simplesActivity: tax?.simplesActivity ?? null,
     specialTaxRegime: tax?.specialTaxRegime ?? null, cnae: tax?.cnae ?? null,
   })
 }
@@ -87,6 +93,9 @@ export async function editEstablishment(
     throw new HttpError(500,
       `Estabelecimento ${institutionId} sem documento fiscal (personType 'N') — dado inconsistente`)
   }
+
+  // IBS.E9.P5 (D-IB139): a atividade padrão é 01-04 (a 90 não é aceita ainda) — conferida ANTES de gravar qualquer parte
+  assertSimplesActivity(input.simplesActivity)
 
   // Q-N36: ME/EPP (regime do Simples 3) EXIGE a apuração (regApTribSN) — o fisco recusa
   // a ausência com E0166. Conferido sobre o estado RESULTANTE (merge com o gravado) e
@@ -150,6 +159,7 @@ export async function editEstablishment(
   // Tributação de outros cadastros tivesse configurado para o emitente).
   const touchesTax = input.taxRegime !== undefined || input.simplesRegime !== undefined
     || input.simplesAssessment !== undefined || input.simplesTotalTaxAliquot !== undefined
+    || input.simplesActivity !== undefined
     || input.specialTaxRegime !== undefined || input.cnae !== undefined
   const current = touchesTax ? await getEntityTax(schemaName, institutionId, institutionId) : null
   if (touchesTax) {
@@ -162,6 +172,7 @@ export async function editEstablishment(
       ...(input.simplesAssessment !== undefined ? { simplesAssessment: input.simplesAssessment } : {}),
       ...(input.simplesTotalTaxAliquot !== undefined ? { simplesTotalTaxAliquot: input.simplesTotalTaxAliquot } : {}),
       ...((input.simplesRegime !== undefined && input.simplesRegime !== '3') ? { simplesAssessment: null, simplesTotalTaxAliquot: null } : {}),
+      ...(input.simplesActivity !== undefined ? { simplesActivity: input.simplesActivity } : {}),
       ...(input.specialTaxRegime !== undefined ? { specialTaxRegime: input.specialTaxRegime } : {}),
       ...(input.cnae !== undefined ? { cnae: input.cnae } : {}),
     })
@@ -218,4 +229,37 @@ export async function deleteIbscbsAssessment(
   await removeIbscbsAssessment(schemaName, institutionId, userId, validFrom)
   logger.info('Opção de apuração IBS/CBS excluída', { institutionId, validFrom, userId })
   return readIbscbsAssessmentView(schemaName, institutionId)
+}
+
+// ---------------------------------------------------------------------------
+// Percentual do Simples no IBS/CBS (IBS.E9.P5, D-IB138): a regra e a escrita moram na peça @shared/ibscbs-simples-rate (dona única
+// da tabela); o módulo liga a porta HTTP e devolve a lista atualizada depois de cada ato.
+// ---------------------------------------------------------------------------
+
+export function fetchSimplesRates(institutionId: number, schemaName: string): Promise<SimplesRate[]> {
+  return listSimplesRates(schemaName, institutionId)
+}
+
+export async function registerSimplesRate(
+  institutionId: number, schemaName: string, userId: number, input: SimplesRateInput,
+): Promise<SimplesRate[]> {
+  await createSimplesRate(schemaName, institutionId, userId, input)
+  logger.info('Percentual do Simples IBS/CBS cadastrado', { institutionId, competence: input.competence, userId })
+  return listSimplesRates(schemaName, institutionId)
+}
+
+export async function editSimplesRate(
+  institutionId: number, schemaName: string, userId: number, input: SimplesRateInput,
+): Promise<SimplesRate[]> {
+  await changeSimplesRate(schemaName, institutionId, userId, input)
+  logger.info('Percentual do Simples IBS/CBS alterado', { institutionId, competence: input.competence, userId })
+  return listSimplesRates(schemaName, institutionId)
+}
+
+export async function deleteSimplesRate(
+  institutionId: number, schemaName: string, userId: number, competence: string,
+): Promise<SimplesRate[]> {
+  await removeSimplesRate(schemaName, institutionId, userId, competence)
+  logger.info('Percentual do Simples IBS/CBS excluído', { institutionId, competence, userId })
+  return listSimplesRates(schemaName, institutionId)
 }

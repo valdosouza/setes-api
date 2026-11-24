@@ -66,6 +66,7 @@ export interface BillingOrderItem {
   merchandiseSt: 'S' | 'N'
   purpose: string | null      // kind_tributary (finalidade)
   priceListId: number | null  // lista do item — fonte da alíquota de comissão por produto
+  simplesActivity: string | null   // IBS.E9.P5 (D-IB139): cAtivSN próprio da mercadoria; null = herda o padrão do estabelecimento
 }
 
 /** Linha de tb_order_item_tax_rule. */

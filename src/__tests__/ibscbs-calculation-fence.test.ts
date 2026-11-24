@@ -90,7 +90,9 @@ describe('cerca @shared/ibscbs-calculation', () => {
     for (const code of hostile) expect(specifiersOf(code).length).toBe(1)
   })
 
-  it('ninguém do produto chama o motor ainda: a ligação no faturamento é do IBS.E9.P3', () => {
+  // IBS.E9.P5 (D-IB138 a D-IB142): o Simples no DAS liga o motor (base e valores) — SÓ por duas peças; o regular continua sem chamador
+  // até o IBS.E9.P4. Chamador novo fora desta lista é uma 2ª ligação: este teste falha e diz onde.
+  it('só as peças do Simples no DAS chamam o motor; a ligação do regime regular é do IBS.E9.P4', () => {
     const src = join(__dirname, '..')
     const users: string[] = []
     const walk = (dir: string): void => {
@@ -105,6 +107,7 @@ describe('cerca @shared/ibscbs-calculation', () => {
       }
     }
     walk(src)
-    expect(users).toEqual([])
+    const rel = users.map(u => u.slice(src.length + 1).split('\\').join('/')).sort()
+    expect(rel).toEqual(['shared/ibscbs-simples-das/index.ts', 'shared/ibscbs-simples-rate/index.ts'])
   })
 })

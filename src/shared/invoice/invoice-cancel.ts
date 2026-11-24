@@ -118,6 +118,7 @@ const ITEM_SNAPSHOT_TABLES = [
   'tb_order_item_icms', 'tb_order_item_icms_fcp', 'tb_order_item_ipi', 'tb_order_item_ii',
   'tb_order_item_pis', 'tb_order_item_cofins', 'tb_order_item_issqn',
   'tb_order_item_ibscbs',   // IBS.E9.P3: a classificação de IBS/CBS que o item declara
+  'tb_order_item_ibscbs_simples',   // IBS.E9.P5: atividade, percentual e valores do Simples no DAS que o item declara
 ] as const
 
 export async function buildCancelPlan(

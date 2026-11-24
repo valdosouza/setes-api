@@ -28,6 +28,9 @@ import { assertSchema } from '@shared/db/schema'
 import { previewServiceIbscbs } from '@shared/service-ibscbs-declaration'
 import { previewIbscbsAssessmentRefusal } from '@shared/ibscbs-assessment'
 import { findClassificationAt } from '@shared/ibscbs-classification'
+import {
+  loadSimplesDasPlan, declareSimplesItem, simplesRateMissingMessage, IbscbsSimplesDeclared,
+} from '@shared/ibscbs-simples-das'
 import { CancelBody, CancelWaiverBody } from './billing.dto'
 import { resolveOrderParcels, MaterializedParcel as ResolvedParcel } from '@shared/order-installment'
 import { hasServiceOrderCycle } from '@shared/service-order'
@@ -74,10 +77,16 @@ import { billingInputPrint, BillingInputChanged } from './billing.input-print'
  */
 
 const MERCHANDISE_KINDS = ['Sale', 'Purchase', 'Adjust']
+/** IBS.E9.P5 (D-IB142): o IBS/CBS do Simples no DAS é o da RECEITA do emitente — só o item de VENDA; compra e ajuste (entradas) ficam de fora. */
+const SIMPLES_KINDS: readonly string[] = ['Sale']
 
 interface BillingContext {
   branch: OrderBranchInfo
   emitterCrt: string | null
+  /** cAtivSN padrão do estabelecimento (IBS.E9.P5, D-IB139); null = 01. */
+  emitterSimplesActivity: string | null
+  /** opSimpNac do emitente (IBS.E9.P5): o MEI ('2') não entra no Simples no DAS. */
+  emitterSimplesRegime: string | null
   emitterStateId: number | null
   recipientCityId: number | null
   recipientStateId: number | null
@@ -128,6 +137,8 @@ async function loadContext(
   const ctx: BillingContext = {
     branch,
     emitterCrt: crt,
+    emitterSimplesActivity: emitterTax?.simplesActivity ?? null,
+    emitterSimplesRegime: emitterTax?.simplesRegime ?? null,
     emitterStateId: emitterLoc?.stateId ?? null,
     recipientCityId: recipientLoc?.cityId ?? null,
     recipientStateId: recipientLoc?.stateId ?? null,
@@ -431,10 +442,23 @@ export async function validateOrder(
   if (ibscbs?.refusal) issues.push({ scope: 'ibscbs', field: 'ibscbs', message: ibscbs.refusal.message })
   // D-IB99: a opção de apuração do IBS/CBS vale para TODA nota (mercadoria também) — a MESMA regra do `issueInvoice`, só-pergunta,
   // na data que o faturamento usaria; sem repetir a issue quando a prévia do serviço já a trouxe
-  const regime = await previewIbscbsAssessmentRefusal(pool, assertSchema(schemaName), institutionId,
-    ibscbs?.competenceDate ?? await invoiceEmissionDateFor(schemaName, institutionId))
+  const regimeDate = ibscbs?.competenceDate ?? await invoiceEmissionDateFor(schemaName, institutionId)
+  const regime = await previewIbscbsAssessmentRefusal(pool, assertSchema(schemaName), institutionId, regimeDate)
   if (regime && ibscbs?.refusal?.code !== regime.code) {
     issues.push({ scope: 'order', field: 'ibscbsAssessment', message: regime.message })
+  }
+
+  // IBS.E9.P5 (D-IB140): a mesma conferência do faturamento — o Simples no DAS de 2027 em diante sem o percentual do mês vira
+  // pendência POR ITEM de mercadoria (a tela descobre aqui, não no 422); antes da data de início nada é lido além do CRT
+  const simplesPlan = await loadSimplesDasPlan({
+    institution, crt: ctx.emitterCrt, simplesRegime: ctx.emitterSimplesRegime, emissionDate: regimeDate,
+    establishmentActivity: ctx.emitterSimplesActivity })
+  if (simplesPlan.active && simplesPlan.rate === null) {
+    for (const item of items) {
+      if (item.productKind === 'S' || !SIMPLES_KINDS.includes(item.kind)) continue
+      issues.push({ scope: 'item', itemId: item.id, field: 'ibscbsSimplesRate',
+        message: simplesRateMissingMessage(item.id, simplesPlan.competence) })
+    }
   }
 
   return { orderId: input.orderId, branch: branch.branch, issues, rulesResolved, rulesManual, ibscbs }
@@ -682,6 +706,11 @@ async function invoiceOrderOnce(
   const baseDate = await invoiceEmissionDateFor(schemaName, institutionId)
   const ibscbsProblemOf = ibscbsItemChecker(baseDate)
   const ibscbsProblems: Array<{ itemId: number } & IbscbsItemProblem> = []
+  // IBS.E9.P5 (D-IB138 a D-IB141): o Simples no DAS de 2027 em diante — decidido e com o percentual do mês lido ANTES do laço e da transação
+  const simplesPlan = await loadSimplesDasPlan({
+    institution, crt: ctx.emitterCrt, simplesRegime: ctx.emitterSimplesRegime, emissionDate: baseDate,
+    establishmentActivity: ctx.emitterSimplesActivity })
+  const simplesProblems: Array<{ itemId: number; message: string }> = []
 
   const computed: ComputedItem[] = []
   for (let idx = 0; idx < items.length; idx++) {
@@ -707,6 +736,18 @@ async function invoiceOrderOnce(
       const problem = await ibscbsProblemOf(item.id, link.taxRuleId, pieces)
       if (problem) ibscbsProblems.push({ itemId: item.id, ...problem })
       else ibscbsChecked = pieces.ibscbs!.classificationCode
+    }
+    // IBS.E9.P5: o item de mercadoria do Simples declara atividade, percentual e valores; sem o percentual do mês a nota não sai (D-IB140)
+    let ibscbsSimples: IbscbsSimplesDeclared | null = null
+    if (simplesPlan.active && link && !isService && SIMPLES_KINDS.includes(item.kind)) {
+      if (simplesPlan.rate === null) {
+        simplesProblems.push({ itemId: item.id, message: simplesRateMissingMessage(item.id, simplesPlan.competence) })
+      } else {
+        ibscbsSimples = declareSimplesItem({ ...simplesPlan, rate: simplesPlan.rate }, item.id, {
+          unitValue: item.unitValue, quantity: item.quantity, merchandiseValue,
+          freightShare: freightShares[idx], expensesShare: expensesShares[idx],
+        }, item.simplesActivity)
+      }
     }
 
     // MVA/FCP por UF×NCM: ST pela UF do DESTINATÁRIO; NR (alíquota interna
@@ -785,6 +826,7 @@ async function invoiceOrderOnce(
       pisCst: pieces.pisCofins?.find(p => p.kind === 'P')?.cst ?? null,
       cofinsCst: pieces.pisCofins?.find(p => p.kind === 'C')?.cst ?? null,
       ibscbsClassificationCode: ibscbsChecked,
+      ibscbsSimples,
       icmsExtras: {
         cst: pieces.icms?.cstNr ?? pieces.icms?.csosn ?? null,
         origin: item.origin,
@@ -811,6 +853,11 @@ async function invoiceOrderOnce(
     // um 422 só, com todos os itens; o código é o do primeiro problema (regra sem a peça × código fora de vigência)
     throw new HttpError(422, 'Mercadoria sem classificação de IBS/CBS válida — revise as regras de tributação',
       ibscbsProblems.map(p => ({ field: `item.${p.itemId}`, message: p.message })), ibscbsProblems[0].code)
+  }
+  if (simplesProblems.length > 0) {
+    // um 422 só, com todos os itens (D-IB140): falta o percentual de IBS/CBS do Simples do mês da nota
+    throw new HttpError(422, 'Falta o percentual de IBS/CBS do Simples do mês da nota — cadastre o percentual do mês',
+      simplesProblems.map(p => ({ field: `item.${p.itemId}`, message: p.message })), 'BILLING_IBSCBS_SIMPLES_RATE_REQUIRED')
   }
 
   // total da nota = mercadorias + frete + despesas + ST + IPI (itens com financeiro)

@@ -104,6 +104,7 @@ export async function getMerchandise(
             m.taxable_trade_level      AS taxableTradeLevel,
             m.default_sale_trade_level AS defaultSaleTradeLevel,
             CASE WHEN m.manuf_sign_ind_scale COLLATE utf8mb4_bin IN ('S', 'N') THEN m.manuf_sign_ind_scale END AS scaleRelevance,
+            m.simples_activity      AS simplesActivity,
             mfc.cnpj                AS manufacturerCnpj,
             tu.tb_measure_id AS buMeasureId,
             ms.abbreviation  AS buMeasureAbbreviation,
@@ -331,14 +332,19 @@ async function upsertMerchandiseFacts(
   // coluna só entra no UPDATE quando a chave veio: ausente = o gravado (do sync, inclusive) não muda — a tela que ainda não manda o campo
   // não o apaga.
   const touchScale = input.scaleRelevance !== undefined
+  // cAtivSN próprio (IBS.E9.P5): a mesma regra — a linha que nasce leva o valor do corpo (ausente = NULL = herda); na que já existe só
+  // entra no UPDATE quando a chave veio, e a tela que ainda não manda o campo não o apaga
+  const touchActivity = input.simplesActivity !== undefined
   await conn.query(
     `INSERT INTO \`${schemaName}\`.tb_merchandise
-       (id, tb_institution_id, ncm, cest, kind_tributary, source, tb_brand_id, manuf_sign_ind_scale, created_at, updated_at, deleted)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
+       (id, tb_institution_id, ncm, cest, kind_tributary, source, tb_brand_id, manuf_sign_ind_scale, simples_activity, created_at, updated_at, deleted)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
      ON DUPLICATE KEY UPDATE ncm = VALUES(ncm), cest = VALUES(cest), kind_tributary = VALUES(kind_tributary),
                              source = VALUES(source), tb_brand_id = VALUES(tb_brand_id),${
-                               touchScale ? ' manuf_sign_ind_scale = VALUES(manuf_sign_ind_scale),' : ''} deleted = 'N', updated_at = NOW()`,
-    [id, institutionId, input.ncm ?? null, input.cest ?? null, input.purpose, input.origin, input.brandId, input.scaleRelevance ?? null])
+                               touchScale ? ' manuf_sign_ind_scale = VALUES(manuf_sign_ind_scale),' : ''}${
+                               touchActivity ? ' simples_activity = VALUES(simples_activity),' : ''} deleted = 'N', updated_at = NOW()`,
+    [id, institutionId, input.ncm ?? null, input.cest ?? null, input.purpose, input.origin, input.brandId, input.scaleRelevance ?? null,
+     input.simplesActivity ?? null])
 }
 
 /**

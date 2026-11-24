@@ -58,6 +58,8 @@ export interface MerchandiseFull extends MerchandiseListRow {
   defaultSaleTradeLevel:     number | null
   /** indEscala (D-PR60): 'S' relevante, 'N' não relevante, null = não informado (D-SY5 — o sync grava vazio como NULL). */
   scaleRelevance:            'S' | 'N' | null
+  /** cAtivSN próprio da mercadoria (IBS.E9.P5, D-IB139); null = herda o padrão do estabelecimento. */
+  simplesActivity:           string | null
   /** CNPJFab (D-PR65 — `tb_merchandise_factory`, linha viva); null = sem fabricante. Canônico, pode ser alfanumérico (D-PR64). */
   manufacturerCnpj:          string | null
   prices:                    MerchandisePriceRow[]
@@ -93,6 +95,8 @@ export interface MerchandiseInput {
   purpose:           string
   /** Fabricante (A-PR6): as duas chaves andam juntas; AUSENTES = o PUT não mexe, o POST grava "não informado". */
   scaleRelevance?:   'S' | 'N' | null
+  /** cAtivSN próprio (IBS.E9.P5, D-IB139): ausente = o gravado não muda; null = volta a herdar. */
+  simplesActivity?:  string | null
   manufacturerCnpj?: string | null
   baseUnit:          BaseUnitInput
   prices?:           MerchandisePriceInput[]
