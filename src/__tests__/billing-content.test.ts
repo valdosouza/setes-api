@@ -3,7 +3,7 @@
 // do cadastro. (A ligação com o /validate e o /invoice, só com a marcação `authorizeNfe`, está em billing.test.ts.)
 import pool from '../shared/db/connection'
 import {
-  invoiceContentIssues, noteTextIssue, loadInvoiceContent, NOTE_TEXT_MAX, InvoiceContent,
+  invoiceContentIssues, noteTextIssue, loadInvoiceContent, pisCofinsCstOf, NOTE_TEXT_MAX, InvoiceContent,
 } from '../modules/billing/billing.content'
 
 jest.mock('../shared/db/connection', () => ({ __esModule: true, default: { query: jest.fn(), getConnection: jest.fn() } }))
@@ -95,6 +95,27 @@ describe('conferência do conteúdo — regras puras', () => {
     const issues = invoiceContentIssues(c)
     expect(issues.map(i => `${i.scope}:${i.field}`)).toEqual(expected ? [expected] : [])
     if (expected) expect(issues[0]).toMatchObject({ itemId: 1, message: expect.stringMatching(/^Item 1: /) })
+  })
+
+  it('NFE.E1.P4.T4 — PIS/COFINS da regra: só `null` acusa (a regra não tem a peça); ausente não é conferido; item de serviço nem entra', () => {
+    const withCst = (pisCst: string | null | undefined, cofinsCst: string | null | undefined) => {
+      const c = good()
+      c.items = [{ ...c.items[0], ...(pisCst !== undefined ? { pisCst } : {}), ...(cofinsCst !== undefined ? { cofinsCst } : {}) }]
+      return invoiceContentIssues(c)
+    }
+    expect(withCst('07', '07')).toEqual([])                 // Simples: CST 07 nas duas — passa
+    expect(withCst(undefined, undefined)).toEqual([])       // item ainda sem regra: não conferido aqui
+    expect(withCst(null, '07')).toEqual([{ scope: 'item', itemId: 1, field: 'pis', message: 'Item 1: regra de tributação sem PIS' }])
+    expect(withCst('01', null)).toEqual([{ scope: 'item', itemId: 1, field: 'cofins', message: 'Item 1: regra de tributação sem COFINS' }])
+    expect(withCst(null, null).map(i => i.field)).toEqual(['pis', 'cofins'])
+  })
+
+  it('NFE.E1.P4.T4 — pisCofinsCstOf: lê o CST de cada peça da regra; sem a peça (ou CST em branco) devolve null', () => {
+    expect(pisCofinsCstOf({ pisCofins: [{ kind: 'P', cst: '07' }, { kind: 'C', cst: '07' }] })).toEqual({ pisCst: '07', cofinsCst: '07' })
+    expect(pisCofinsCstOf({ pisCofins: [{ kind: 'C', cst: '01' }] })).toEqual({ pisCst: null, cofinsCst: '01' })
+    expect(pisCofinsCstOf({ pisCofins: [{ kind: 'P', cst: ' ' }] })).toEqual({ pisCst: null, cofinsCst: null })
+    expect(pisCofinsCstOf({})).toEqual({ pisCst: null, cofinsCst: null })
+    expect(pisCofinsCstOf(undefined)).toEqual({ pisCst: null, cofinsCst: null })
   })
 
   it('devolve TODAS as pendências de uma vez (nunca para na primeira), cada uma com o campo e os números', () => {
@@ -200,6 +221,19 @@ describe('conferência do conteúdo — leitura do cadastro (ao vivo)', () => {
     expect(c.recipient).toMatchObject({ personType: 'N', document: null, address: null, phone: null, email: null, stateRegistrationIndicator: null })
     expect(mockQuery.mock.calls.some(call => /tb_city c/.test(String(call[0])))).toBe(false)   // sem endereço não consulta a cidade
     expect(invoiceContentIssues(c).map(i => i.field)).toEqual(['document', 'address'])
+  })
+
+  it('NFE.E1.P4.T4 — o CST de PIS/COFINS que o faturamento entrega por item passa para o conteúdo; item sem o campo fica sem ele', async () => {
+    mockFull.mockResolvedValueOnce(entity())
+    mockTax.mockResolvedValueOnce(null)
+    db({ units: [{ productId: 100, unit: 'UN', taxableUnit: 'UN', gtin: null }, { productId: 200, unit: 'KG', taxableUnit: 'KG', gtin: null }] })
+    const c = await loadInvoiceContent('setes_setes', 1, 55, [
+      { ...items[0], pisCst: '07', cofinsCst: null }, items[2],
+    ])
+    expect(c.items[0]).toMatchObject({ itemId: 1, pisCst: '07', cofinsCst: null })
+    expect('pisCst' in c.items[1]).toBe(false)
+    expect('cofinsCst' in c.items[1]).toBe(false)
+    expect(invoiceContentIssues(c).map(i => `${i.itemId}:${i.field}`)).toEqual(['1:cofins'])
   })
 
   it('sem endereço marcado como principal usa o primeiro; pedido sem mercadoria não consulta unidades', async () => {

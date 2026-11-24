@@ -40,6 +40,13 @@ export interface InvoiceContentItem {
   unit: string | null
   taxableUnit: string | null
   gtin: string | null
+  /**
+   * O CST de PIS e o de COFINS da REGRA de tributação vinculada ao item (NFE.E1.P4.T4). `null` = a regra NÃO tem a peça — os grupos
+   * PIS e COFINS são obrigatórios em todo item do 55 (rej. 745 e 748); ausente (`undefined`) = não conferido (item ainda sem regra
+   * vinculada, que já tem a pendência própria).
+   */
+  pisCst?: string | null
+  cofinsCst?: string | null
 }
 export interface InvoiceContent {
   recipient: InvoiceContentRecipient
@@ -131,8 +138,22 @@ export function invoiceContentIssues(content: InvoiceContent): ValidationIssue[]
     if (gtin.length > 0 && !/^(\d{8}|\d{12}|\d{13}|\d{14})$/.test(gtin)) {
       item('gtin', `código de barras (GTIN) "${gtin}" inválido — são 8, 12, 13 ou 14 dígitos`)
     }
+    // só `null` acusa: a regra vinculada não tem a peça (o item ficaria sem o CST que a NF-e exige em todo item)
+    if (it.pisCst === null) item('pis', 'regra de tributação sem PIS')
+    if (it.cofinsCst === null) item('cofins', 'regra de tributação sem COFINS')
   }
   return issues
+}
+
+/** O CST de PIS e o de COFINS das peças de UMA regra de tributação — `null` onde a regra não tem a peça (NFE.E1.P4.T4). */
+export function pisCofinsCstOf(pieces: { pisCofins?: ReadonlyArray<{ kind: 'P' | 'C'; cst: string }> } | null | undefined): {
+  pisCst: string | null; cofinsCst: string | null
+} {
+  const cst = (kind: 'P' | 'C'): string | null => {
+    const found = pieces?.pisCofins?.find(p => p.kind === kind)?.cst
+    return found != null && String(found).trim() !== '' ? String(found) : null
+  }
+  return { pisCst: cst('P'), cofinsCst: cst('C') }
 }
 
 /** O texto da nota (`infCpl`) acima do tamanho do leiaute — pendência com o campo, nunca truncado. */
@@ -151,7 +172,10 @@ export function noteTextIssue(noteText: string | null | undefined): ValidationIs
  */
 export async function loadInvoiceContent(
   schemaName: string, institutionId: number, recipientEntityId: number,
-  items: ReadonlyArray<{ id: number; productId: number; productKind: string; productDescription?: string | null; ncm: string | null }>,
+  items: ReadonlyArray<{
+    id: number; productId: number; productKind: string; productDescription?: string | null; ncm: string | null
+    pisCst?: string | null; cofinsCst?: string | null
+  }>,
 ): Promise<InvoiceContent> {
   const s = assertSchema(schemaName)
   const full = await getEntityFiscalFull(recipientEntityId)
@@ -220,6 +244,8 @@ export async function loadInvoiceContent(
       itemId: i.id, description: i.productDescription ?? null, ncm: i.ncm,
       unit: units.get(i.productId)?.unit ?? null, taxableUnit: units.get(i.productId)?.taxableUnit ?? null,
       gtin: units.get(i.productId)?.gtin ?? null,
+      ...(i.pisCst !== undefined ? { pisCst: i.pisCst } : {}),
+      ...(i.cofinsCst !== undefined ? { cofinsCst: i.cofinsCst } : {}),
     })),
   }
 }

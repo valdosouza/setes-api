@@ -60,7 +60,7 @@ import {
 } from './billing.interface'
 import { ValidateBodyDto, InvoiceBodyDto } from './billing.dto'
 import { merchandiseInvoiceTotalOf } from './billing.total'
-import { invoiceContentIssues, loadInvoiceContent, noteTextIssue } from './billing.content'
+import { invoiceContentIssues, loadInvoiceContent, noteTextIssue, pisCofinsCstOf } from './billing.content'
 import { billingInputPrint, BillingInputChanged } from './billing.input-print'
 
 /**
@@ -256,6 +256,8 @@ export async function validateOrder(
   // revisão. Sem o check, o cálculo despacharia pelo código restante e a
   // nota sairia no regime errado em silêncio.
   const validatePiecesCache = new Map<number, TaxRulePieces>()
+  /** item de mercadoria → regra de tributação que vale para ele neste validate (NFE.E1.P4.T4: PIS/COFINS da regra) */
+  const ruleIdByItem = new Map<number, number>()
   const ruleMissingCode = async (ruleId: number): Promise<'csosn' | 'cst' | null> => {
     let pieces = validatePiecesCache.get(ruleId)
     if (!pieces) {
@@ -310,6 +312,7 @@ export async function validateOrder(
       // RegraDireta — escolha do cliente: o vínculo 'M' é intocável, mas a
       // incoerência com o regime vira pendência do mesmo jeito (D42).
       const missing = await ruleMissingCode(manual.taxRuleId)
+      ruleIdByItem.set(item.id, manual.taxRuleId)
       if (missing) {
         issues.push({ scope: 'item', itemId: item.id, field: 'taxRule',
           message: missingCodeMessage(item.id, manual.taxRuleId, missing) })
@@ -327,6 +330,7 @@ export async function validateOrder(
       // link o /invoice devolve 422 REQUIRES_VALIDATION (é a "interrupção
       // do faturamento" prometida no aviso do cadastro).
       const missing = await ruleMissingCode(rule.id)
+      ruleIdByItem.set(item.id, rule.id)
       if (missing) {
         await clearAutoRuleLink(
           schemaName, institutionId, input.orderId, item.id, item.kind)
@@ -358,8 +362,14 @@ export async function validateOrder(
   // mercadoria, a conferência do conteúdo que a NF-e exige entra na lista — destinatário e itens, com o campo. Sem a marcação,
   // nenhuma leitura nova. (O texto da nota só existe no /invoice: é conferido lá.)
   if (input.authorizeNfe === true && items.some(i => i.productKind !== 'S')) {
+    // NFE.E1.P4.T4: a regra de cada item (resolvida acima, com as peças já lidas) entrega o CST de PIS e de COFINS; item ainda sem
+    // regra fica sem o campo (não conferido — a pendência dele é a da regra)
+    const withRule = items.map(i => {
+      const ruleId = ruleIdByItem.get(i.id)
+      return ruleId === undefined ? i : { ...i, ...pisCofinsCstOf(validatePiecesCache.get(ruleId)) }
+    })
     issues.push(...invoiceContentIssues(
-      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, items)))
+      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, withRule)))
   }
 
   // Q-A8: condições de cobrança são pré-requisito do faturamento — a tela
@@ -587,9 +597,22 @@ async function invoiceOrderOnce(
   // D-NE260 + D-NE267: a conferência do conteúdo é REFEITA aqui com a marcação que ESTE pedido de faturamento traz (a marcação não
   // é gravada; o /validate anterior não vale como garantia — padrão R5-Q3). Pendência = 422, antes de qualquer gravação —
   // e DEPOIS da devolução: na venda do ERP Desktop a causa a dizer é a origem (`RETURN_ORIGIN_LEGACY`), não o cadastro.
+  const piecesCache = new Map<number, TaxRulePieces>() // N itens, poucas regras (o laço do cálculo, abaixo, reaproveita)
   if (input.authorizeNfe === true && items.some(i => i.productKind !== 'S')) {
+    // NFE.E1.P4.T4: o CST de PIS e de COFINS vem das peças da regra VINCULADA ao item (as mesmas que o cálculo vai usar)
+    const withRule: Array<typeof items[number] & { pisCst?: string | null; cofinsCst?: string | null }> = []
+    for (const i of items) {
+      const link = i.productKind !== 'S' ? linkByItem.get(`${i.id}|${i.kind}`) : undefined
+      if (!link) { withRule.push(i); continue }
+      let pieces = piecesCache.get(link.taxRuleId)
+      if (!pieces) {
+        pieces = await loadPieces(schemaName, link.taxRuleId)
+        piecesCache.set(link.taxRuleId, pieces)
+      }
+      withRule.push({ ...i, ...pisCofinsCstOf(pieces) })
+    }
     const content = invoiceContentIssues(
-      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, items))
+      await loadInvoiceContent(schemaName, institutionId, branch.recipientEntityId, withRule))
     if (content.length > 0) {
       throw new HttpError(422, 'Dados que a NF-e exige estão incompletos — corrija o cadastro antes de faturar',
         content.map(i => ({ field: i.itemId !== undefined ? `item.${i.itemId}` : i.field ?? i.scope, message: i.message })),
@@ -610,7 +633,6 @@ async function invoiceOrderOnce(
     (await getConfigContent(institution, 'billing', 'sn_credit_aliq')) ?? '0')
 
   const computed: ComputedItem[] = []
-  const piecesCache = new Map<number, TaxRulePieces>() // N itens, poucas regras
   for (let idx = 0; idx < items.length; idx++) {
     const item = items[idx]
     const merchandiseValue = merchValues[idx]

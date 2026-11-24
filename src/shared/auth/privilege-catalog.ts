@@ -180,10 +180,11 @@ export const CONSUMED_PRIVILEGES: readonly ConsumedPrivilege[] = Object.freeze([
     where: `POST /api/billing/cancel… · API da NFS-e: reconferir/cancelar (${BRANCH_WHERE})`,
     absentBy: 'cancelar a devolução faturada é a Onda 2 do cancelamento (ramo adjust — billing.interface-resolver.ts); hoje o ' +
       'plano bloqueia e a tela não tem o botão (§3 do prompt_privilegios_interfaces.md: "cancelar = Onda 2"; A-PV12)' },
+  // NFE.E1.P4.T2 (D-E14, D-NE25 — troca a A-PV12 só neste par): a devolução é NF-e de mercadoria e o 1º release a transmite — o par
+  // passa a EXISTIR no catálogo (seed 79, aplicado ANTES do app — D-PV9). Quem confere é a API fiscal do ramo, pela `vw_user_access`
+  // (D-F13); a cerca enxerga hoje a guarda por ramo da API da NFS-e (a API da NF-e ainda não é varrida por ela).
   { interface: 'order-returns', privilege: 'TRANSMITIR', consumers: ['nfse'],
-    where: `API da NFS-e: transmitir (${BRANCH_WHERE})`,
-    absentBy: 'a devolução é NF-e de mercadoria (API da NF-e, sem código — D-F20): a tela não transmite e a API da NFS-e não emite ' +
-      'por ela (A-PV12)' },
+    where: `API fiscal do ramo: transmitir a NF-e de devolução (${BRANCH_WHERE} — D-NE25)` },
   { interface: 'order-returns', privilege: 'CONSULTAR', consumers: ['nfse'],
     where: `API da NFS-e: atualizar a nota e a passada do rodízio (${BRANCH_WHERE})`,
     absentBy: 'pelo mesmo motivo do TRANSMITIR: a devolução é NF-e e a API da NFS-e não emite por ela — A-PV12 ratificada com o ' +
