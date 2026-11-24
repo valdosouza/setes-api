@@ -2,7 +2,7 @@
 // Composição @shared/invoice/invoice-cancel (prompt_cancelamento_nota.md
 // D1–D17 + Q-P1..Q-P8, 2026-09-08): travar → planejar → executar.
 import { cancelInvoice, buildCancelPlan } from '../shared/invoice'
-import { rawServiceRow } from '../test-setup/fiscal-voice-rows'
+import { rawServiceRow, rawMerchandiseRow } from '../test-setup/fiscal-voice-rows'
 
 jest.mock('../shared/financial-settlement', () => ({
   __esModule: true,
@@ -45,10 +45,10 @@ beforeEach(() => {
 })
 
 /** Sequência base do plano: pedido F, nota viva com E, sem cheques/baixas/boletos/devoluções. */
-const PLAN_QUERIES = 11   // +1 (Onda 3): a voz do fisco — bloco `fiscal` (F2a A3: LINHAS da view do fiscal_api pela porta, na MESMA conexão)
+const PLAN_QUERIES = 12   // +1 (NFE.E1.P4.T1): a nota desta fila é modelo 55 (tem ramo de mercadoria) e lê também a voz da NF-e; +1 (Onda 3): a voz do fisco — bloco `fiscal` (F2a A3: LINHAS da view do fiscal_api pela porta, na MESMA conexão)
 function planQueries(conn: any, opts: {
   status?: string; invoice?: any[]; last?: any[]; anchor?: any[]; serviceOrder?: any[]; receipts?: any[]; payments?: any[];
-  slips?: any[]; released?: any[]; returns?: any[]; fiscal?: any[];
+  slips?: any[]; released?: any[]; returns?: any[]; fiscal?: any[]; merchandiseFiscal?: any[];
 } = {}) {
   conn.query
     .mockResolvedValueOnce([[{ status: opts.status ?? 'F' }]])                       // lock pedido
@@ -64,6 +64,8 @@ function planQueries(conn: any, opts: {
   if (opts.released) conn.query.mockResolvedValueOnce([opts.released])                 // D-G9: só com boleto agrupado
   conn.query.mockResolvedValueOnce([opts.returns ?? []])                               // devoluções
   conn.query.mockResolvedValueOnce([opts.fiscal ?? []])                                // Onda 3: última transmissão ao fisco (bloco fiscal)
+  // NFE.E1.P4.T1: nota com ramo de MERCADORIA (modelo 55 — o padrão desta fila) lê também a voz da NF-e, logo depois da de serviço
+  if (String((opts.invoice ?? [{ model: '55' }])[0]?.model) === '55') conn.query.mockResolvedValueOnce([opts.merchandiseFiscal ?? []])
 }
 
 const scope = ['setes_setes', 1, 7] as const
@@ -429,7 +431,8 @@ describe('buildCancelPlan — bloco fiscal pela voz do fiscal_api (F2a A3)', () 
     expect(slip.cancelBankSlip).not.toHaveBeenCalled()
     const calls = conn.query.mock.calls.map((c: any) => String(c[0]))
     const fiscalAt = calls.findIndex(q => /fiscal_api`\.vw_invoice_service_transmission/.test(q))
-    expect(fiscalAt).toBe(PLAN_QUERIES - 1)
+    expect(fiscalAt).toBe(PLAN_QUERIES - 2)                                         // a voz da NFS-e; a da NF-e vem logo depois (última do plano)
+    expect(calls[PLAN_QUERIES - 1]).toMatch(/fiscal_api`\.vw_invoice_merchandise_transmission[\s\S]*v\.life_event = \?/)
     expect(calls[fiscalAt]).toMatch(/v\.life_event = \?/)                          // D-F119: escopado pela VIDA
     expect(calls[fiscalAt]).not.toMatch(/FOR UPDATE|LOCK IN SHARE MODE/)            // o leitor do núcleo não trava (D-F121)
     expect(conn.query.mock.calls[fiscalAt][1]).toEqual(expect.arrayContaining([1, 100, 0]))
@@ -601,3 +604,85 @@ describe('D3/D4 — nota com REGISTRO FISCAL cancelada FICA (Q-CA1…Q-CA4, Vald
     expect(plan.blocks).toEqual([expect.objectContaining({ field: 'serviceOrder', ref: '7001' })])
   })
 })
+
+// ---------------------------------------------------------------------
+// NFE.E1.P4.T1 — o plano de cancelamento lê a voz da NF-e (família merchandise) e a conjugada compõe os dois ramos
+// ---------------------------------------------------------------------
+describe('NFE.E1.P4.T1 — plano de cancelamento com a NF-e', () => {
+  const nfe = (over: any = {}) => rawMerchandiseRow({ invoiceId: 100, lifeEvent: 1, ...over })
+  const unrecordedNfe = (over: any = {}) =>
+    nfe({ authorityRecorded: 'N', lastKind: null, lastCode: null, lastEvent: null, lastDh: null, lastEventAt: null, lastSource: null, ...over })
+  const fiscalBlocks = (plan: any) => plan.blocks.filter((b: any) => b.field === 'fiscal')
+
+  it('D-NE270 — NF-e sem resposta conclusiva: bloco `fiscal` com a barreira `unanswered` do ramo de mercadoria; nada é cancelado', async () => {
+    const conn = fakeConn()
+    planQueries(conn, { merchandiseFiscal: [unrecordedNfe({ attempt: 2, lastKind: 'F' })] })
+    const plan = await buildCancelPlan(conn as any, 'setes_setes', 1, 100)
+    expect(fiscalBlocks(plan)).toEqual([{
+      field: 'fiscal', ref: '2', barrier: { kind: 'unanswered', attempt: 2, branch: 'merchandise' },
+      message: 'Transmissão da NF-e sem resposta conclusiva do fisco (tentativa 2) — consulte a situação da NF-e no fisco antes de cancelar a nota',
+    }])
+    expect(plan.fiscalRecord).toBe(false)
+    const conn2 = fakeConn()
+    planQueries(conn2, { merchandiseFiscal: [unrecordedNfe({ attempt: 2, lastKind: 'F' })] })
+    await expect(cancelInvoice(conn2 as any, ...scope, { orderId: 100, reason: 'erro' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'INVOICE_CANCEL_BLOCKED' })
+    expect(conn2.query).toHaveBeenCalledTimes(PLAN_QUERIES)   // só o plano — nenhuma gravação
+  })
+
+  it('NF-e autorizada em produção: bloco `authorized` do ramo de mercadoria ("cancele a NF-e no fisco primeiro") e a nota tem registro fiscal', async () => {
+    const conn = fakeConn()
+    planQueries(conn, { merchandiseFiscal: [nfe()] })
+    const plan = await buildCancelPlan(conn as any, 'setes_setes', 1, 100)
+    expect(fiscalBlocks(plan)).toEqual([expect.objectContaining({
+      barrier: { kind: 'authorized', attempt: 1, branch: 'merchandise' }, message: expect.stringMatching(/^NF-e autorizada no fisco[\s\S]*cancele a NF-e no fisco primeiro/),
+    })])
+    expect(plan.fiscalRecord).toBe(true)
+  })
+
+  it('NF-e rejeitada ou nunca transmitida: sem bloco fiscal e sem registro — cancelamento local direto', async () => {
+    for (const merchandiseFiscal of [[unrecordedNfe({ lastKind: 'R', lastCode: '225' })], []]) {
+      const conn = fakeConn()
+      planQueries(conn, { merchandiseFiscal })
+      const plan = await buildCancelPlan(conn as any, 'setes_setes', 1, 100)
+      expect(fiscalBlocks(plan)).toEqual([])
+      expect(plan.fiscalRecord).toBe(false)
+    }
+  })
+
+  it('D-E7 — NF-e denegada (nota antiga) em produção: não barra, e a nota FICA (registro fiscal); NF-e cancelada no fisco: não barra', async () => {
+    const conn = fakeConn()
+    planQueries(conn, { merchandiseFiscal: [nfe({ lastKind: 'D', lastCode: '110' })] })
+    const denied = await buildCancelPlan(conn as any, 'setes_setes', 1, 100)
+    expect(fiscalBlocks(denied)).toEqual([])
+    expect(denied.fiscalRecord).toBe(true)
+    const conn2 = fakeConn()
+    planQueries(conn2, { merchandiseFiscal: [nfe({ lastKind: 'C', lastCode: '135' })] })
+    const cancelled = await buildCancelPlan(conn2 as any, 'setes_setes', 1, 100)
+    expect(fiscalBlocks(cancelled)).toEqual([])
+    expect(cancelled.fiscalRecord).toBe(true)
+  })
+
+  it('conjugada com os DOIS ramos autorizados: dois blocos fiscais, o de serviço primeiro e SEM `branch` (o contrato dele não muda)', async () => {
+    const conn = fakeConn()
+    planQueries(conn, { fiscal: [row()], merchandiseFiscal: [nfe({ attempt: 3 })] })
+    const blocks = fiscalBlocks(await buildCancelPlan(conn as any, 'setes_setes', 1, 100))
+    expect(blocks.map((b: any) => b.barrier)).toEqual([
+      { kind: 'authorized', attempt: 2 },
+      { kind: 'authorized', attempt: 3, branch: 'merchandise' },
+    ])
+    expect(blocks[0].message).toMatch(/NFS-e/)
+    expect(blocks[1].message).toMatch(/^NF-e /)
+  })
+
+  it('nota SÓ de serviço (modelo SE): a voz da NF-e NÃO é lida — o plano faz as consultas de sempre', async () => {
+    const conn = fakeConn()
+    planQueries(conn, { invoice: [{ id: 100, number: '7', serie: '1', model: 'SE', value: '250.00', status: '0' }], fiscal: [row()] })
+    const plan = await buildCancelPlan(conn as any, 'setes_setes', 1, 100)
+    expect(fiscalBlocks(plan).map((b: any) => b.barrier)).toEqual([{ kind: 'authorized', attempt: 2 }])
+    const calls = conn.query.mock.calls.map((c: any) => String(c[0]))
+    expect(calls.some((q: string) => /vw_invoice_merchandise_transmission/.test(q))).toBe(false)
+    expect(calls.length).toBe(PLAN_QUERIES - 1)
+  })
+})
+

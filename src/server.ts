@@ -54,7 +54,8 @@ async function bootstrap() {
     logger.info(`E-mail da operação (alarmes): ${assertOpsAlertReady()}`)
     // D-F113/D-F127 (F2a A3): a voz do fisco é LIDA no fiscal_api — sem a view de cada família que o ERP lê (ou sem o GRANT) o
     // setes-api NÃO sobe (nunca 500 na 1ª leitura da lista de OS). Ordem de deploy: nfse-api (as migrations das views) ANTES do
-    // setes-api. D-NE245: a família que espera o plano de cancelamento não é conferida — e o log diz isso.
+    // setes-api. D-NE245: a família que espera o plano de cancelamento não é conferida — e o log diz isso. Desde o NFE.E1.P4 nada
+    // espera: o boot confere a view da NFS-e E a da NF-e — nfse-api e nfe-api (as migrations das views) ANTES do setes-api.
     logger.info(`Voz do fisco (views): ${await assertFiscalVoiceReadable(pool)}${awaitingFamiliesBootNote()}`)
     logger.info('Iniciando migrations...')
     await runMigrationsForAllInstitutions()

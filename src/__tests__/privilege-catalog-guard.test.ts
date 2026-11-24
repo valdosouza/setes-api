@@ -58,8 +58,8 @@ describe('D-PV15/D-PV51 — o que o catálogo não pode perder (peça pura)', ()
 
   it('pares exigidos = os que o código opera (roteador + lista à mão, sem os ausentes) + VISUALIZAR se tela + CONFIGURAR da regra + reservados', () => {
     expect(pairs('settlements', { screen: true })).toEqual(['ALTERAR', 'CONFIGURAR', 'DESCONTO', 'EXCLUIR', 'INSERIR', 'VISUALIZAR'])
-    // CANCELAR/TRANSMITIR/CONSULTAR da devolução: ausentes por decisão (A-PV12)
-    expect(pairs('order-returns', { screen: true })).toEqual(['ALTERAR', 'CONFIGURAR', 'EXCLUIR', 'FATURAR', 'INSERIR', 'VISUALIZAR'])
+    // CANCELAR/CONSULTAR da devolução: ausentes por decisão (A-PV12); o TRANSMITIR passou a ser exigido no NFE.E1.P4.T2 (D-NE25, seed 79)
+    expect(pairs('order-returns', { screen: true })).toEqual(['ALTERAR', 'CONFIGURAR', 'EXCLUIR', 'FATURAR', 'INSERIR', 'TRANSMITIR', 'VISUALIZAR'])
     expect(pairs('legacy-report', { screen: false })).toEqual([])                     // ninguém usa
     expect(pairs('legacy-report', { screen: true })).toEqual(['VISUALIZAR'])           // a regra do menu
     expect(pairs('legacy-report', { screen: false, configurable: true })).toEqual(['CONFIGURAR'])   // a regra do CONFIGURAR

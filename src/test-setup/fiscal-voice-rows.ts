@@ -4,8 +4,8 @@
  * REAL da família (`mapTransmissionView` do núcleo). F2a, etapa A3 — nota (5): a suíte precisa de linha real, porque a falha FECHADA
  * dos predicados esconde erro de projeção (um campo faltando vira "não provado" calado).
  */
-import { mapTransmissionView } from 'fiscal-api/reading'
-import type { ServiceTransmissionView } from 'fiscal-api/reading'
+import { mapTransmissionView, mapMerchandiseTransmissionView } from 'fiscal-api/reading'
+import type { ServiceTransmissionView, MerchandiseTransmissionView } from 'fiscal-api/reading'
 
 export const TEST_KEY = '41069022123456780001990000000000123202610100000123'
 
@@ -34,6 +34,27 @@ export function rawServiceRow(over: Partial<RawServiceRow> = {}): RawServiceRow 
 /** A mesma linha MAPEADA pela família (o que a porta `@shared/fiscal-voice` entrega). */
 export function serviceView(over: Partial<RawServiceRow> = {}): ServiceTransmissionView {
   return mapTransmissionView(rawServiceRow(over))
+}
+
+/** Linha CRUA da view de tentativas da NF-e (`fiscal_api.vw_invoice_merchandise_transmission`) — a chave é NOSSA desde a reserva. */
+export type RawMerchandiseRow = Omit<RawServiceRow, 'serie' | 'dpsNumber' | 'dpsId' | 'nfseNumber' | 'dhProc' | 'nfseNotGeneratedAt'>
+  & { dhEmission: string | null }
+
+/** Padrão: NF-e AUTORIZADA em produção, tentativa 1 da vida 1 da nota 7400. */
+export function rawMerchandiseRow(over: Partial<RawMerchandiseRow> = {}): RawMerchandiseRow {
+  return {
+    institutionId: 1, invoiceId: 7400, terminal: 0, attempt: 1, lifeEvent: 1,
+    environment: 'P', accessKey: '41261112345678000199550010000000011000000015', authorityRecorded: 'S',
+    lastQueriedAt: null, createdAt: '2026-11-24 12:00:00', lastEvent: 1, lastKind: 'A',
+    lastCode: '100', lastMessage: null, lastSource: 'P', lastDh: '2026-11-24 12:00:05', lastEventAt: '2026-11-24 12:00:05',
+    dhEmission: '2026-11-24 12:00:00',
+    ...over,
+  }
+}
+
+/** A mesma linha MAPEADA pela família (o que a porta entrega). */
+export function merchandiseView(over: Partial<RawMerchandiseRow> = {}): MerchandiseTransmissionView {
+  return mapMerchandiseTransmissionView(rawMerchandiseRow(over))
 }
 
 /** Tentativa SEM registro (sem chave — em voo, R ou F). */

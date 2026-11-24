@@ -11,7 +11,7 @@ import { reverseCheckEvent, isCheckEventCurrent } from '@shared/check'
 import { insertCommissions, getCommissionBalanceByItem, CommissionEntryInput } from '@shared/commission'
 import { findServiceOrderForReopen, reopenServiceOrder, releaseServiceOrderCompetences } from '@shared/service-order'
 import { lockInvoice, insertInvoiceEvent, LockedInvoice } from './invoice'
-import { readInvoiceFiscal, fiscalCancelBarrier, invoiceFiscalRecord, FiscalCancelBarrier } from './invoice-fiscal-effect'
+import { readInvoiceFiscal, fiscalCancelBarriers, invoiceFiscalRecord, BranchCancelBarrier } from './invoice-fiscal-effect'
 
 /**
  * COMPOSIÇÃO "desfazer o faturamento" (prompt_cancelamento_nota.md D1–D17 +
@@ -64,11 +64,16 @@ export interface CancelBlock extends FieldError {
   barrier?: FiscalBarrierView
 }
 
-/** A barreira fiscal como DADO (D-F141): o tipo, o motivo do veredito da reconferência (só em `reconfirm`) e a tentativa. */
+/**
+ * A barreira fiscal como DADO (D-F141): o tipo, o motivo do veredito da reconferência (só em `reconfirm`) e a tentativa.
+ * NFE.E1.P4.T1 (aditivo): `unanswered` = a NF-e sem resposta conclusiva do fisco (D-NE270); `branch` diz de qual documento é o
+ * bloqueio — vem só no da NF-e ('merchandise'); AUSENTE = NFS-e (o bloco de serviço não muda).
+ */
 export interface FiscalBarrierView {
-  kind:    'authorized' | 'in-flight' | 'cancel-in-flight' | 'reconfirm'
+  kind:    'authorized' | 'in-flight' | 'cancel-in-flight' | 'reconfirm' | 'unanswered'
   reason?: string
   attempt: number | null
+  branch?: 'merchandise'
 }
 
 export interface CancelPlan {
@@ -342,9 +347,10 @@ export async function buildCancelPlan(
   // devolveu com 1 linha exigida (D-F119/D-F126). Nunca transmitida, R, F conclusivo ou C do fisco → cancela local (a voz C vigente
   // É o caminho do efeito — D-F28: o app pediu o cancelamento à nfse-api e agora manda o C local); viva → espera; autorizada em
   // produção → cancele primeiro no fisco (nfse-api); F por consulta em produção sem PROVA da reconferência → reconfira na nfse-api.
-  const fiscal = await readInvoiceFiscal(conn, institutionId, orderId, invoice.lifeEvent)
-  const barrier = fiscalCancelBarrier(fiscal)
-  if (barrier.kind !== 'none') blocks.push(fiscalBlock(barrier))
+  // NFE.E1.P4.T1: a nota com ramo de MERCADORIA (modelo 55) lê também a voz da NF-e; a conjugada compõe os dois ramos — um bloco
+  // `fiscal` por ramo que barra (serviço primeiro). A nota só de serviço faz exatamente a leitura de sempre.
+  const fiscal = await readInvoiceFiscal(conn, institutionId, orderId, invoice.lifeEvent, { merchandise: invoice.model === '55' })
+  for (const b of fiscalCancelBarriers(fiscal)) blocks.push(fiscalBlock(b))
   // D3/D4 do cancelamento (Valdo, reafirmada 2026-09-29 após a 1ª NFS-e cancelada em produção):
   // nota com REGISTRO FISCAL (a NFS-e existiu no fisco) NUNCA some: fica viva com o evento C, mantém número,
   // ramos e snapshots, e o pedido vira 'C' (cancelado — nunca volta a não faturado; fiel ao PED-01 do legado).
@@ -377,8 +383,10 @@ export async function buildCancelPlan(
   }
 }
 
-/** O bloco `fiscal` do plano — a mensagem aponta a AÇÃO (na nfse-api ou esperar), nunca "consulte" no setes-api (D-F4). */
-function fiscalBlock(b: Exclude<FiscalCancelBarrier, { kind: 'none' }>): CancelBlock {
+/** O bloco `fiscal` do plano — a mensagem aponta a AÇÃO (na API fiscal do ramo ou esperar), nunca "consulte" no setes-api (D-F4). */
+function fiscalBlock(branchBarrier: BranchCancelBarrier): CancelBlock {
+  if (branchBarrier.branch === 'merchandise') return merchandiseFiscalBlock(branchBarrier.barrier)
+  const b = branchBarrier.barrier
   const nfse = 'nfseNumber' in b && b.nfseNumber ? `NFS-e ${b.nfseNumber}` : 'NFS-e'
   const ref = String(b.attempt ?? '')
   const barrier: FiscalBarrierView = { kind: b.kind, attempt: b.attempt ?? null, ...(b.kind === 'reconfirm' ? { reason: b.reason } : {}) }
@@ -391,6 +399,25 @@ function fiscalBlock(b: Exclude<FiscalCancelBarrier, { kind: 'none' }>): CancelB
       return { field: 'fiscal', ref, barrier, message: `Transmissão ao fisco em andamento (tentativa ${b.attempt}) — aguarde a voz do fisco antes` }
     case 'reconfirm':
       return { field: 'fiscal', ref, barrier, message: `Envio interrompido sem prova de que a NFS-e não existe (${b.reason}) — reconfira a NFS-e no fisco antes de cancelar a nota` }
+  }
+}
+
+/**
+ * O bloco `fiscal` do ramo de MERCADORIA (NF-e) — NFE.E1.P4.T1. `barrier.branch = 'merchandise'` diz ao app de qual documento é o
+ * bloqueio (o bloco de serviço segue SEM o campo — ausente = NFS-e, como sempre foi).
+ */
+function merchandiseFiscalBlock(b: Extract<BranchCancelBarrier, { branch: 'merchandise' }>['barrier']): CancelBlock {
+  const ref = String(b.attempt)
+  const barrier: FiscalBarrierView = { kind: b.kind, attempt: b.attempt, branch: 'merchandise' }
+  switch (b.kind) {
+    case 'authorized':
+      return { field: 'fiscal', ref, barrier, message: `NF-e autorizada no fisco (tentativa ${b.attempt}) — cancele a NF-e no fisco primeiro (o fisco fala primeiro)` }
+    case 'cancel-in-flight':
+      return { field: 'fiscal', ref, barrier, message: `Pedido de cancelamento da NF-e ao fisco sem resposta (tentativa ${b.attempt}) — consulte a NF-e no fisco para reconciliar antes` }
+    case 'in-flight':
+      return { field: 'fiscal', ref, barrier, message: `Transmissão da NF-e ao fisco em andamento (tentativa ${b.attempt}) — aguarde a voz do fisco antes` }
+    case 'unanswered':
+      return { field: 'fiscal', ref, barrier, message: `Transmissão da NF-e sem resposta conclusiva do fisco (tentativa ${b.attempt}) — consulte a situação da NF-e no fisco antes de cancelar a nota` }
   }
 }
 

@@ -413,6 +413,30 @@ describe('validateOrder', () => {
     expect((await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })).issues).toEqual([])
   })
 
+  it('NFE.E1.P4.T4 — /validate COM a marcação: o CST de PIS e de COFINS da regra do item vai à conferência (regra sem COFINS → null); item sem regra vai sem o campo', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 }), itemRow({ id: 2, productId: 200 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 99, cfopId: '5405', setFinancial: 'S', origin: 'M' }]])
+    mockLoadPieces.mockResolvedValueOnce({
+      icms: { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0, deferred: 'N', deferredAliq: null, highlight: 'N' },
+      pisCofins: [{ kind: 'P', cst: '07', aliq: 0 }],
+    })
+    mockFindTaxRule.mockResolvedValueOnce(null)                   // item 2: nenhuma regra casa
+    mockContent.loadInvoiceContent.mockResolvedValueOnce(goodContent({
+      items: [{ itemId: 1, description: 'Peça', ncm: '84713012', unit: 'UN', taxableUnit: 'UN', gtin: null, pisCst: '07', cofinsCst: null }],
+    }))
+    const report = await validateOrder(inst as any, { orderId: 10, authorizeNfe: true })
+    const passed = mockContent.loadInvoiceContent.mock.calls[0][3] as any[]
+    expect(passed.find(i => i.id === 1)).toMatchObject({ pisCst: '07', cofinsCst: null })
+    expect('pisCst' in passed.find(i => i.id === 2)).toBe(false)   // sem regra: não conferido aqui (a pendência dele é a da regra)
+    expect(report.issues).toEqual(expect.arrayContaining([
+      { scope: 'item', itemId: 1, field: 'cofins', message: 'Item 1: regra de tributação sem COFINS' },
+    ]))
+    expect(report.issues.some(i => i.field === 'pis')).toBe(false)
+  })
+
   it('D-NE267 — pedido SÓ de serviço com a marcação: o conteúdo da NF-e não é conferido (não há nota de mercadoria)', async () => {
     mockOrderBase()
     mockBranchSale()
@@ -1085,6 +1109,48 @@ describe('invoiceOrder', () => {
       ],
     })
     expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it('NFE.E1.P4.T4 — /invoice COM a marcação: regra vinculada sem PIS → 422 REQUIRES_VALIDATION no item, antes de gravar; as peças lidas na conferência são as do cálculo (uma leitura só)', async () => {
+    const queue = () => {
+      mockOrderBase()
+      mockBranchSale()
+      mockContext()
+      mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+      mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 42, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+      mockQuery.mockResolvedValueOnce([[{ id: 42 }]])
+    }
+    queue()
+    mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece(), pisCofins: [{ kind: 'C', cst: '07', aliq: 0 }] })
+    mockContent.loadInvoiceContent.mockImplementationOnce(async (_s: string, _i: number, _r: number, items: any[]) => goodContent({
+      items: items.map(i => ({ itemId: i.id, description: 'Peça', ncm: '84713012', unit: 'UN', taxableUnit: 'UN', gtin: null, pisCst: i.pisCst, cofinsCst: i.cofinsCst })),
+    }))
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })).rejects.toMatchObject({
+      statusCode: 422, code: 'REQUIRES_VALIDATION',
+      fields: [{ field: 'item.1', message: 'Item 1: regra de tributação sem PIS' }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+
+    // com as duas peças (CST 07 do Simples) a nota sai, e a regra foi lida UMA vez (conferência e cálculo usam o mesmo cache)
+    queue()
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockClear()
+    mockLoadPieces.mockResolvedValueOnce({ icms: icmsPiece(), pisCofins: [{ kind: 'P', cst: '07', aliq: 0 }, { kind: 'C', cst: '07', aliq: 0 }] })
+    mockContent.loadInvoiceContent.mockImplementationOnce(async (_s: string, _i: number, _r: number, items: any[]) => goodContent({
+      items: items.map(i => ({ itemId: i.id, description: 'Peça', ncm: '84713012', unit: 'UN', taxableUnit: 'UN', gtin: null, pisCst: i.pisCst, cofinsCst: i.cofinsCst })),
+    }))
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+    const conn = { beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]), commit: jest.fn(), rollback: jest.fn(), release: jest.fn() }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])
+    mockNegotiationInTx(conn, null)
+    const ok = await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, authorizeNfe: true })
+    expect(ok.totalValue).toBe(100)
+    expect(mockLoadPieces).toHaveBeenCalledTimes(1)
+    // e o CST do item foi registrado nas tabelas de PIS e de COFINS (D-NE248)
+    const cst = (table: string) => (conn.query.mock.calls.find((c: any[]) => String(c[0]).includes(`.${table}`))![1] as unknown[])[3]
+    expect([cst('tb_order_item_pis'), cst('tb_order_item_cofins')]).toEqual(['07', '07'])
   })
 
   it('D-NE260 — /invoice COM a marcação e conteúdo bom: fatura', async () => {

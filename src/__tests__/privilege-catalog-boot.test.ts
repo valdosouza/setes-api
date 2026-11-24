@@ -168,14 +168,15 @@ describe('D-PV51 — conferência do catálogo, igualdade por interface (pura)',
 
   it('"ausente por decisão" não é exigido nem sobra; se o par aparecer no catálogo, avisa para tirar a marca (ou o par)', () => {
     const absent = CONSUMED.filter(absentMarkHolds)
+    // NFE.E1.P4.T2: `order-returns|TRANSMITIR` saiu da lista (o par passou a existir — seed 79); CANCELAR e CONSULTAR seguem ausentes
     expect(absent.map(c => `${c.interface}|${c.privilege}`).sort())
-      .toEqual(['order-returns|CANCELAR', 'order-returns|CONSULTAR', 'order-returns|TRANSMITIR'])
+      .toEqual(['order-returns|CANCELAR', 'order-returns|CONSULTAR'])
     const withThem = [...expectedCatalog(), ...absent.map(c => ({ interfaceKey: c.interface, privilegeId: PRIVILEGE_ID[c.privilege] }))]
     const p = privilegeCatalogProblems(facts(withThem))
     expect(p.missing).toEqual([])
     expect(p.surplus).toEqual([])
     expect(p.absentButPresent.map(a => `${a.interface}|${a.privilege}`).sort())
-      .toEqual(['order-returns|CANCELAR', 'order-returns|CONSULTAR', 'order-returns|TRANSMITIR'])
+      .toEqual(['order-returns|CANCELAR', 'order-returns|CONSULTAR'])
   })
 
   it('a marca NÃO vale quando um BOTÃO consome o par (seria o próprio C1): o par volta a ser exigido', () => {

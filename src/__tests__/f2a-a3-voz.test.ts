@@ -74,11 +74,17 @@ describe('porta @shared/fiscal-voice — o único leitor do fiscal_api (D-F15/D-
     expect(rows.map(r => [r.invoiceId, r.lifeEvent])).toEqual([[10, 1], [11, 4]])
     expect(q.query.mock.calls[0][0]).toMatch(/FROM `fiscal_api`\.vw_invoice_service_transmission/)
   })
-  it('D-F113/D-F127 + D-NE245 — conferência do boot: a view de cada família que o ERP LÊ (só a NFS-e) responde ao SELECT publicado; sem view/coluna/GRANT o boot NÃO sobe', async () => {
+  it('D-F113/D-F127 + NFE.E1.P4 — conferência do boot: a view de cada família que o ERP LÊ (NFS-e e NF-e) responde ao SELECT publicado; sem view/coluna/GRANT o boot NÃO sobe', async () => {
     const ok = qOf([])
-    expect(await assertFiscalVoiceReadable(ok)).toBe('fiscal_api — conferida(s): service')
-    expect(ok.query).toHaveBeenCalledTimes(1)   // D-NE245: a view da família em espera (merchandise) NÃO é consultada no boot
+    expect(await assertFiscalVoiceReadable(ok)).toBe('fiscal_api — conferida(s): service, merchandise')
+    expect(ok.query).toHaveBeenCalledTimes(2)   // NFE.E1.P4: a família merchandise saiu da espera — o boot confere as duas views
     expect(ok.query.mock.calls[0][0]).toMatch(/FROM `fiscal_api`\.vw_invoice_service_transmission v WHERE 1 = 0/)
+    expect(ok.query.mock.calls[1][0]).toMatch(/FROM `fiscal_api`\.vw_invoice_merchandise_transmission v WHERE 1 = 0/)
+    // sem a view da NF-e (nfe-api não instalada antes) o setes-api NÃO sobe — ordem de deploy
+    const noNfe = { query: jest.fn()
+      .mockResolvedValueOnce([[]])
+      .mockRejectedValueOnce(Object.assign(new Error("Table 'fiscal_api.vw_invoice_merchandise_transmission' doesn't exist"), { code: 'ER_NO_SUCH_TABLE' })) }
+    await expect(assertFiscalVoiceReadable(noNfe)).rejects.toThrow(/família "merchandise"[\s\S]*ER_NO_SUCH_TABLE/)
     const denied = { query: jest.fn().mockRejectedValue(Object.assign(new Error('SELECT command denied'), { code: 'ER_TABLEACCESS_DENIED_ERROR' })) }
     await expect(assertFiscalVoiceReadable(denied)).rejects.toThrow(/família "service"[\s\S]*ER_TABLEACCESS_DENIED_ERROR[\s\S]*D-F113/)
   })
@@ -89,15 +95,16 @@ describe('nota (9) — famílias que o plano conhece × catálogo da biblioteca'
     expect(unknownFamilies()).toEqual([])
     expect(Object.keys(VOICE_READINGS).sort()).toEqual([...KNOWN_FAMILIES, ...FAMILIES_AWAITING_CANCEL_PLAN].sort())
   })
-  it('D-NE245 — a lista de espera é EXATAMENTE [merchandise] até o NFE.E1.P4.T1 (o plano de cancelamento da NF-e a esvazia e põe a família em KNOWN_FAMILIES)', () => {
-    expect([...FAMILIES_AWAITING_CANCEL_PLAN]).toEqual(['merchandise'])
-    expect([...KNOWN_FAMILIES]).toEqual(['service'])   // listar a família sem decidir o plano = contornar a cerca
+  it('D-NE245 + NFE.E1.P4.T1 — a lista de espera ESVAZIOU: o plano de cancelamento lê a NF-e e a família merchandise está em KNOWN_FAMILIES', () => {
+    expect([...FAMILIES_AWAITING_CANCEL_PLAN]).toEqual([])
+    expect([...KNOWN_FAMILIES]).toEqual(['service', 'merchandise'])
     const known: readonly string[] = KNOWN_FAMILIES
     expect(FAMILIES_AWAITING_CANCEL_PLAN.filter(f => known.includes(f))).toEqual([])                          // disjuntas
     expect(FAMILIES_AWAITING_CANCEL_PLAN.filter(f => !Object.keys(VOICE_READINGS).includes(f))).toEqual([])   // sem espera órfã
   })
   it('D-NE245 — o log do boot diz a família que está no catálogo SEM conferência, derivado da lista (vazio quando ela esvaziar)', () => {
-    expect(awaitingFamiliesBootNote()).toBe('; no catálogo sem conferência (esperando o plano de cancelamento, NFE.E1.P4): merchandise')
+    expect(awaitingFamiliesBootNote()).toBe('')   // NFE.E1.P4: nada mais espera — o log do boot só diz o que conferiu
+    expect(awaitingFamiliesBootNote(['x', 'y'])).toBe('; no catálogo sem conferência (esperando o plano de cancelamento, NFE.E1.P4): x, y')
     expect(awaitingFamiliesBootNote([])).toBe('')
     const server = fs.readFileSync(path.join(__dirname, '..', 'server.ts'), 'utf8')
     expect(server).toContain('${await assertFiscalVoiceReadable(pool)}${awaitingFamiliesBootNote()}')
@@ -107,7 +114,7 @@ describe('nota (9) — famílias que o plano conhece × catálogo da biblioteca'
     expect([...read, ...FAMILIES_AWAITING_CANCEL_PLAN].sort()).toEqual(Object.keys(VOICE_READINGS).sort())
     expect([...read].sort()).toEqual([...KNOWN_FAMILIES].sort())   // no NFE.E1.P4.T1: quem entra em KNOWN_FAMILIES entra em READ_FAMILIES
   })
-  it('D-NE245 — espera e leitor NÃO coexistem: com família em espera, nenhum arquivo de src (fora dos testes) lê a voz merchandise', () => {
+  it('D-NE245 — as cercas de leitura valem SEMPRE: o catálogo só na peça do efeito, leitura NOMEADA na porta, nomes da família só na porta e na peça, e nada de família em espera em src', () => {
     const root = path.join(__dirname, '..')
     const files: string[] = []
     const walk = (dir: string): void => {
@@ -118,19 +125,24 @@ describe('nota (9) — famílias que o plano conhece × catálogo da biblioteca'
     }
     walk(root)
     expect(files.length).toBeGreaterThan(100)   // a varredura não passa no vazio
-    if (!FAMILIES_AWAITING_CANCEL_PLAN.length) return
     const rel = (f: string): string => path.relative(root, f).replace(/\\/g, '/')
     const code = (f: string): string => fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')   // sem comentários
-    // (1) nenhum nome da família em espera em código: a leitura, o mapa, o predicado e a view dela
+    // (1) os nomes da família da NF-e (a leitura, o mapa, o predicado, a view) só na PORTA — a peça do efeito e o plano recebem as
+    // tentativas já lidas, tipadas; ninguém mais lê a voz dela (NFE.E1.P4: a família saiu da espera, mas a leitura segue numa porta só)
     const names = /MERCHANDISE_VOICE_READING|mapMerchandiseTransmissionView|isMerchandiseHumanEffectCancel|vw_invoice_merchandise_transmission/
-    expect(files.filter(f => names.test(code(f))).map(rel)).toEqual([])
-    // (2) o catálogo só é citado na peça da cerca — ninguém o percorre (Object.values/entries, índice, alias) para ler a família em espera
+    expect(files.filter(f => names.test(code(f))).map(rel)).toEqual(['shared/fiscal-voice/fiscal-voice.ts'])
+    expect(files.filter(f => /\breadMerchandiseVoiceOfLife\b/.test(code(f))).map(rel).sort())
+      .toEqual(['shared/fiscal-voice/fiscal-voice.ts', 'shared/invoice/invoice-fiscal-effect.ts'])
+    // (2) o catálogo só é citado na peça da cerca — ninguém o percorre (Object.values/entries, índice, alias) para ler uma família
     expect(files.filter(f => /\bVOICE_READINGS\b/.test(code(f))).map(rel)).toEqual(['shared/invoice/invoice-fiscal-effect.ts'])
-    // (3) na porta, todo leitor do núcleo recebe uma leitura NOMEADA de serviço — nunca variável nem o catálogo
+    // (3) na porta, todo leitor do núcleo recebe uma leitura NOMEADA — nunca variável nem o catálogo
     const door = code(path.join(root, 'shared', 'fiscal-voice', 'fiscal-voice.ts'))
     const calls = [...door.matchAll(/readFamilyTransmissions(?:Many)?\(\s*\w+\s*,\s*([^,]+),/g)].map(m => m[1].trim())
-    expect(calls.length).toBeGreaterThanOrEqual(2)
-    expect(calls.filter(a => a !== 'SERVICE_VOICE_READING')).toEqual([])
+    expect(calls.sort()).toEqual(['MERCHANDISE_VOICE_READING', 'SERVICE_VOICE_READING', 'SERVICE_VOICE_READING'])
+    // família em espera (lista vazia hoje) nunca tem leitor: se alguém puser uma família na espera, o nome dela não pode estar em src
+    for (const f of FAMILIES_AWAITING_CANCEL_PLAN) {
+      expect(files.filter(x => new RegExp(`\\b${f}\\b`, 'i').test(code(x))).map(rel)).toEqual([])
+    }
     // (4) o 5.0.0 também publica em `fiscal-api/reading` os leitores das faixas retiradas e da habilitação (não são a voz, mas leem o
     // fiscal_api): só a porta `@shared/fiscal-voice` pode chamá-los (é o ÚNICO lugar que lê o fiscal_api) — hoje ninguém chama
     const fiscalReaders = /\b(readWithdrawnRanges|assertWithdrawnRangesViewReadable|readIssuerView|assertIssuerViewReadable)\b/

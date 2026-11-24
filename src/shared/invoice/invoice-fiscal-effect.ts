@@ -1,10 +1,12 @@
 import {
   currentOf, isLiveTransmission, isAuthorized, isFiscalRecord, localCancelPending, isSubstitutionCancel, reconfirmationVerdict,
-  fiscalStateOf, VOICE_READINGS,
+  fiscalStateOf, blocksNewAttempt, VOICE_READINGS,
 } from 'fiscal-api/reading'
-import type { ServiceTransmissionView, ReadQueryable, ReconfirmReason, FiscalState } from 'fiscal-api/reading'
+import type {
+  ServiceTransmissionView, MerchandiseTransmissionView, ReadQueryable, ReconfirmReason, FiscalState,
+} from 'fiscal-api/reading'
 import { PoolConnection } from 'mysql2/promise'
-import { readServiceVoiceOfLife, readServiceVoicesOfLives } from '@shared/fiscal-voice'
+import { readServiceVoiceOfLife, readServiceVoicesOfLives, readMerchandiseVoiceOfLife } from '@shared/fiscal-voice'
 import { readInvoiceLives } from './invoice'
 
 /**
@@ -12,8 +14,10 @@ import { readInvoiceLives } from './invoice'
  * PREDICADOS do núcleo (`fiscal-api/reading`) e os fatos do ERP (nota, vida, dispensa): nada decide por coluna crua da voz
  * (`accessKey`, `environment === 'H'|'P'`, `last_queried_at` — nota (8) e §22.5 item 8; cerca na suíte).
  *
- * Família: esta peça só lê e só decide a NFS-e (`service`). O catálogo `VOICE_READINGS` do núcleo 5.0.0 também traz a NF-e
- * (`merchandise`), que ESPERA o plano de cancelamento (`FAMILIES_AWAITING_CANCEL_PLAN` — D-NE245) e entra aqui no NFE.E1.P4.T1.
+ * Famílias: a NFS-e (`service`) e, desde o NFE.E1.P4, a NF-e (`merchandise` — saiu da lista de espera da D-NE245 junto com o plano
+ * de cancelamento que a lê). A voz da NF-e só é lida para nota COM ramo de mercadoria (quem chama diz); a nota só de serviço faz
+ * exatamente as leituras de sempre. O EFEITO (`fiscalEffectOf` — D-F114) segue só da NFS-e: a pendência do C local da NF-e é
+ * resolvida pelo plano (a saga do app — D-NE22); a derivação do efeito para a NF-e nasce com a tela dela.
  * Cerca (nota (9)): família do catálogo que não é conhecida nem está em espera quebra o teste desta peça até alguém decidir.
  */
 
@@ -22,34 +26,45 @@ export interface InvoiceFiscalReading {
   service: ServiceTransmissionView[]
   /** A vigente da vida (D-N26 — `currentOf` do núcleo: a registrada pelo fisco, senão a última). */
   current: ServiceTransmissionView | null
+  /** As tentativas da NF-e na vida vigente — só lidas para nota com ramo de mercadoria (ausente/vazia = não lida ou nunca transmitida). */
+  merchandise?: MerchandiseTransmissionView[]
+  /** A vigente da NF-e na vida. */
+  merchandiseCurrent?: MerchandiseTransmissionView | null
 }
 
 /** Famílias que esta composição conhece — qualquer outra no catálogo é revisão OBRIGATÓRIA (nota (9) da F2a). */
-export const KNOWN_FAMILIES = Object.freeze(['service'] as const)
+export const KNOWN_FAMILIES = Object.freeze(['service', 'merchandise'] as const)
 
 /**
  * Famílias do catálogo que o plano de cancelamento AINDA NÃO DECIDIU (D-NE245 — Valdo, 2026-11-23). Não são conhecidas nem
- * desconhecidas: esperam, com saída marcada. `merchandise` (NF-e) sai daqui e entra em `KNOWN_FAMILIES` no NFE.E1.P4.T1, junto com o
- * plano que lê a voz dela. Enquanto uma família espera, a cerca da suíte fecha os caminhos de leitura: o catálogo `VOICE_READINGS` só
- * é citado NESTE arquivo (para a cerca), a porta `@shared/fiscal-voice` só passa leituras nomeadas ao leitor do núcleo e nenhum nome da
- * família em espera aparece em `src`. Hoje o cancelamento IGNORA a voz `merchandise` em silêncio — inofensivo só enquanto não existir
- * tentativa de NF-e sobre nota do ERP, fato que NENHUM código daqui garante (a precedência está na árvore: NFE.E1.P4 antes da 1ª
- * transmissão). Pôr a família em `KNOWN_FAMILIES` sem o plano seria contornar a cerca.
+ * desconhecidas: esperam, com saída marcada. Hoje VAZIA: `merchandise` (NF-e) saiu daqui e entrou em `KNOWN_FAMILIES` no
+ * NFE.E1.P4.T1, junto com o plano que lê a voz dela. Família nova do catálogo entra aqui (com o passo que a tira) ou em
+ * `KNOWN_FAMILIES` (com o plano) — nunca fica sem decisão (a cerca da suíte quebra). As cercas de leitura valem SEMPRE: o catálogo
+ * `VOICE_READINGS` só é citado NESTE arquivo, a porta `@shared/fiscal-voice` só passa leituras NOMEADAS ao leitor do núcleo, e os
+ * nomes de uma família só aparecem na porta e nesta peça.
  */
-export const FAMILIES_AWAITING_CANCEL_PLAN = Object.freeze(['merchandise'] as const)
+export const FAMILIES_AWAITING_CANCEL_PLAN: readonly string[] = Object.freeze([])
 
 /** Lê a voz da VIDA vigente. Quem DECIDE chama depois da trava da nota (D-F121) com a vida do `lockInvoice` (D-F126). */
 export async function readInvoiceFiscal(
   q: ReadQueryable, institutionId: number, invoiceId: number, lifeEvent: number | null,
+  opts: { merchandise?: boolean } = {},
 ): Promise<InvoiceFiscalReading> {
   if (lifeEvent == null) return { service: [], current: null }
   const service = await readServiceVoiceOfLife(q, institutionId, invoiceId, lifeEvent)
-  return { service, current: currentOf(service) }
+  if (opts.merchandise !== true) return { service, current: currentOf(service) }
+  // NFE.E1.P4.T1: nota com ramo de mercadoria — a voz da NF-e na MESMA vida (depois da de serviço; mesma porta)
+  const merchandise = await readMerchandiseVoiceOfLife(q, institutionId, invoiceId, lifeEvent)
+  return { service, current: currentOf(service), merchandise, merchandiseCurrent: currentOf(merchandise) }
 }
 
-/** Registro FISCAL da nota (Q-CA5/D3/D4): o fisco registrou o documento EM PRODUÇÃO — fato da view (D-NE56), nunca a chave. */
+/**
+ * Registro FISCAL da nota (Q-CA5/D3/D4): o fisco registrou o documento EM PRODUÇÃO — fato da view (D-NE56), nunca a chave. Em
+ * QUALQUER ramo (D-E11): a nota com NF-e autorizada em produção — ou denegada antiga (D-E7/D-NE61: publicada sempre registrada) —
+ * nunca some, mesmo com a NFS-e nunca transmitida.
+ */
 export function invoiceFiscalRecord(r: InvoiceFiscalReading): boolean {
-  return isFiscalRecord(r.current)
+  return isFiscalRecord(r.current) || isFiscalRecord(r.merchandiseCurrent ?? null)
 }
 
 /**
@@ -98,6 +113,66 @@ export function fiscalCancelBarrier(r: InvoiceFiscalReading): FiscalCancelBarrie
     default:
       return { kind: 'reconfirm', reason: verdict.reason, attempt: verdict.candidate?.attempt ?? null }
   }
+}
+
+/** A barreira da NF-e (família `merchandise`) ao cancelamento LOCAL — NFE.E1.P4.T1. `unanswered` = sem resposta conclusiva (D-NE270). */
+export type MerchandiseCancelBarrier =
+  | { kind: 'none' }
+  | { kind: 'authorized' | 'cancel-in-flight' | 'in-flight' | 'unanswered'; attempt: number }
+
+/**
+ * O que a NF-e diz sobre cancelar a nota LOCALMENTE — pelos predicados do núcleo, nunca pela letra crua (§3.9 item 1 da onda da
+ * NF-e, com a D-NE270), olhando TODAS as tentativas da vida:
+ *  1. alguma tentativa VIVA (em voo, em processamento, cancelamento sem resposta) → barra (`in-flight` / `cancel-in-flight`);
+ *  2. a vigente AUTORIZADA com registro fiscal (produção) → `authorized`: cancele a NF-e no fisco primeiro. A autorizada em
+ *     homologação não prende a nota (Q-CA5b);
+ *  3. a vigente REGISTRADA pelo fisco (o documento da vida é esse; as tentativas anteriores sem resposta foram resolvidas por ele),
+ *     pelo ESTADO dela — nunca "registrada, logo liberada" (gate adversarial do NFE.E1.P4: `blocksNewAttempt` só diz que registrou):
+ *      · cancelada no fisco (o caminho do efeito) ou denegada antiga (D-E7: não vai ao fisco; a nota fica pelo
+ *        `invoiceFiscalRecord`) → nada;
+ *      · autorizada em homologação → nada (Q-CA5b);
+ *      · registrada com última voz de FALHA (ex.: o pedido de cancelamento ficou sem resposta) → `unanswered` (D-NE270);
+ *      · registrada com última voz de REJEIÇÃO (ex.: o fisco recusou o cancelamento): o documento segue vivo no fisco → em
+ *        produção `authorized`; em homologação nada;
+ *  4. sem registro: alguma tentativa `failed` (sem resposta conclusiva) → `unanswered` — D-NE270: a NF-e pendente de retorno pode
+ *     já estar autorizada (RF-NFE-17); barra até a nfe-api consultar e a voz mudar, mesmo que uma tentativa POSTERIOR tenha sido
+ *     rejeitada;
+ *  5. nunca transmitida ou só rejeitada → nada.
+ */
+export function merchandiseCancelBarrier(list: readonly MerchandiseTransmissionView[] | undefined): MerchandiseCancelBarrier {
+  if (!list || list.length === 0) return { kind: 'none' }
+  const cur = currentOf(list)
+  const live = (cur && isLiveTransmission(cur) ? cur : null) ?? list.find(t => isLiveTransmission(t)) ?? null
+  if (live) {
+    return { kind: fiscalStateOf(live) === 'cancel_in_flight' ? 'cancel-in-flight' : 'in-flight', attempt: live.attempt }
+  }
+  if (cur && isAuthorized(cur) && isFiscalRecord(cur)) return { kind: 'authorized', attempt: cur.attempt }
+  if (cur && blocksNewAttempt(cur)) {                             // final e REGISTRADA pelo fisco (D-NE56) — regra 3, pelo estado
+    const state = fiscalStateOf(cur)
+    if (state === 'failed') return { kind: 'unanswered', attempt: cur.attempt }
+    if (state === 'rejected' && isFiscalRecord(cur)) return { kind: 'authorized', attempt: cur.attempt }
+    return { kind: 'none' }                                       // cancelada, denegada, autorizada/rejeitada em homologação
+  }
+  const unanswered = list.filter(t => fiscalStateOf(t) === 'failed')
+  if (unanswered.length > 0) return { kind: 'unanswered', attempt: Math.max(...unanswered.map(t => t.attempt)) }
+  return { kind: 'none' }
+}
+
+/**
+ * As barreiras do FISCO ao cancelamento local da nota, por RAMO — a conjugada (NF-e + NFS-e) compõe os dois (D-E11/D-NE22: o C
+ * local só quando nenhum ramo barra; o parcial é fato visível). Serviço PRIMEIRO (o app de hoje lê o primeiro bloco fiscal).
+ */
+export type BranchCancelBarrier =
+  | { branch: 'service'; barrier: Exclude<FiscalCancelBarrier, { kind: 'none' }> }
+  | { branch: 'merchandise'; barrier: Exclude<MerchandiseCancelBarrier, { kind: 'none' }> }
+
+export function fiscalCancelBarriers(r: InvoiceFiscalReading): BranchCancelBarrier[] {
+  const out: BranchCancelBarrier[] = []
+  const service = fiscalCancelBarrier(r)
+  if (service.kind !== 'none') out.push({ branch: 'service', barrier: service })
+  const merchandise = merchandiseCancelBarrier(r.merchandise)
+  if (merchandise.kind !== 'none') out.push({ branch: 'merchandise', barrier: merchandise })
+  return out
 }
 
 /**

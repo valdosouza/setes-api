@@ -1,8 +1,8 @@
 import {
   readFamilyTransmissions, readFamilyTransmissionsMany, assertFamilyViewsReadable, SERVICE_VOICE_READING,
-  invoiceRef, WEB_TERMINAL,
+  invoiceRef, WEB_TERMINAL, MERCHANDISE_VOICE_READING,
 } from 'fiscal-api/reading'
-import type { ServiceTransmissionView, InvoiceLifeRef, ReadQueryable } from 'fiscal-api/reading'
+import type { ServiceTransmissionView, InvoiceLifeRef, ReadQueryable, MerchandiseTransmissionView } from 'fiscal-api/reading'
 import { HttpError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import { newCrashRef, recordCrash } from '@shared/errors/crash.repository'
@@ -76,8 +76,8 @@ export function voiceFailureCause(err: unknown): VoiceFailureCause {
 export class FiscalVoiceUnavailableError extends HttpError {
   constructor(public readonly causeMessage: string, ref: string, public readonly failureCause: VoiceFailureCause = 'source') {
     super(503, failureCause === 'contract'
-      ? `A situação da NFS-e no fisco veio INCOERENTE — nada foi alterado; tentar de novo não resolve: informe o código ${ref} ao suporte`
-      : `A situação da NFS-e no fisco está indisponível agora — nada foi alterado; tente de novo em instantes (se persistir, informe o código ${ref} ao suporte)`,
+      ? `A situação da nota no fisco veio INCOERENTE — nada foi alterado; tentar de novo não resolve: informe o código ${ref} ao suporte`
+      : `A situação da nota no fisco está indisponível agora — nada foi alterado; tente de novo em instantes (se persistir, informe o código ${ref} ao suporte)`,
     undefined, ErrorCodes.FISCAL_VOICE_UNAVAILABLE)
     this.name = 'FiscalVoiceUnavailableError'
     this.ref = ref
@@ -112,6 +112,17 @@ export function readServiceVoiceOfLife(
     readFamilyTransmissions(q, SERVICE_VOICE_READING, fiscalDbName(), invoiceRef(institutionId, invoiceId, WEB_TERMINAL), lifeEvent))
 }
 
+/**
+ * As tentativas da NF-e (família `merchandise`) na VIDA [lifeEvent] de UMA nota — NFE.E1.P4.T1 (D-NE245: a família saiu da lista de
+ * espera junto com o plano de cancelamento que a lê). Mesma porta, mesmo alarme (`guarded`), leitura NOMEADA.
+ */
+export function readMerchandiseVoiceOfLife(
+  q: ReadQueryable, institutionId: number, invoiceId: number, lifeEvent: number,
+): Promise<MerchandiseTransmissionView[]> {
+  return guarded('voz da vida (NF-e)', institutionId, () =>
+    readFamilyTransmissions(q, MERCHANDISE_VOICE_READING, fiscalDbName(), invoiceRef(institutionId, invoiceId, WEB_TERMINAL), lifeEvent))
+}
+
 /** Lote (selo da lista de OS): as tentativas da NFS-e de VÁRIAS notas, cada uma na vida PEDIDA (pares nota × vida — D-F119). */
 export function readServiceVoicesOfLives(
   q: ReadQueryable, institutionId: number, lives: readonly InvoiceLifeRef[],
@@ -122,11 +133,13 @@ export function readServiceVoicesOfLives(
 
 /**
  * As leituras que ESTA porta lê — e por isso as que o boot confere (D-NE158: cada chamador passa o que confere; o núcleo 5.0.0 não tem
- * mais valor padrão). Hoje só a NFS-e. Família do catálogo que o ERP ainda não lê fica FORA daqui e é dita no log pela lista de espera
- * do plano de cancelamento (`FAMILIES_AWAITING_CANCEL_PLAN`, em `@shared/invoice` — D-NE245). Quem passar a ler outra família a põe aqui
+ * mais valor padrão). A NFS-e e, desde o NFE.E1.P4, a NF-e (o plano de cancelamento a lê). Família do catálogo que o ERP ainda não
+ * lê fica FORA daqui e é dita no log pela lista de espera do plano de cancelamento (`FAMILIES_AWAITING_CANCEL_PLAN`, em
+ * `@shared/invoice` — D-NE245; hoje vazia). Ordem de deploy: nfse-api E nfe-api (as views) antes do setes-api. Quem passar a ler outra
+ * família a põe aqui
  * (cerca na suíte: catálogo = lidas ∪ em espera; e nesta porta todo leitor passa uma leitura NOMEADA, nunca o catálogo).
  */
-export const READ_FAMILIES = Object.freeze([SERVICE_VOICE_READING])
+export const READ_FAMILIES = Object.freeze([SERVICE_VOICE_READING, MERCHANDISE_VOICE_READING])
 
 /**
  * D-F113/D-F127, restritas pela D-NE245: conferência do BOOT — a view de tentativas de cada família que o ERP LÊ (`READ_FAMILIES`)
