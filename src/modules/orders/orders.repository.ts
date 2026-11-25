@@ -108,7 +108,9 @@ export async function listOrders(
             (SELECT COUNT(*) FROM \`${schemaName}\`.tb_order_item i
               WHERE i.tb_order_id = s.id AND i.tb_institution_id = s.tb_institution_id
                 AND i.terminal = s.terminal AND i.deleted = 'N') AS itemsCount,
-            COALESCE(t.total_value, 0) AS totalValue
+            COALESCE(t.total_value, 0) AS totalValue,
+            inv.model AS invoiceModel,
+            inv.number AS invoiceNumber
      ${where}
      ORDER BY (o.status = 'A') DESC, s.number DESC, s.id DESC
      LIMIT ? OFFSET ?`,

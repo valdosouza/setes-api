@@ -42,7 +42,7 @@ const router = Router()
  *         schema: { type: string }
  *         description: 'Pesquisa avançada (D-BA1) — JSON { chave: valor } com as chaves de GET /search-criteria; texto = contém, faixa = { from, to }, lookup = id, options = [valores], bool = true|false. Soma em E com filter e com a aba (status). Desconhecida/malformada = 400 SEARCH_CRITERIA_INVALID; valor inválido = 422 SEARCH_CRITERION_INVALID com fields[]'
  *     responses:
- *       200: { description: 'Envelope paginado { ok, data, page, pageSize, total } — data lista { id, number, customerId, customerName, salesmanId, salesmanName, status, dtRecord, hasService, itemsCount, totalValue }' }
+ *       200: { description: 'Envelope paginado { ok, data, page, pageSize, total } — data lista { id, number, customerId, customerName, salesmanId, salesmanName, status, dtRecord, hasService, itemsCount, totalValue, invoiceModel (string|null), invoiceNumber (string|null — nulo sem nota e no 55 ainda sem número) }' }
  *       401: { description: Não autenticado }
  *       500: { description: Erro interno }
  */

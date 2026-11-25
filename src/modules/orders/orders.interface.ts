@@ -24,6 +24,10 @@ export interface OrderListRow {
   hasService:   boolean
   itemsCount:   number
   totalValue:   number
+  /** Modelo da nota (55/SE) — nulo sem nota (NFE.E1.P7). */
+  invoiceModel:  string | null
+  /** Número da nota — nulo sem nota e no 55 ainda não transmitido (D-NE257). */
+  invoiceNumber: string | null
 }
 
 export interface OrderItemRow {
