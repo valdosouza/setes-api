@@ -3,6 +3,9 @@ import { getEntityTax } from '@shared/entity-tax/entity-tax.repository'
 import { parseCrt } from '@shared/entity-tax/entity-tax.types'
 import { ListQuery, PagedRows, PublicSearchCriterion, publicCriteria } from '@shared/list'
 import { findInvalidCatalogCodes, findInvalidSelectorRefs } from '@shared/tax-rule'
+import { findClassificationAt } from '@shared/ibscbs-classification'
+import { todayFor } from '@shared/time-zone'
+import pool from '@shared/db/connection'
 import {
   listTaxRules, getTaxRule, insertTaxRuleCascade, updateTaxRuleCascade,
   deleteTaxRuleCascade, listCatalogs,
@@ -26,6 +29,27 @@ function toPieces(input: TaxRuleBodyDto) {
     ipi: input.ipi ?? undefined,
     pisCofins: input.pisCofins ?? undefined,
     ii: input.ii ?? undefined,
+    ibscbs: input.ibscbs,
+  }
+}
+
+/**
+ * IBS.E9.P3 (D-IB136): a classificação de IBS/CBS da regra precisa EXISTIR e estar VIGENTE hoje no catálogo central. Só isso:
+ * a marca "vale para a NF-e" (modelo 55) ainda não é carregada no catálogo e fica para o IBS.E9.P4 — por isso o campo
+ * `applicable` da linha é ignorado aqui, de propósito. O faturamento confere de novo, na data de emissão.
+ */
+async function assertIbscbsClassification(
+  schemaName: string, institutionId: number, input: TaxRuleBodyDto
+): Promise<void> {
+  const code = input.ibscbs?.classificationCode
+  if (!code) return
+  const today = await todayFor(schemaName, institutionId)
+  const line = await findClassificationAt(pool, code, '55', today)
+  if (!line) {
+    throw new HttpError(422, 'Classificação de IBS/CBS inexistente ou fora de vigência',
+      [{ field: 'ibscbs.classificationCode',
+         message: `cClassTrib ${code} não existe no catálogo ou não está vigente em ${today}` }],
+      'IBSCBS_CLASSIFICATION_NOT_FOUND')
   }
 }
 
@@ -83,6 +107,7 @@ export async function createTaxRule(
   schemaName: string, institutionId: number, input: TaxRuleBodyDto
 ): Promise<{ id: number }> {
   await assertCatalogCodes(schemaName, institutionId, input)
+  await assertIbscbsClassification(schemaName, institutionId, input)
   const id = await insertTaxRuleCascade(schemaName, institutionId, input)
   return { id }
 }
@@ -91,6 +116,7 @@ export async function editTaxRule(
   schemaName: string, institutionId: number, id: number, input: TaxRuleBodyDto
 ): Promise<void> {
   await assertCatalogCodes(schemaName, institutionId, input)
+  await assertIbscbsClassification(schemaName, institutionId, input)
   await updateTaxRuleCascade(schemaName, institutionId, id, input)
 }
 

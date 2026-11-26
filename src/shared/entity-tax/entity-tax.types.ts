@@ -68,6 +68,8 @@ export interface EntityTaxInput {
   simplesAssessment?:      string | null
   /** pTotTribSN (Q-N37) — % aproximado da alíquota efetiva do Simples (DAS); só com simplesRegime '3', e aí obrigatório (E0712). */
   simplesTotalTaxAliquot?: number | null
+  /** cAtivSN padrão do ESTABELECIMENTO (IBS.E9.P5, D-IB139): 01-04; NULL = 01. Só a linha do emitente usa. */
+  simplesActivity?:        string | null
   specialTaxRegime?:       string | null
   cnae?:                   string | null
   byPassSt?:               SN | null
@@ -86,6 +88,7 @@ export interface EntityTaxRow {
   simplesRegime:          string | null
   simplesAssessment:      string | null
   simplesTotalTaxAliquot: number | null
+  simplesActivity:        string | null
   specialTaxRegime:       string | null
   cnae:                   string | null
   byPassSt:               SN | null

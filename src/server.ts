@@ -6,6 +6,7 @@ import {
 import { detectLockWaitSupport } from '@shared/db/counters'
 import { assertIbscbsCatalogSchema } from '@shared/ibscbs-classification'
 import { assertIbscbsAssessmentChecks } from '@shared/ibscbs-assessment'
+import { assertIbscbsSimplesChecks } from '@shared/ibscbs-simples-rate'
 import { assertJwtKeys } from '@shared/auth/product-token'
 import { assertPasswordResetReady, assertLoginLockReady } from '@modules/auth/auth.service'
 import { assertMailerReady, assertOpsAlertReady, nodeEnvWarning } from '@shared/mailer/mailer'
@@ -64,6 +65,8 @@ async function bootstrap() {
     logger.info(`Origem dos cadastros W/D (072 + 081, D-PR47, D-OI10): ${await assertInstitutionSourceKindSchema()}`)
     // D-IB100 (D-IB26): o domínio da opção de apuração do IBS/CBS tem a guarda BINÁRIA do banco em cada schema — faltando, NÃO sobe
     logger.info(`Opção de apuração IBS/CBS (migration 077): ${await assertIbscbsAssessmentChecks()}`)
+    // D-IB138 (IBS.E9.P5): as guardas do IBS/CBS do Simples (mês, faixa do percentual, atividade 01-04 — migration 084) existem em cada schema
+    logger.info(`IBS/CBS do Simples no DAS (migration 084): ${await assertIbscbsSimplesChecks()}`)
     // Costura A1 (D-AU3): as views POR SCHEMA do veredito (migration 075) — faltando num cliente, o setes-api NÃO sobe
     logger.info(`Veredito de acesso (075 por schema): ${await assertAccessSchemaViews()}`)
     // D-TM29/D-TM31: as telas ESTRUTURAIS concedidas a TODO estabelecimento ativo (só a que falta — A-TM11); erro de banco = NÃO sobe

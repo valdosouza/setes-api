@@ -1,4 +1,5 @@
 import { HttpError } from '@shared/errors/http-error'
+import { assertSimplesActivity } from '@shared/ibscbs-simples-activity'
 import { withDeadlockRetry } from '@shared/db/deadlock-retry'
 import { ListQuery, PagedRows, PublicSearchCriterion, publicCriteria } from '@shared/list'
 import {
@@ -48,11 +49,13 @@ export async function fetchMerchandise(id: number, scope: MerchandiseScope): Pro
 }
 
 export async function createMerchandise(input: MerchandiseInput, scope: MerchandiseScope): Promise<number> {
+  assertSimplesActivity(input.simplesActivity)   // IBS.E9.P5 (D-IB139): 01-04; a 90 não é aceita ainda
   return withDeadlockRetry('merchandise POST', { institutionId: scope.institutionId }, RETRIES,
     () => insertMerchandise(input, scope.schemaName, scope.institutionId))
 }
 
 export async function editMerchandise(id: number, input: MerchandiseInput, scope: MerchandiseScope): Promise<void> {
+  assertSimplesActivity(input.simplesActivity)
   const found = await withDeadlockRetry('merchandise PUT', { institutionId: scope.institutionId, id }, RETRIES,
     () => updateMerchandise(id, input, scope.schemaName, scope.institutionId))
   if (!found) throw new HttpError(404, `Produto ${id} não encontrado`)

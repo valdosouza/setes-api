@@ -45,6 +45,8 @@ const merchandiseShape = z.object({
   purpose:          z.enum(TAX_RULE_PURPOSES).optional().default('1'),
   // AUSENTES = o PUT não mexe no gravado; o POST grava "não informado" (A-PR6). Presentes = as duas juntas.
   scaleRelevance:   sn.nullable().optional(),
+  // IBS.E9.P5 (D-IB139): cAtivSN da mercadoria quando difere do padrão do estabelecimento; null/ausente = herda (conferido no service)
+  simplesActivity:  z.string().nullable().optional(),
   manufacturerCnpj: manufacturerCnpjField.nullable().optional(),
   baseUnit:         baseUnitDto,
   prices:           z.array(productPriceInputDto).optional().default([])

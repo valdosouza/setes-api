@@ -1,6 +1,6 @@
 import { merchandiseInvoiceTotal, MerchandiseTotalError, MerchandiseTotalsCents } from 'fiscal-api/merchandise-total'
 import { HttpError } from '@shared/errors/http-error'
-import { calcMerchandiseValue } from '@shared/tax-rule'
+import { merchandiseParcelsOf } from '@shared/ibscbs-simples-das/parcels'
 import type { ComputedItem } from './billing.repository'
 
 const cents = (value: number): number => Math.round(value * 100)
@@ -20,9 +20,13 @@ export function merchandiseTotalsOf(items: readonly ComputedItem[]): Merchandise
   const t = { vProd: 0, vDesc: 0, vST: 0, vFCPST: 0, vFrete: 0, vOutro: 0, vIPI: 0 }
   for (const ci of items) {
     if (ci.item.productKind === 'S') continue
-    const vProd = cents(calcMerchandiseValue(ci.item.unitValue, ci.item.quantity, 0))
+    // as parcelas oficiais do item vêm de UMA função, a mesma que a base do Simples no DAS usa (IBS.E9.P5)
+    const parcels = merchandiseParcelsOf({
+      unitValue: ci.item.unitValue, quantity: ci.item.quantity, merchandiseValue: ci.merchandiseValue,
+      freightShare: ci.freightShare, expensesShare: ci.expensesShare,
+    })
     const part = {
-      vProd, vDesc: vProd - cents(ci.merchandiseValue), vFrete: cents(ci.freightShare), vOutro: cents(ci.expensesShare),
+      ...parcels,
       vST: cents(ci.taxes.icms?.valueSt ?? 0), vFCPST: cents(ci.taxes.fcpSt?.value ?? 0), vIPI: cents(ci.taxes.ipi?.value ?? 0),
     }
     // A recusa é POR ITEM: somada, a parcela negativa de um item (ex.: ST negativa do CSOSN) sumiria atrás da positiva de outro

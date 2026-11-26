@@ -5,10 +5,12 @@ import { assertClientRequired } from '@shared/field-config'
 import { isIsoDate } from '@shared/ibscbs-assessment'
 import {
   establishmentUpdateDto, ibscbsAssessmentCreateDto, ibscbsAssessmentChangeDto, IBSCBS_ASSESSMENT_CATALOG_FIELDS,
+  simplesRateCreateDto, simplesRateChangeDto,
 } from './establishment.dto'
 import {
   fetchEstablishment, editEstablishment,
   fetchIbscbsAssessments, registerIbscbsAssessment, editIbscbsAssessment, deleteIbscbsAssessment,
+  fetchSimplesRates, registerSimplesRate, editSimplesRate, deleteSimplesRate,
 } from './establishment.service'
 
 /**
@@ -99,5 +101,47 @@ export async function removeIbscbsAssessment(req: Request, res: Response): Promi
     res.json({ ok: true, data: await deleteIbscbsAssessment(institutionId, schemaName, userId, validFrom) })
   } catch (err) {
     handleError(res, err, 'establishment ibscbs-assessments DELETE')
+  }
+}
+
+// Percentual do Simples no IBS/CBS (IBS.E9.P5, D-IB138): o mês da URL é conferido pela peça (400 IBSCBS_SIMPLES_RATE_INVALID).
+
+export async function listSimplesRatesHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const { institutionId, schemaName } = req.institution!
+    res.json({ ok: true, data: await fetchSimplesRates(institutionId, schemaName) })
+  } catch (err) {
+    handleError(res, err, 'establishment simples-rates GET')
+  }
+}
+
+export async function createSimplesRateHandler(req: Request, res: Response): Promise<void> {
+  const body = parseBody(simplesRateCreateDto, req, res)
+  if (body === null) return
+  try {
+    const { institutionId, schemaName, userId } = req.institution!
+    res.status(201).json({ ok: true, data: await registerSimplesRate(institutionId, schemaName, userId, body) })
+  } catch (err) {
+    handleError(res, err, 'establishment simples-rates POST')
+  }
+}
+
+export async function changeSimplesRateHandler(req: Request, res: Response): Promise<void> {
+  const body = parseBody(simplesRateChangeDto, req, res)
+  if (body === null) return
+  try {
+    const { institutionId, schemaName, userId } = req.institution!
+    res.json({ ok: true, data: await editSimplesRate(institutionId, schemaName, userId, { competence: req.params.competence, ...body }) })
+  } catch (err) {
+    handleError(res, err, 'establishment simples-rates PUT')
+  }
+}
+
+export async function removeSimplesRateHandler(req: Request, res: Response): Promise<void> {
+  try {
+    const { institutionId, schemaName, userId } = req.institution!
+    res.json({ ok: true, data: await deleteSimplesRate(institutionId, schemaName, userId, req.params.competence) })
+  } catch (err) {
+    handleError(res, err, 'establishment simples-rates DELETE')
   }
 }

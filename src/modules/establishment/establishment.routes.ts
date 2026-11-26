@@ -198,4 +198,88 @@ router.post('/ibscbs-assessments', controller.createIbscbsAssessment)
 router.put('/ibscbs-assessments/:validFrom', controller.changeIbscbsAssessment)
 router.delete('/ibscbs-assessments/:validFrom', controller.removeIbscbsAssessment)
 
+// ---------------------------------------------------------------------------
+// Sub-recurso PERCENTUAL DO SIMPLES NO IBS/CBS (setes-api:IBS.E9.P5, D-IB138): o percentual efetivo (`pIBSSN`/`pCBSSN`) de cada
+// mês, tabela da migration 084, escrita SÓ pela peça @shared/ibscbs-simples-rate. adminGuard herdado do gateway; institution
+// SEMPRE do token; o mês 'AAAA-MM' é a identidade. Qualquer mês pode ser cadastrado, editado ou removido (A-IB138g).
+// ---------------------------------------------------------------------------
+
+/**
+ * @swagger
+ * /api/establishment/simples-rates:
+ *   get:
+ *     summary: Percentuais do Simples no IBS/CBS do PRÓPRIO estabelecimento, do mês mais novo para o mais antigo
+ *     description: >-
+ *       Sem percentual cadastrado para o mês da nota, o faturamento do Simples no DAS RECUSA (422 BILLING_IBSCBS_SIMPLES_RATE_REQUIRED
+ *       — D-IB140), desde a data de início (configuração `billing/ibscbs_simples_start`, nunca antes de 2027-01-01 — D-IB141).
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200: { description: "{ ok: true, data: [{ competence: 'AAAA-MM', ibsRate: '0.1000', cbsRate: '0.9000', ibsPpm, cbsPpm }] }" }
+ *       401: { description: Não autenticado }
+ *       403: { description: Restrito a administradores }
+ *   post:
+ *     summary: Cadastra o percentual de um mês
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [competence, ibsRate, cbsRate]
+ *             properties:
+ *               competence: { type: string, example: '2027-01', description: 'Mês AAAA-MM' }
+ *               ibsRate:    { type: string, example: '0.1000', description: 'pIBSSN em % (0 a 100, até 4 casas); número também é aceito' }
+ *               cbsRate:    { type: string, example: '0.9000', description: 'pCBSSN em % (0 a 100, até 4 casas); número também é aceito' }
+ *     responses:
+ *       201: { description: '{ ok: true, data: (a lista atualizada) }' }
+ *       400: { description: 'VALIDATION_FAILED ou IBSCBS_SIMPLES_RATE_INVALID (mês fora de AAAA-MM, percentual fora de 0 a 100 ou com mais de 4 casas)' }
+ *       409: { description: 'IBSCBS_SIMPLES_RATE_DUPLICATE — já existe percentual vivo para o mês' }
+ */
+router.get('/simples-rates', controller.listSimplesRatesHandler)
+router.post('/simples-rates', controller.createSimplesRateHandler)
+
+/**
+ * @swagger
+ * /api/establishment/simples-rates/{competence}:
+ *   put:
+ *     summary: Troca os percentuais de um mês já cadastrado (o mês é a identidade)
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - { in: path, name: competence, required: true, schema: { type: string, example: '2027-01' } }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ibsRate, cbsRate]
+ *             properties:
+ *               ibsRate: { type: string, example: '0.1000' }
+ *               cbsRate: { type: string, example: '0.9000' }
+ *     responses:
+ *       200: { description: '{ ok: true, data: (a lista atualizada) }' }
+ *       400: { description: 'VALIDATION_FAILED ou IBSCBS_SIMPLES_RATE_INVALID' }
+ *       404: { description: IBSCBS_SIMPLES_RATE_NOT_FOUND }
+ *   delete:
+ *     summary: Exclui (soft) o percentual de um mês; a nota já emitida não muda (o item guarda o percentual que usou)
+ *     tags: [Establishment]
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - { in: path, name: competence, required: true, schema: { type: string, example: '2027-01' } }
+ *     responses:
+ *       200: { description: '{ ok: true, data: (a lista atualizada) }' }
+ *       400: { description: IBSCBS_SIMPLES_RATE_INVALID (mês fora de AAAA-MM) }
+ *       404: { description: IBSCBS_SIMPLES_RATE_NOT_FOUND }
+ */
+router.put('/simples-rates/:competence', controller.changeSimplesRateHandler)
+router.delete('/simples-rates/:competence', controller.removeSimplesRateHandler)
+
 export default router

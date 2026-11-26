@@ -48,6 +48,8 @@ export const establishmentUpdateDto = z.object({
   simplesAssessment: z.enum(SIMPLES_ASSESSMENT_CODES).nullable().optional(),
   // Q-N37: pTotTribSN — % aproximado da alíquota efetiva do Simples (TSDec2V2: até 99,99; > 0)
   simplesTotalTaxAliquot: z.number().gt(0).max(99.99).multipleOf(0.01).nullable().optional(),
+  // IBS.E9.P5 (D-IB139): cAtivSN padrão do estabelecimento; o código é conferido no service (400 IBSCBS_SIMPLES_ACTIVITY_INVALID)
+  simplesActivity:  z.string().nullable().optional(),
   specialTaxRegime: z.enum(SPECIAL_TAX_REGIME_CODES).nullable().optional(),
   cnae:             z.string().regex(/^\d{7}$/, 'CNAE com 7 dígitos').nullable().optional(),
   addresses:   z.array(addressBody),
@@ -80,3 +82,25 @@ export const IBSCBS_ASSESSMENT_CATALOG_FIELDS = Object.freeze(['valid_from', 'as
 
 export type IbscbsAssessmentCreateDto = z.infer<typeof ibscbsAssessmentCreateDto>
 export type IbscbsAssessmentChangeDto = z.infer<typeof ibscbsAssessmentChangeDto>
+
+// ---------------------------------------------------------------------------
+// Sub-recurso PERCENTUAL DO SIMPLES NO IBS/CBS (setes-api:IBS.E9.P5, D-IB138): o percentual efetivo (`pIBSSN`/`pCBSSN`) de cada
+// mês, escrito SÓ pela peça @shared/ibscbs-simples-rate (tabela da migration 084). O mês 'AAAA-MM' é a IDENTIDADE da linha. O
+// percentual chega como texto ou número; a peça confere (0 a 100, até 4 casas) e devolve 400 IBSCBS_SIMPLES_RATE_INVALID.
+// ---------------------------------------------------------------------------
+
+const rateValue = z.union([z.string(), z.number()])
+
+export const simplesRateCreateDto = z.object({
+  competence: z.string(),
+  ibsRate:    rateValue,
+  cbsRate:    rateValue,
+})
+
+export const simplesRateChangeDto = z.object({
+  ibsRate: rateValue,
+  cbsRate: rateValue,
+})
+
+export type SimplesRateCreateDto = z.infer<typeof simplesRateCreateDto>
+export type SimplesRateChangeDto = z.infer<typeof simplesRateChangeDto>

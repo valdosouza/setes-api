@@ -64,7 +64,7 @@ function sameList<A, B>(input: readonly A[] | undefined, current: readonly B[], 
 }
 
 const TAX_KEYS: readonly (keyof EntityTaxRow)[] = [
-  'consumer', 'taxRegime', 'simplesRegime', 'simplesAssessment', 'simplesTotalTaxAliquot', 'specialTaxRegime', 'cnae', 'byPassSt',
+  'consumer', 'taxRegime', 'simplesRegime', 'simplesAssessment', 'simplesTotalTaxAliquot', 'simplesActivity', 'specialTaxRegime', 'cnae', 'byPassSt',
   'indIeDest', 'issExigibilidade', 'issProcessNr', 'issRetido', 'issIndIncFiscal', 'autoSendInvoice', 'autoSendInvoiceJustXml',
 ]
 

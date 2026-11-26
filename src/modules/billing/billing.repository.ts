@@ -14,6 +14,7 @@ import { insertCommissions, CommissionEntryInput } from '@shared/commission'
 import { issueInvoice, InvoiceServiceDraft } from '@shared/invoice'
 import { declareServiceIbscbs } from '@shared/service-ibscbs-declaration'
 import { ibscbsOutcomeOf, IbscbsOutcome } from '@shared/ibscbs-classification'
+import type { IbscbsSimplesDeclared } from '@shared/ibscbs-simples-das'
 import { IssLiability } from '@shared/entity-tax/entity-tax.types'
 import { persistReturn, assertReturnableInTx, ReturnPlan } from '@shared/order-return'
 import logger from '@shared/logger/logger'
@@ -112,7 +113,8 @@ export async function listBillingItems(
             mi.tb_price_list_id AS priceListId,
             p.kind AS productKind, p.description AS productDescription,
             m.ncm, m.source AS origin, m.cest,
-            m.kind_tributary AS purpose
+            m.kind_tributary AS purpose,
+            m.simples_activity AS simplesActivity
        FROM \`${s}\`.tb_order_item i
        JOIN \`${s}\`.tb_product p
          ON (p.id = i.tb_product_id AND p.tb_institution_id = i.tb_institution_id)
@@ -132,7 +134,7 @@ export async function listBillingItems(
     discountValue: Number(r.discountValue ?? 0),
     productKind: (r.productKind ?? 'P') as 'P' | 'M' | 'S',
     productDescription: r.productDescription ?? null,
-    ncm: r.ncm || null, origin: r.origin || null,
+    ncm: r.ncm || null, origin: r.origin || null, simplesActivity: r.simplesActivity || null,
     merchandiseSt: (r.cest ?? '').trim() !== '' ? 'S' : 'N',
     purpose: r.purpose || null,
     priceListId: r.priceListId === null || r.priceListId === undefined
@@ -396,6 +398,13 @@ export interface ComputedItem {
   ipiCst: string | null
   pisCst: string | null
   cofinsCst: string | null
+  /** IBS.E9.P3: o cClassTrib que a regra do item presume, JÁ CONFERIDO pelo faturamento — o que o item DECLARA
+   *  (`tb_order_item_ibscbs`). null = serviço (a declaração do serviço mora no ramo `tb_invoice_service`) ou item que o
+   *  faturamento não trata como mercadoria. Não é resultado do motor: é escolha, por isso fora de `taxes`. */
+  ibscbsClassificationCode: string | null
+  /** IBS.E9.P5 (D-IB138 a D-IB141): o que o item do Simples no DAS declara — atividade, percentual do mês, base e valores —, calculado
+   *  pelo motor ANTES da transação. null = a nota não é do Simples no DAS de 2027 em diante, ou o item não é mercadoria. */
+  ibscbsSimples: IbscbsSimplesDeclared | null
   icmsExtras: {
     cst: string | null
     origin: string | null
@@ -712,6 +721,37 @@ async function persistItemTaxes(
 ): Promise<void> {
   const key = [orderId, ci.item.id, institutionId]
   const t = ci.taxes
+
+  // IBS.E9.P3 (D-IB9, D-IB133): a classificação de IBS/CBS que o item declara. Só o código — sem valor (o faturamento ainda não
+  // calcula IBS/CBS; coluna nasce com o cálculo, D-NE248). Mesma chave dos registros irmãos, sem `kind`.
+  if (ci.ibscbsClassificationCode) {
+    await conn.query(
+      `INSERT INTO \`${s}\`.tb_order_item_ibscbs
+         (tb_order_id, tb_order_item_id, tb_institution_id, terminal,
+          classification_code, created_at, updated_at, deleted)
+       VALUES (?, ?, ?, 0, ?, NOW(), NOW(), 'N')
+       ON DUPLICATE KEY UPDATE
+         classification_code = VALUES(classification_code), deleted = 'N', updated_at = NOW()`,
+      [...key, ci.ibscbsClassificationCode]
+    )
+  }
+
+  // IBS.E9.P5: o que o item do Simples no DAS declara (D-IB138 a D-IB141). Os percentuais ficam COPIADOS do mês usado: a nota não
+  // muda se o cadastro mudar depois. Mesma chave dos irmãos, sem `kind`; `classification_code` mora na tabela ao lado.
+  if (ci.ibscbsSimples) {
+    const d = ci.ibscbsSimples
+    await conn.query(
+      `INSERT INTO \`${s}\`.tb_order_item_ibscbs_simples
+         (tb_order_id, tb_order_item_id, tb_institution_id, terminal,
+          activity_code, competence, ibs_rate, cbs_rate, base_value, ibs_value, cbs_value, created_at, updated_at, deleted)
+       VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
+       ON DUPLICATE KEY UPDATE
+         activity_code = VALUES(activity_code), competence = VALUES(competence), ibs_rate = VALUES(ibs_rate),
+         cbs_rate = VALUES(cbs_rate), base_value = VALUES(base_value), ibs_value = VALUES(ibs_value),
+         cbs_value = VALUES(cbs_value), deleted = 'N', updated_at = NOW()`,
+      [...key, d.activityCode, d.competence, d.ibsRate, d.cbsRate, d.baseValue, d.ibsValue, d.cbsValue]
+    )
+  }
 
   if (t.icms || ci.icmsExtras.cst) {
     await conn.query(

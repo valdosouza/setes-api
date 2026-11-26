@@ -16,7 +16,20 @@ import * as path from 'path'
 jest.mock('../shared/ibscbs-assessment', () => ({
   __esModule: true,
   previewIbscbsAssessmentRefusal: jest.fn().mockResolvedValue(null),
+  // IBS.E9.P5: a opção vigente na data (lida só em nota do Simples de 2027 em diante) e a data de calendário real
+  ibscbsAssessmentAt: jest.fn().mockResolvedValue({ assessment: '1', validFrom: null }),
+  isIsoDate: (v: unknown) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v),
 }))
+// IBS.E9.P5: o percentual do mês tem teste próprio (ibscbs-simples-rate.test.ts) — aqui a fronteira é mockada (default: sem percentual)
+jest.mock('../shared/ibscbs-simples-rate', () => ({
+  ...jest.requireActual('../shared/ibscbs-simples-rate'),
+  simplesRateAt: jest.fn().mockResolvedValue(null),
+}))
+// IBS.E9.P5: a data de emissão é a do dono único; aqui o default é o real e o bloco do Simples a fixa em 2027
+jest.mock('../shared/invoice/emission-date', () => {
+  const actual = jest.requireActual('../shared/invoice/emission-date')
+  return { ...actual, invoiceEmissionDateFor: jest.fn(actual.invoiceEmissionDateFor) }
+})
 jest.mock('../shared/service-ibscbs-declaration', () => ({
   __esModule: true,
   declareServiceIbscbs: jest.fn().mockResolvedValue({ group: null, nbs: null, omitted: ['not-classified'] }),
@@ -40,10 +53,23 @@ jest.mock('../shared/db/connection', () => ({
 jest.mock('../shared/invoice-series', () => ({ __esModule: true, invoiceSerieFor: jest.fn().mockResolvedValue('1') }))   // F2a A3 (D-F112): série da nota = leitura só no ERP
 
 // isola o motor (testado em tax-rules/tax-calc) — o billing orquestra
+// IBS.E9.P3 (D-IB134): mercadoria sem classificação de IBS/CBS não fatura. Os testes deste arquivo descrevem as peças de ICMS,
+// IPI e PIS/COFINS; a regra simulada ganha uma classificação vigente por padrão ("000001"), a menos que o teste diga a chave
+// `ibscbs` (o caso sem classificação e o de código fora de vigência estão em billing-ibscbs.test.ts).
 jest.mock('../shared/tax-rule', () => {
   const actual = jest.requireActual('../shared/tax-rule')
-  return { ...actual, findTaxRule: jest.fn(), loadPieces: jest.fn() }
+  const loadPiecesInner = jest.fn()
+  const loadPieces = async (...args: unknown[]) => {
+    const pieces = (await loadPiecesInner(...args)) ?? {}   // teste que não descreve as peças = regra sem as outras peças
+    return 'ibscbs' in pieces ? pieces : { ...pieces, ibscbs: { classificationCode: '000001' } }
+  }
+  return { ...actual, findTaxRule: jest.fn(), loadPieces, __loadPiecesInner: loadPiecesInner }
 })
+// a vigência do cClassTrib é do catálogo central (teste próprio: ibscbs-classification.test.ts) — aqui a fronteira é mockada
+jest.mock('../shared/ibscbs-classification', () => ({
+  ...jest.requireActual('../shared/ibscbs-classification'),
+  findClassificationAt: jest.fn().mockResolvedValue({ code: '000001', cst: '000' }),
+}))
 
 // isola os resolvers do catálogo MVA/FCP (testados em state-tax-rates.test)
 jest.mock('../modules/state-tax-rates/state-tax-rates.repository', () => ({
@@ -91,7 +117,7 @@ jest.mock('../shared/commission', () => ({
 
 const mockQuery = (pool as any).query as jest.Mock
 const mockFindTaxRule = (taxRule as any).findTaxRule as jest.Mock
-const mockLoadPieces = (taxRule as any).loadPieces as jest.Mock
+const mockLoadPieces = (taxRule as any).__loadPiecesInner as jest.Mock
 const mockTryAutoSettleByContract = (jest.requireMock('../shared/financial-settlement') as any).tryAutoSettleByContract as jest.Mock
 const mockOrderReturn = jest.requireMock('../shared/order-return') as any
 const mockCommission = jest.requireMock('../shared/commission') as any
@@ -214,12 +240,15 @@ function mockContext(over: {
   emitterRegime?: string; recipientRegime?: string | null
   emitterState?: number | null; recipientState?: number | null
   recipientIssRetido?: 'S' | 'N'
+  emitterActivity?: string | null   // IBS.E9.P5: cAtivSN padrão do estabelecimento (tb_entity_tax.simples_activity)
+  emitterSimplesRegime?: string | null   // IBS.E9.P5: opSimpNac do emitente ('2' = MEI)
 } = {}) {
   // loadContext: getEntityTax(emitter) → getEntityLocation(emitter)
   //            → getEntityTax(recipient) → getEntityLocation(recipient)
   mockQuery.mockResolvedValueOnce([[{
     consumer: 'N', taxRegime: over.emitterRegime ?? '3 - Regime Normal',
-    byPassSt: 'N', indIeDest: '1', issRetido: 'N',
+    byPassSt: 'N', indIeDest: '1', issRetido: 'N', simplesActivity: over.emitterActivity ?? null,
+    simplesRegime: over.emitterSimplesRegime ?? null,
   }]])
   mockQuery.mockResolvedValueOnce([[{
     stateId: over.emitterState === undefined ? 41 : over.emitterState,
@@ -239,7 +268,7 @@ function mockContext(over: {
 const itemRow = (over: any = {}) => ({
   id: 1, kind: 'Sale', productId: 100, quantity: 2, unitValue: 50,
   discountValue: 0, productKind: 'P', ncm: '84713012', origin: '0',
-  cest: '', kind_tributary: '1', purpose: '1', ...over,
+  cest: '', kind_tributary: '1', purpose: '1', simplesActivity: null, ...over,
 })
 
 describe('validateOrder', () => {
@@ -1760,5 +1789,406 @@ describe('invoiceBodyDto — bloco checks (D9/onda do cheque)', () => {
     if (!r.success) {
       expect(r.error.issues[0].message).toBe('Máximo 2 casas decimais')
     }
+  })
+})
+
+// ---------------------------------------------------------------------
+// IBS.E9.P3 — classificação de IBS/CBS da mercadoria no faturamento (D-IB133, D-IB134, D-IB136)
+// ---------------------------------------------------------------------
+
+describe('IBS.E9.P3 — classificação de IBS/CBS da mercadoria', () => {
+  const mockFindClassificationAt = (jest.requireMock('../shared/ibscbs-classification') as any).findClassificationAt as jest.Mock
+  const mockIssueInvoice = (jest.requireMock('../shared/invoice') as any).issueInvoice as jest.Mock
+  const LINE = { code: '000001', cst: '000', applicable: false }   // vigente; SEM a marca do modelo 55 (D-IB136: ignorada)
+  const icms = { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0,
+    deferred: 'N', deferredAliq: null, highlight: 'N' }
+
+  beforeEach(() => {
+    mockFindClassificationAt.mockReset()
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, code: string) => (code === '999999' ? null : { ...LINE, code }))
+  })
+
+  /** Fila do /invoice até o laço dos itens: cada item com a SUA regra (id = 40 + id do item) e as peças dadas. */
+  function queueInvoice(items: any[], piecesByItem: Array<Record<string, unknown>>) {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'A',
+    }))])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({ id: 40 + i.id }))])   // findDeadRuleIds
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    for (const pieces of piecesByItem) mockLoadPieces.mockResolvedValueOnce(pieces)
+  }
+  function queueTxn() {
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])   // observações e aproximado
+    const conn = {
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])     // FOR UPDATE
+    mockNegotiationInTx(conn, null)
+    return conn
+  }
+  const ibscbsWrites = (conn: { query: jest.Mock }) =>
+    conn.query.mock.calls.filter(c => /INSERT INTO `setes_setes`\.tb_order_item_ibscbs\b/.test(String(c[0])))
+
+  it('D-IB134 — regra SEM a classificação: 422 BILLING_IBSCBS_CLASSIFICATION_REQUIRED com o item, e nada é gravado', async () => {
+    queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: undefined }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
+      fields: [{ field: 'item.1', message: expect.stringMatching(/regra de tributação 41 sem classificação de IBS\/CBS/) }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()   // nenhuma transação: nada gravado
+    expect(mockIssueInvoice).not.toHaveBeenCalled()
+    expect(mockFindClassificationAt).not.toHaveBeenCalled()      // sem código não há o que conferir
+  })
+
+  it('D-IB136 — código sem linha vigente na data de emissão: 422 IBSCBS_CLASSIFICATION_NOT_FOUND com o item', async () => {
+    queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: { classificationCode: '999999' } }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+      fields: [{ field: 'item.1', message: expect.stringMatching(/cClassTrib 999999 .* não está vigente em \d{4}-\d{2}-\d{2}/) }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+    // conferido no modelo 55, na data de emissão (a mesma que o faturamento usa para a nota)
+    const [, code, model, date] = mockFindClassificationAt.mock.calls[0]
+    expect([code, model]).toEqual(['999999', '55'])
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+  })
+
+  it('dois itens com problema: UM 422 com os dois no fields (código do primeiro); o /validate lista os dois sem lançar', async () => {
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    queueInvoice(items, [{ icms, ibscbs: undefined }, { icms, ibscbs: { classificationCode: '999999' } }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
+      fields: [expect.objectContaining({ field: 'item.1' }), expect.objectContaining({ field: 'item.2' })],
+    })
+
+    // /validate do mesmo pedido: vínculos manuais (o motor não roda), uma pendência por item, nenhum throw
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'M',
+    }))])
+    mockLoadPieces
+      .mockResolvedValueOnce({ icms, ibscbs: undefined })
+      .mockResolvedValueOnce({ icms, ibscbs: { classificationCode: '999999' } })
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues).toEqual([
+      { scope: 'item', itemId: 1, field: 'ibscbsClassification', message: expect.stringMatching(/sem classificação de IBS\/CBS/) },
+      { scope: 'item', itemId: 2, field: 'ibscbsClassification', message: expect.stringMatching(/cClassTrib 999999/) },
+    ])
+    expect(report.rulesManual).toBe(2)
+  })
+
+  it('mercadoria classificada fatura e grava UMA linha por item em tb_order_item_ibscbs, só com o código da regra', async () => {
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    queueInvoice(items, [{ icms, ibscbs: { classificationCode: '000001' } }, { icms, ibscbs: { classificationCode: '200034' } }])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+
+    const writes = ibscbsWrites(conn)
+    expect(writes.map(w => w[1])).toEqual([[10, 1, 1, '000001'], [10, 2, 1, '200034']])   // pedido, item, institution, código
+    const sql = String(writes[0][0]).replace(/\s+/g, ' ')
+    expect(sql).toContain('(tb_order_id, tb_order_item_id, tb_institution_id, terminal, classification_code, created_at, updated_at, deleted)')
+    expect(sql).toContain("VALUES (?, ?, ?, 0, ?, NOW(), NOW(), 'N')")
+    // refaturar regrava a MESMA linha (ressuscita a que o cancelamento apagou) — nunca duplica
+    expect(sql).toContain("ON DUPLICATE KEY UPDATE classification_code = VALUES(classification_code), deleted = 'N'")
+    // a vigência é conferida uma vez por código; a marca do modelo 55 (applicable: false) não recusa (D-IB136)
+    expect(mockFindClassificationAt).toHaveBeenCalledTimes(2)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  // ── gates do passo (socrático e adversarial) ──────────────────────────────────────────────────────────────────────
+  it.each([
+    ['compra', 'Purchase', () => { mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[{ entityId: 90 }]]) }, undefined],
+    ['ajuste', 'Adjust', () => { mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[{ entityId: 55, direction: 'S' }]]) }, { cfopId: '5949' }],
+  ])('D-IB134 vale para %s (A-IB134a): regra sem a classificação → 422, nada gravado', async (_name, kind, queueBranch, adjustment) => {
+    mockOrderBase()
+    ;(queueBranch as () => void)()
+    mockContext()
+    const items = [itemRow({ id: 1, kind })]
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind, taxRuleId: 41, cfopId: '5949', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 41 }]])
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce({ icms, ibscbs: undefined })
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, adjustment } as any)).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED', fields: [expect.objectContaining({ field: 'item.1' })],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it.each([[123456], [' 00001'], ['0000011'], ['００００００'], ['abcdef'], ['null']])(
+    'código %p gravado fora da API: recusado pelo FORMATO, sem consultar o catálogo e sem chegar ao INSERT', async badCode => {
+      queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: { classificationCode: badCode } }])
+      await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+        statusCode: 422, code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+      })
+      expect(mockFindClassificationAt).not.toHaveBeenCalled()
+      expect((pool as any).getConnection).not.toHaveBeenCalled()
+    })
+
+  it('catálogo que responde undefined não conta como vigente', async () => {
+    mockFindClassificationAt.mockResolvedValue(undefined)
+    queueInvoice([itemRow({ id: 1 })], [{ icms, ibscbs: { classificationCode: '000001' } }])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
+    })
+  })
+
+  it('só o código CONFERIDO é gravado: produto com kind que o faturamento não trata como mercadoria não ganha linha', async () => {
+    // (item de produto com `kind` fora de Sale/Purchase/Adjust já escapava da regra de tributação antes deste passo — achado
+    //  registrado na árvore; aqui a garantia é que o registro do item nunca recebe um código que ninguém conferiu)
+    queueInvoice([itemRow({ id: 1, kind: 'Transfer' })], [{ icms, ibscbs: { classificationCode: '999999' } }])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(mockFindClassificationAt).not.toHaveBeenCalled()
+    expect(ibscbsWrites(conn)).toHaveLength(0)
+  })
+
+  it('/validate: regra automática sem o código do regime E sem classificação → as duas pendências na mesma volta', async () => {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()                                             // emitente no Regime Normal → exige CST
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[]])                     // nenhum vínculo
+    mockFindTaxRule.mockResolvedValueOnce({ id: 42, cfopId: '5102' })
+    mockLoadPieces.mockResolvedValueOnce({ icms: { ...icms, cstNr: null, csosn: '102' }, ibscbs: undefined })
+    mockQuery.mockResolvedValueOnce([{}])                     // clearAutoRuleLink
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues.map(i => i.field)).toEqual(['taxRule', 'ibscbsClassification'])
+    expect(report.rulesResolved).toBe(0)
+  })
+
+  it('a mesma regra em vários itens: uma consulta de vigência só', async () => {
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    queueInvoice(items, [{ icms, ibscbs: { classificationCode: '000001' } }, { icms, ibscbs: { classificationCode: '000001' } }])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(mockFindClassificationAt).toHaveBeenCalledTimes(1)
+    expect(ibscbsWrites(conn)).toHaveLength(2)
+  })
+})
+
+
+// ---------------------------------------------------------------------
+// IBS.E9.P5 — IBS/CBS do Simples no DAS a partir de 2027 (D-IB138 a D-IB141; A-IB138a a g, A-IB141a)
+// ---------------------------------------------------------------------
+
+describe('IBS.E9.P5 — IBS/CBS do Simples no DAS', () => {
+  const mockIssueInvoice = (jest.requireMock('../shared/invoice') as any).issueInvoice as jest.Mock
+  const mockEmissionDate = (jest.requireMock('../shared/invoice/emission-date') as any).invoiceEmissionDateFor as jest.Mock
+  const emissionActual = jest.requireActual('../shared/invoice/emission-date').invoiceEmissionDateFor
+  const mockAssessmentAt = (jest.requireMock('../shared/ibscbs-assessment') as any).ibscbsAssessmentAt as jest.Mock
+  const mockRateAt = (jest.requireMock('../shared/ibscbs-simples-rate') as any).simplesRateAt as jest.Mock
+  const mockConfig = (jest.requireMock('../shared/interface-config') as any).getConfigContent as jest.Mock
+  const simplesIcms = { cstNr: null, csosn: '102', modBc: '3', dischargeId: null, aliq: 0, aliqReduction: 0, baseReduction: 0,
+    deferred: 'N', deferredAliq: null, highlight: 'N' }
+  const SIMPLES = '1 - Simples Nacional'
+  const RATE = { competence: '2027-01', ibsRate: '0.1000', cbsRate: '0.9000', ibsPpm: 1000, cbsPpm: 9000 }
+
+  beforeEach(() => {
+    mockEmissionDate.mockReset()
+    mockEmissionDate.mockResolvedValue('2027-01-15')
+    mockAssessmentAt.mockReset()
+    mockAssessmentAt.mockResolvedValue({ assessment: '1', validFrom: null })
+    mockRateAt.mockReset()
+    mockRateAt.mockResolvedValue(RATE)
+    mockConfig.mockReset()
+    mockConfig.mockResolvedValue(null)
+  })
+  afterAll(() => { mockEmissionDate.mockReset(); mockEmissionDate.mockImplementation(emissionActual) })
+
+  /** Fila do /invoice até o laço dos itens, com o emitente no regime dado (default: Simples) e a atividade padrão. */
+  function queueInvoice(items: any[], opts: { regime?: string; activity?: string | null; simplesRegime?: string | null } = {}) {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext({ emitterRegime: opts.regime ?? SIMPLES, emitterActivity: opts.activity ?? null, emitterSimplesRegime: opts.simplesRegime ?? null })
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'A',
+    }))])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({ id: 40 + i.id }))])   // findDeadRuleIds
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    for (const _ of items) mockLoadPieces.mockResolvedValueOnce({ icms: simplesIcms })
+  }
+  function queueTxn() {
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+    const conn = {
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])     // FOR UPDATE
+    mockNegotiationInTx(conn, null)
+    return conn
+  }
+  const simplesWrites = (conn: { query: jest.Mock }) =>
+    conn.query.mock.calls.filter(c => /INSERT INTO `setes_setes`\.tb_order_item_ibscbs_simples\b/.test(String(c[0])))
+
+  it('emissão 2027-01-15, CRT 1, opção 1: uma linha por item com atividade, mês, percentuais congelados, base e valores', async () => {
+    // item: 2 × R$ 50,00 = R$ 100,00 (base 10000 centavos); IBS 0,1000% = 1000 ppm → 10 centavos; CBS 0,9000% = 9000 ppm → 90 centavos
+    queueInvoice([itemRow({ id: 1 })], { activity: '02' })
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+
+    const writes = simplesWrites(conn)
+    expect(writes.map(w => w[1])).toEqual([[10, 1, 1, '02', '2027-01', '0.1000', '0.9000', 100, 0.1, 0.9]])
+    const sql = String(writes[0][0]).replace(/\s+/g, ' ')
+    expect(sql).toContain('(tb_order_id, tb_order_item_id, tb_institution_id, terminal, activity_code, competence, ibs_rate, cbs_rate, base_value, ibs_value, cbs_value, created_at, updated_at, deleted)')
+    expect(sql).toContain("VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')")
+    expect(sql).toContain("ON DUPLICATE KEY UPDATE") // refaturar regrava a MESMA linha — nunca duplica
+    expect(sql).toContain("deleted = 'N'")
+    expect(mockRateAt.mock.calls[0].slice(1)).toEqual(['setes_setes', 1, '2027-01'])   // o mês da emissão (A-IB138a)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('a base desconta o desconto incondicional: 2 × 50,00 com R$ 10,00 de desconto → base 90,00, IBS 0,09 e CBS 0,81', async () => {
+    queueInvoice([itemRow({ id: 1, discountValue: 10 })])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn).map(w => w[1])).toEqual([[10, 1, 1, '01', '2027-01', '0.1000', '0.9000', 90, 0.09, 0.81]])   // sem atividade: 01
+  })
+
+  it('a atividade da mercadoria vale sobre a do estabelecimento (D-IB139)', async () => {
+    queueInvoice([itemRow({ id: 1, simplesActivity: '03' }), itemRow({ id: 2, productId: 101 })], { activity: '02' })
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn).map(w => w[1][3])).toEqual(['03', '02'])   // a exceção, e a herdada do estabelecimento
+  })
+
+  it('D-IB140 — mês sem percentual: UM 422 BILLING_IBSCBS_SIMPLES_RATE_REQUIRED com todos os itens, e nada é gravado', async () => {
+    mockRateAt.mockResolvedValue(null)
+    queueInvoice([itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_SIMPLES_RATE_REQUIRED',
+      fields: [
+        { field: 'item.1', message: expect.stringMatching(/sem o percentual de IBS\/CBS do Simples do mês 2027-01/) },
+        { field: 'item.2', message: expect.stringMatching(/mês 2027-01/) },
+      ],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()   // nenhuma transação: nada gravado
+    expect(mockIssueInvoice).not.toHaveBeenCalled()
+  })
+
+  it('o /validate lista a pendência POR ITEM de mercadoria (field ibscbsSimplesRate), sem lançar', async () => {
+    mockRateAt.mockResolvedValue(null)
+    const items = [itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })]
+    mockOrderBase()
+    mockBranchSale()
+    mockContext({ emitterRegime: SIMPLES })
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'M',
+    }))])
+    mockLoadPieces.mockResolvedValueOnce({ icms: simplesIcms }).mockResolvedValueOnce({ icms: simplesIcms })
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues.filter(i => i.field === 'ibscbsSimplesRate')).toEqual([
+      { scope: 'item', itemId: 1, field: 'ibscbsSimplesRate', message: expect.stringMatching(/mês 2027-01/) },
+      { scope: 'item', itemId: 2, field: 'ibscbsSimplesRate', message: expect.stringMatching(/mês 2027-01/) },
+    ])
+  })
+
+  it('A-IB141a — antes do piso (emissão 2026-12-31): nada muda, nenhuma consulta ao percentual nem à opção, nenhuma linha', async () => {
+    mockEmissionDate.mockResolvedValue('2026-12-31')
+    mockRateAt.mockResolvedValue(null)   // mesmo sem percentual: em 2026 não recusa
+    queueInvoice([itemRow({ id: 1 })])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(mockRateAt).not.toHaveBeenCalled()
+    expect(mockAssessmentAt).not.toHaveBeenCalled()
+    expect(mockConfig.mock.calls.some(c => c[2] === 'ibscbs_simples_start')).toBe(false)
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('A-IB141a — a configuração só ADIA: 2027-02-01 adia a nota de 2027-01-15; 2026-01-01 não antecipa a de 2026-12-31', async () => {
+    mockConfig.mockImplementation(async (_i: unknown, _m: string, name: string) => (name === 'ibscbs_simples_start' ? '2027-02-01' : null))
+    queueInvoice([itemRow({ id: 1 })])
+    let conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(mockRateAt).not.toHaveBeenCalled()
+
+    mockEmissionDate.mockResolvedValue('2026-12-31')
+    mockConfig.mockImplementation(async (_i: unknown, _m: string, name: string) => (name === 'ibscbs_simples_start' ? '2026-01-01' : null))
+    queueInvoice([itemRow({ id: 1 })])
+    conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(mockRateAt).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['CRT 3 (regime normal)', '3 - Regime Normal', 'não consulta nada do Simples'],
+    ['CRT 2 (Simples com excesso de sublimite: fora do passo, A-IB138c)', '2 - Simples Nacional - excesso de sublimite de receita bruta', 'idem'],
+  ])('%s: nenhuma linha e nenhuma recusa nova', async (_name, regime) => {
+    mockRateAt.mockResolvedValue(null)
+    queueInvoice([itemRow({ id: 1 })], { regime })
+    mockLoadPieces.mockReset()
+    mockLoadPieces.mockResolvedValue({ icms: { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0,
+      deferred: 'N', deferredAliq: null, highlight: 'N' } })
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(mockRateAt).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['compra', 'Purchase', () => { mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[{ entityId: 90 }]]) }, undefined],
+    ['ajuste', 'Adjust', () => { mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[]]); mockQuery.mockResolvedValueOnce([[{ entityId: 55, direction: 'S' }]]) }, { cfopId: '5949', direction: 'S' }],
+  ])('D-IB142 — %s (entrada) NÃO entra no Simples: nenhuma linha e nenhuma recusa, mesmo sem percentual', async (_name, kind, queueBranch, adjustment) => {
+    mockRateAt.mockResolvedValue(null)
+    mockOrderBase()
+    ;(queueBranch as () => void)()
+    mockContext({ emitterRegime: SIMPLES })
+    const items = [itemRow({ id: 1, kind })]
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind, taxRuleId: 41, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 41 }]])   // findDeadRuleIds
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce({ icms: simplesIcms })
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false, ...(adjustment ? { adjustment } : {}) } as any)
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('MEI (CRT 1 com opSimpNac 2): nenhuma linha e nenhuma recusa, mesmo sem percentual — o /invoice e o /validate (A-IB138c)', async () => {
+    mockRateAt.mockResolvedValue(null)
+    queueInvoice([itemRow({ id: 1 })], { simplesRegime: '2' })
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(mockRateAt).not.toHaveBeenCalled()
+
+    const items = [itemRow({ id: 1 })]
+    mockOrderBase()
+    mockBranchSale()
+    mockContext({ emitterRegime: SIMPLES, emitterSimplesRegime: '2' })
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 41, cfopId: '5102', setFinancial: 'S', origin: 'M' }]])
+    mockLoadPieces.mockResolvedValueOnce({ icms: simplesIcms })
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues.filter(i => i.field === 'ibscbsSimplesRate')).toEqual([])
+  })
+
+  it('opção de apuração diferente de 1 (a recusa é do escritor da nota, D-IB99): o Simples não grava e não recusa', async () => {
+    mockAssessmentAt.mockResolvedValue({ assessment: '2', validFrom: '2027-01-01' })
+    queueInvoice([itemRow({ id: 1 })])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(simplesWrites(conn)).toHaveLength(0)
+    expect(mockRateAt).not.toHaveBeenCalled()
   })
 })
