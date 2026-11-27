@@ -35,8 +35,9 @@ function toPieces(input: TaxRuleBodyDto) {
 
 /**
  * IBS.E9.P3 (D-IB136): a classificação de IBS/CBS da regra precisa EXISTIR e estar VIGENTE hoje no catálogo central. Só isso:
- * a marca "vale para a NF-e" (modelo 55) ainda não é carregada no catálogo e fica para o IBS.E9.P4 — por isso o campo
- * `applicable` da linha é ignorado aqui, de propósito. O faturamento confere de novo, na data de emissão.
+ * o campo `applicable` (a marca "vale para a NF-e", modelo 55) é ignorado aqui, de propósito (IBS.E9.P4, A-IB143j: o cadastro
+ * da regra NÃO muda — quem recusa a classificação sem presença no 55, o CST que o motor não cobre e a redução desconhecida é o
+ * faturamento do regime regular, CRT 3). O faturamento confere de novo, na data de emissão.
  */
 async function assertIbscbsClassification(
   schemaName: string, institutionId: number, input: TaxRuleBodyDto

@@ -25,6 +25,11 @@ jest.mock('../shared/ibscbs-simples-rate', () => ({
   ...jest.requireActual('../shared/ibscbs-simples-rate'),
   simplesRateAt: jest.fn().mockResolvedValue(null),
 }))
+// IBS.E9.P4: a tabela central de alíquotas tem teste próprio (ibscbs-rate.test.ts) — aqui a fronteira é mockada com as linhas da norma
+jest.mock('../shared/ibscbs-rate', () => ({
+  __esModule: true,
+  loadIbscbsAliqTable: jest.fn(async () => [...jest.requireActual('../shared/ibscbs-calculation').IBSCBS_LEGAL_ALIQS]),
+}))
 // IBS.E9.P5: a data de emissão é a do dono único; aqui o default é o real e o bloco do Simples a fixa em 2027
 jest.mock('../shared/invoice/emission-date', () => {
   const actual = jest.requireActual('../shared/invoice/emission-date')
@@ -68,7 +73,10 @@ jest.mock('../shared/tax-rule', () => {
 // a vigência do cClassTrib é do catálogo central (teste próprio: ibscbs-classification.test.ts) — aqui a fronteira é mockada
 jest.mock('../shared/ibscbs-classification', () => ({
   ...jest.requireActual('../shared/ibscbs-classification'),
-  findClassificationAt: jest.fn().mockResolvedValue({ code: '000001', cst: '000' }),
+  // IBS.E9.P4: a linha que o regime regular aceita no modelo 55 (CST 000, com presença, sem redução)
+  findClassificationAt: jest.fn().mockResolvedValue({
+    code: '000001', cst: '000', applicable: true, requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0,
+  }),
 }))
 
 // isola os resolvers do catálogo MVA/FCP (testados em state-tax-rates.test)
@@ -1799,7 +1807,8 @@ describe('invoiceBodyDto — bloco checks (D9/onda do cheque)', () => {
 describe('IBS.E9.P3 — classificação de IBS/CBS da mercadoria', () => {
   const mockFindClassificationAt = (jest.requireMock('../shared/ibscbs-classification') as any).findClassificationAt as jest.Mock
   const mockIssueInvoice = (jest.requireMock('../shared/invoice') as any).issueInvoice as jest.Mock
-  const LINE = { code: '000001', cst: '000', applicable: false }   // vigente; SEM a marca do modelo 55 (D-IB136: ignorada)
+  // vigente e aceita pelo regime regular no 55 (IBS.E9.P4: a marca do modelo 55 deixou de ser ignorada, D-IB136)
+  const LINE = { code: '000001', cst: '000', applicable: true, requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0 }
   const icms = { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0,
     deferred: 'N', deferredAliq: null, highlight: 'N' }
 
@@ -1894,12 +1903,13 @@ describe('IBS.E9.P3 — classificação de IBS/CBS da mercadoria', () => {
     await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
 
     const writes = ibscbsWrites(conn)
-    expect(writes.map(w => w[1])).toEqual([[10, 1, 1, '000001'], [10, 2, 1, '200034']])   // pedido, item, institution, código
+    // pedido, item, institution, código, base (IBS.E9.P4: o CRT 3 do contexto calcula o regular; 100,00 menos o ICMS de 18,00 = 82,00)
+    expect(writes.map(w => w[1])).toEqual([[10, 1, 1, '000001', 82], [10, 2, 1, '200034', 82]])
     const sql = String(writes[0][0]).replace(/\s+/g, ' ')
-    expect(sql).toContain('(tb_order_id, tb_order_item_id, tb_institution_id, terminal, classification_code, created_at, updated_at, deleted)')
-    expect(sql).toContain("VALUES (?, ?, ?, 0, ?, NOW(), NOW(), 'N')")
+    expect(sql).toContain('(tb_order_id, tb_order_item_id, tb_institution_id, terminal, classification_code, base_value, created_at, updated_at, deleted)')
+    expect(sql).toContain("VALUES (?, ?, ?, 0, ?, ?, NOW(), NOW(), 'N')")
     // refaturar regrava a MESMA linha (ressuscita a que o cancelamento apagou) — nunca duplica
-    expect(sql).toContain("ON DUPLICATE KEY UPDATE classification_code = VALUES(classification_code), deleted = 'N'")
+    expect(sql).toContain("ON DUPLICATE KEY UPDATE classification_code = VALUES(classification_code), base_value = VALUES(base_value), deleted = 'N'")
     // a vigência é conferida uma vez por código; a marca do modelo 55 (applicable: false) não recusa (D-IB136)
     expect(mockFindClassificationAt).toHaveBeenCalledTimes(2)
     expect(conn.commit).toHaveBeenCalled()
@@ -2129,10 +2139,15 @@ describe('IBS.E9.P5 — IBS/CBS do Simples no DAS', () => {
   })
 
   it.each([
-    ['CRT 3 (regime normal)', '3 - Regime Normal', 'não consulta nada do Simples'],
+    ['CRT 3 (regime normal; o regular calcula, o Simples não é lido)', '3 - Regime Normal', 'não consulta nada do Simples'],
     ['CRT 2 (Simples com excesso de sublimite: fora do passo, A-IB138c)', '2 - Simples Nacional - excesso de sublimite de receita bruta', 'idem'],
   ])('%s: nenhuma linha e nenhuma recusa nova', async (_name, regime) => {
     mockRateAt.mockResolvedValue(null)
+    // IBS.E9.P4: em 2027 o regular (CRT 3) recusa sem a CBS na tabela (A-IB143f); aqui a prova é a do Simples, então a tabela do teste traz uma CBS hipotética
+    const mockRateTable = (jest.requireMock('../shared/ibscbs-rate') as any).loadIbscbsAliqTable as jest.Mock
+    mockRateTable.mockResolvedValueOnce([
+      ...jest.requireActual('../shared/ibscbs-calculation').IBSCBS_LEGAL_ALIQS,
+      { tax: 'CBS', validFrom: '2027-01-01', validUntil: null, ppm: 88000 }])
     queueInvoice([itemRow({ id: 1 })], { regime })
     mockLoadPieces.mockReset()
     mockLoadPieces.mockResolvedValue({ icms: { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 18, aliqReduction: 0, baseReduction: 0,
@@ -2190,5 +2205,198 @@ describe('IBS.E9.P5 — IBS/CBS do Simples no DAS', () => {
     await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
     expect(simplesWrites(conn)).toHaveLength(0)
     expect(mockRateAt).not.toHaveBeenCalled()
+  })
+})
+
+
+// ---------------------------------------------------------------------
+// IBS.E9.P4 — IBS/CBS do regime regular (CRT 3): o motor liga no faturamento (D-IB143, D-IB144, D-IB145)
+// ---------------------------------------------------------------------
+
+describe('IBS.E9.P4 — IBS/CBS do regime regular', () => {
+  const mockFindClassificationAt = (jest.requireMock('../shared/ibscbs-classification') as any).findClassificationAt as jest.Mock
+  const mockEmissionDate = (jest.requireMock('../shared/invoice/emission-date') as any).invoiceEmissionDateFor as jest.Mock
+  const emissionActual = jest.requireActual('../shared/invoice/emission-date').invoiceEmissionDateFor
+  const mockRateTable = (jest.requireMock('../shared/ibscbs-rate') as any).loadIbscbsAliqTable as jest.Mock
+  const LEGAL = jest.requireActual('../shared/ibscbs-calculation').IBSCBS_LEGAL_ALIQS
+  const LINE = { code: '000001', cst: '000', applicable: true, requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0 }
+  // ICMS com alíquota 0: o item de R$ 100,00 (2 × R$ 50,00) tem base 100,00 — as contas ficam legíveis
+  const icms0 = { cstNr: '00', csosn: null, modBc: '3', dischargeId: null, aliq: 0, aliqReduction: 0, baseReduction: 0,
+    deferred: 'N', deferredAliq: null, highlight: 'N' }
+  const icms18 = { ...icms0, aliq: 18 }
+
+  beforeEach(() => {
+    mockEmissionDate.mockReset()
+    mockEmissionDate.mockResolvedValue('2026-11-10')
+    mockRateTable.mockReset()
+    mockRateTable.mockImplementation(async () => [...LEGAL])
+    mockFindClassificationAt.mockReset()
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, code: string) => (code === '999999' ? null : { ...LINE, code }))
+  })
+  afterAll(() => { mockEmissionDate.mockReset(); mockEmissionDate.mockImplementation(emissionActual) })
+
+  function queueInvoice(items: any[], piecesByItem: Array<Record<string, unknown>>, regime?: string) {
+    mockOrderBase()
+    mockBranchSale()
+    mockContext(regime ? { emitterRegime: regime } : {})
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({
+      orderItemId: i.id, kind: i.kind, taxRuleId: 40 + i.id, cfopId: '5102', setFinancial: 'S', origin: 'A',
+    }))])
+    mockQuery.mockResolvedValueOnce([items.map(i => ({ id: 40 + i.id }))])   // findDeadRuleIds
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    for (const pieces of piecesByItem) mockLoadPieces.mockResolvedValueOnce(pieces)
+  }
+  function queueTxn() {
+    mockQuery.mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]]).mockResolvedValueOnce([[]])
+    const conn = {
+      beginTransaction: jest.fn(), query: jest.fn().mockResolvedValue([{}]),
+      commit: jest.fn(), rollback: jest.fn(), release: jest.fn(),
+    }
+    ;((pool as any).getConnection as jest.Mock).mockResolvedValue(conn)
+    conn.query.mockResolvedValueOnce([[{ status: 'A' }]])     // FOR UPDATE
+    mockNegotiationInTx(conn, null)
+    return conn
+  }
+  const taxWrites = (conn: { query: jest.Mock }) =>
+    conn.query.mock.calls.filter(c => /INSERT INTO `setes_setes`\.tb_order_item_ibscbs_tax\b/.test(String(c[0])))
+  const itemWrites = (conn: { query: jest.Mock }) =>
+    conn.query.mock.calls.filter(c => /INSERT INTO `setes_setes`\.tb_order_item_ibscbs\b/.test(String(c[0])))
+  const rule = (icms: unknown, code = '000001') => ({ icms, ibscbs: { classificationCode: code } })
+
+  it('emissão 2026-11-10, CRT 3, CST 000: a base e uma linha por tributo (U, M, C), com as alíquotas e os valores congelados', async () => {
+    // item: 2 × R$ 50,00 = R$ 100,00 sem imposto sobre a base: IBS UF 0,1000% → 0,10; IBS município 0,0000% → 0,00; CBS 0,9000% → 0,90
+    queueInvoice([itemRow({ id: 1 })], [rule(icms0)])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+
+    expect(itemWrites(conn).map(w => w[1])).toEqual([[10, 1, 1, '000001', 100]])
+    expect(taxWrites(conn).map(w => w[1])).toEqual([
+      [10, 1, 1, 'U', '0.1000', null, '0.1000', 0.1],
+      [10, 1, 1, 'M', '0.0000', null, '0.0000', 0],
+      [10, 1, 1, 'C', '0.9000', null, '0.9000', 0.9],
+    ])
+    const sql = String(taxWrites(conn)[0][0]).replace(/\s+/g, ' ')
+    expect(sql).toContain('(tb_order_id, tb_order_item_id, tb_institution_id, terminal, tax, nominal_rate, reduction_rate, effective_rate, tax_value, created_at, updated_at, deleted)')
+    expect(sql).toContain("VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')")
+    expect(sql).toContain('ON DUPLICATE KEY UPDATE')   // refaturar regrava as MESMAS linhas
+    expect(sql).toContain("deleted = 'N'")
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('o ICMS, o PIS e o COFINS do item saem da base (RF-BC-03): 100,00 − ICMS 18,00 = 82,00 → IBS UF 0,08 e CBS 0,74', async () => {
+    queueInvoice([itemRow({ id: 1 })], [rule(icms18)])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(itemWrites(conn)[0][1]).toEqual([10, 1, 1, '000001', 82])
+    expect(taxWrites(conn).map(w => [w[1][3], w[1][7]])).toEqual([['U', 0.08], ['M', 0], ['C', 0.74]])
+  })
+
+  it('CST 200 com redução do catálogo (IBS 60%, CBS 100%): grava a redução, a efetiva e o valor reduzido', async () => {
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, code: string) =>
+      ({ ...LINE, code, cst: '200', ibsReductionPpm: 600000, cbsReductionPpm: 1000000 }))
+    queueInvoice([itemRow({ id: 1 })], [rule(icms0, '200034')])
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    // IBS UF 0,1000% reduzido em 60% → 0,0400% → 0,04; IBS município 0; CBS 0,9000% reduzida em 100% → 0 (efetiva 0,0000)
+    expect(taxWrites(conn).map(w => w[1])).toEqual([
+      [10, 1, 1, 'U', '0.1000', '60.0000', '0.0400', 0.04],
+      [10, 1, 1, 'M', '0.0000', '60.0000', '0.0000', 0],
+      [10, 1, 1, 'C', '0.9000', '100.0000', '0.0000', 0],
+    ])
+  })
+
+  it('D-IB145 — compra e ajuste também calculam o regular (os mesmos tipos da classificação)', async () => {
+    mockOrderBase()
+    mockQuery.mockResolvedValueOnce([[]])
+    mockQuery.mockResolvedValueOnce([[{ entityId: 90 }]])   // ramo de compra
+    mockContext()
+    const items = [itemRow({ id: 1, kind: 'Purchase' })]
+    mockQuery.mockResolvedValueOnce([items])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Purchase', taxRuleId: 41, cfopId: '5102', setFinancial: 'S', origin: 'A' }]])
+    mockQuery.mockResolvedValueOnce([[{ id: 41 }]])
+    mockQuery.mockResolvedValueOnce([[{ freight: 0 }]])
+    mockQuery.mockResolvedValueOnce([[{ expenses: 0 }]])
+    mockLoadPieces.mockResolvedValueOnce(rule(icms0))
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(taxWrites(conn)).toHaveLength(3)
+  })
+
+  it('sem alíquota vigente (a CBS de 2027 não está na tabela): UM 422 BILLING_IBSCBS_RATE_NOT_FOUND com todos os itens, nada gravado', async () => {
+    mockEmissionDate.mockResolvedValue('2027-01-15')
+    queueInvoice([itemRow({ id: 1 }), itemRow({ id: 2, productId: 101 })], [rule(icms0), rule(icms0)])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code: 'BILLING_IBSCBS_RATE_NOT_FOUND',
+      fields: [
+        { field: 'item.1', message: expect.stringMatching(/sem alíquota de CBS vigente em 2027-01-15/) },
+        { field: 'item.2', message: expect.stringMatching(/sem alíquota de CBS vigente em 2027-01-15/) },
+      ],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['CST 410 (imunidade)', { cst: '410' }, 'BILLING_IBSCBS_CST_NOT_SUPPORTED', /CST 410.*só o CST 000 e o 200/],
+    ['CST 550 (suspensão)', { cst: '550' }, 'BILLING_IBSCBS_CST_NOT_SUPPORTED', /CST 550/],
+    ['CST 200 com gTribRegular', { cst: '200', requiresRegularTaxation: true }, 'BILLING_IBSCBS_CST_NOT_SUPPORTED', /gTribRegular/],
+    ['sem presença no modelo 55 (rej. 1025)', { applicable: false }, 'BILLING_IBSCBS_NOT_ALLOWED_IN_NFE', /não é permitido na NF-e modelo 55/],
+    ['redução ainda desconhecida (NULL)', { ibsReductionPpm: null }, 'BILLING_IBSCBS_REDUCTION_UNKNOWN', /ainda não foi carregada/],
+  ])('D-IB144 — %s: 422 com o item e a regra, e nada é gravado', async (_name, over, code, message) => {
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, c: string) => ({ ...LINE, code: c, ...over }))
+    queueInvoice([itemRow({ id: 1 })], [rule(icms0)])
+    await expect(invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })).rejects.toMatchObject({
+      statusCode: 422, code, fields: [{ field: 'item.1', message: expect.stringMatching(message) }],
+    })
+    expect((pool as any).getConnection).not.toHaveBeenCalled()
+  })
+
+  it('o Simples (CRT 1) não é tocado: a mesma classificação sem presença no 55 fatura como antes, sem linha de tributo e sem ler a tabela de alíquotas', async () => {
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, c: string) => ({ ...LINE, code: c, cst: '410', applicable: false }))
+    queueInvoice([itemRow({ id: 1 })], [{ icms: { cstNr: null, csosn: '102', modBc: '3', dischargeId: null, aliq: 0, aliqReduction: 0, baseReduction: 0,
+      deferred: 'N', deferredAliq: null, highlight: 'N' }, ibscbs: { classificationCode: '410014' } }], '1 - Simples Nacional')
+    const conn = queueTxn()
+    await invoiceOrder(inst as any, { orderId: 10, useMvaOriginal: false })
+    expect(taxWrites(conn)).toHaveLength(0)
+    expect(itemWrites(conn).map(w => w[1])).toEqual([[10, 1, 1, '410014', null]])   // a base fica NULL: o item não foi calculado no regular
+    expect(mockRateTable).not.toHaveBeenCalled()
+    expect(conn.commit).toHaveBeenCalled()
+  })
+
+  it('/validate: as mesmas pendências viram issue POR ITEM (campo ibscbsRegular), sem lançar', async () => {
+    mockEmissionDate.mockResolvedValue('2027-01-15')   // sem CBS na tabela
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 41, cfopId: '5102', setFinancial: 'S', origin: 'M' }]])
+    mockLoadPieces.mockResolvedValueOnce(rule(icms0))
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues.filter(i => i.field === 'ibscbsRegular')).toEqual([
+      { scope: 'item', itemId: 1, field: 'ibscbsRegular', message: expect.stringMatching(/sem alíquota de CBS vigente em 2027-01-15/) },
+    ])
+  })
+
+  it('/validate: CST fora de 000/200 também vira pendência, e a classificação inexistente só traz a sua (sem repetir)', async () => {
+    mockFindClassificationAt.mockImplementation(async (_q: unknown, c: string) => ({ ...LINE, code: c, cst: '410' }))
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 41, cfopId: '5102', setFinancial: 'S', origin: 'M' }]])
+    mockLoadPieces.mockResolvedValueOnce(rule(icms0, '410014'))
+    const report = await validateOrder(inst as any, { orderId: 10 })
+    expect(report.issues.map(i => i.field).filter(f => (f ?? '').startsWith('ibscbs'))).toEqual(['ibscbsRegular'])
+
+    mockFindClassificationAt.mockImplementation(async () => null)
+    mockOrderBase()
+    mockBranchSale()
+    mockContext()
+    mockQuery.mockResolvedValueOnce([[itemRow({ id: 1 })]])
+    mockQuery.mockResolvedValueOnce([[{ orderItemId: 1, kind: 'Sale', taxRuleId: 41, cfopId: '5102', setFinancial: 'S', origin: 'M' }]])
+    mockLoadPieces.mockResolvedValueOnce(rule(icms0, '999999'))
+    const report2 = await validateOrder(inst as any, { orderId: 10 })
+    expect(report2.issues.map(i => i.field).filter(f => (f ?? '').startsWith('ibscbs'))).toEqual(['ibscbsClassification'])
   })
 })

@@ -15,6 +15,7 @@ import { issueInvoice, InvoiceServiceDraft } from '@shared/invoice'
 import { declareServiceIbscbs } from '@shared/service-ibscbs-declaration'
 import { ibscbsOutcomeOf, IbscbsOutcome } from '@shared/ibscbs-classification'
 import type { IbscbsSimplesDeclared } from '@shared/ibscbs-simples-das'
+import type { IbscbsRegularDeclared } from '@shared/ibscbs-regular'
 import { IssLiability } from '@shared/entity-tax/entity-tax.types'
 import { persistReturn, assertReturnableInTx, ReturnPlan } from '@shared/order-return'
 import logger from '@shared/logger/logger'
@@ -405,6 +406,9 @@ export interface ComputedItem {
   /** IBS.E9.P5 (D-IB138 a D-IB141): o que o item do Simples no DAS declara — atividade, percentual do mês, base e valores —, calculado
    *  pelo motor ANTES da transação. null = a nota não é do Simples no DAS de 2027 em diante, ou o item não é mercadoria. */
   ibscbsSimples: IbscbsSimplesDeclared | null
+  /** IBS.E9.P4 (D-IB143 a D-IB145): o que o item do REGIME REGULAR (CRT 3) declara — a base (`vBC`) e uma linha por tributo —, calculado
+   *  pelo motor depois dos impostos do item. null = a nota não é do regular, ou o item não é mercadoria. */
+  ibscbsRegular: IbscbsRegularDeclared | null
   icmsExtras: {
     cst: string | null
     origin: string | null
@@ -722,18 +726,36 @@ async function persistItemTaxes(
   const key = [orderId, ci.item.id, institutionId]
   const t = ci.taxes
 
-  // IBS.E9.P3 (D-IB9, D-IB133): a classificação de IBS/CBS que o item declara. Só o código — sem valor (o faturamento ainda não
-  // calcula IBS/CBS; coluna nasce com o cálculo, D-NE248). Mesma chave dos registros irmãos, sem `kind`.
+  // IBS.E9.P3 (D-IB9, D-IB133): a classificação de IBS/CBS que o item declara. Mesma chave dos registros irmãos, sem `kind`.
+  // IBS.E9.P4: a base (`vBC`) do regime regular mora aqui (um valor por item); NULL = o item não foi calculado no regular — e o
+  // refaturamento de um item que deixou de ser calculado LIMPA o valor antigo.
   if (ci.ibscbsClassificationCode) {
     await conn.query(
       `INSERT INTO \`${s}\`.tb_order_item_ibscbs
          (tb_order_id, tb_order_item_id, tb_institution_id, terminal,
-          classification_code, created_at, updated_at, deleted)
-       VALUES (?, ?, ?, 0, ?, NOW(), NOW(), 'N')
+          classification_code, base_value, created_at, updated_at, deleted)
+       VALUES (?, ?, ?, 0, ?, ?, NOW(), NOW(), 'N')
        ON DUPLICATE KEY UPDATE
-         classification_code = VALUES(classification_code), deleted = 'N', updated_at = NOW()`,
-      [...key, ci.ibscbsClassificationCode]
+         classification_code = VALUES(classification_code), base_value = VALUES(base_value), deleted = 'N', updated_at = NOW()`,
+      [...key, ci.ibscbsClassificationCode, ci.ibscbsRegular?.baseValue ?? null]
     )
+  }
+
+  // IBS.E9.P4 (D-IB143): o que o motor calculou por tributo no regime regular — uma linha por tributo (U, M, C), as alíquotas e o valor
+  // CONGELADOS. Mesma chave dos irmãos mais `tax`, sem `kind`. A linha existe só quando o regular calculou o item.
+  if (ci.ibscbsRegular) {
+    for (const t of ci.ibscbsRegular.taxes) {
+      await conn.query(
+        `INSERT INTO \`${s}\`.tb_order_item_ibscbs_tax
+           (tb_order_id, tb_order_item_id, tb_institution_id, terminal, tax,
+            nominal_rate, reduction_rate, effective_rate, tax_value, created_at, updated_at, deleted)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')
+         ON DUPLICATE KEY UPDATE
+           nominal_rate = VALUES(nominal_rate), reduction_rate = VALUES(reduction_rate), effective_rate = VALUES(effective_rate),
+           tax_value = VALUES(tax_value), deleted = 'N', updated_at = NOW()`,
+        [...key, t.tax, t.nominalRate, t.reductionRate, t.effectiveRate, t.taxValue]
+      )
+    }
   }
 
   // IBS.E9.P5: o que o item do Simples no DAS declara (D-IB138 a D-IB141). Os percentuais ficam COPIADOS do mês usado: a nota não

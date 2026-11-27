@@ -27,7 +27,10 @@ import {
 import { assertSchema } from '@shared/db/schema'
 import { previewServiceIbscbs } from '@shared/service-ibscbs-declaration'
 import { previewIbscbsAssessmentRefusal } from '@shared/ibscbs-assessment'
-import { findClassificationAt } from '@shared/ibscbs-classification'
+import { findClassificationAt, ClassificationAt } from '@shared/ibscbs-classification'
+import {
+  loadRegularPlan, regularProblemOf, declareRegularItem, RegularPlan, RegularProblem, IbscbsRegularDeclared,
+} from '@shared/ibscbs-regular'
 import {
   loadSimplesDasPlan, declareSimplesItem, simplesRateMissingMessage, IbscbsSimplesDeclared,
 } from '@shared/ibscbs-simples-das'
@@ -79,6 +82,7 @@ import { billingInputPrint, BillingInputChanged } from './billing.input-print'
 const MERCHANDISE_KINDS = ['Sale', 'Purchase', 'Adjust']
 /** IBS.E9.P5 (D-IB142): o IBS/CBS do Simples no DAS é o da RECEITA do emitente — só o item de VENDA; compra e ajuste (entradas) ficam de fora. */
 const SIMPLES_KINDS: readonly string[] = ['Sale']
+// IBS.E9.P4 (D-IB145): o IBS/CBS do REGIME REGULAR vale para venda, compra e ajuste — os mesmos tipos da classificação (MERCHANDISE_KINDS)
 
 interface BillingContext {
   branch: OrderBranchInfo
@@ -183,8 +187,9 @@ function buildCriteria(
 /**
  * IBS.E9.P3 — a classificação de IBS/CBS do item de MERCADORIA, conferida no faturamento e na validação pela MESMA função.
  * D-IB134: regra sem a peça `ibscbs` não fatura, já em 2026 (não espera a data da obrigação). D-IB136: o código precisa existir
- * e estar vigente na data de emissão — só isso; a marca "vale para a NF-e" (modelo 55) não é carregada no catálogo e o campo
- * `applicable` da linha é ignorado de propósito (IBS.E9.P4). Uma consulta por código (as regras de um pedido são poucas).
+ * e estar vigente na data de emissão — só isso, para TODO CRT; o campo `applicable` (a marca "vale para a NF-e", modelo 55) é
+ * ignorado aqui de propósito: IBS.E9.P4 (A-IB143j) o confere SÓ no regime regular (CRT 3), em `@shared/ibscbs-regular`, com a linha
+ * vigente que este verificador guarda (`lineOf`). Uma consulta por código (as regras de um pedido são poucas).
  */
 interface IbscbsItemProblem {
   code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED' | 'IBSCBS_CLASSIFICATION_NOT_FOUND'
@@ -192,7 +197,9 @@ interface IbscbsItemProblem {
 }
 function ibscbsItemChecker(emissionDate: string) {
   const vigentByCode = new Map<string, boolean>()
-  return async (itemId: number, ruleId: number, pieces: TaxRulePieces): Promise<IbscbsItemProblem | null> => {
+  // IBS.E9.P4: a linha vigente (modelo 55) de cada código já conferido — o regime regular a usa sem nova consulta
+  const lineByCode = new Map<string, ClassificationAt | null>()
+  const check = async (itemId: number, ruleId: number, pieces: TaxRulePieces): Promise<IbscbsItemProblem | null> => {
     const code = pieces.ibscbs?.classificationCode
     if (!code) {
       return { code: 'BILLING_IBSCBS_CLASSIFICATION_REQUIRED',
@@ -202,13 +209,15 @@ function ibscbsItemChecker(emissionDate: string) {
     // (linha gravada fora da API — número, espaços, dígitos não ASCII — nunca chega ao INSERT)
     let vigent = vigentByCode.get(code)
     if (vigent === undefined) {
-      vigent = typeof code === 'string' && /^[0-9]{6}$/.test(code)
-        && (await findClassificationAt(pool, code, '55', emissionDate)) != null
+      const line = typeof code === 'string' && /^[0-9]{6}$/.test(code) ? await findClassificationAt(pool, code, '55', emissionDate) : null
+      lineByCode.set(code, line)
+      vigent = line != null
       vigentByCode.set(code, vigent)
     }
     return vigent ? null : { code: 'IBSCBS_CLASSIFICATION_NOT_FOUND',
       message: `Item ${itemId}: cClassTrib ${code} da regra de tributação ${ruleId} não existe no catálogo ou não está vigente em ${emissionDate}` }
   }
+  return Object.assign(check, { lineOf: (code: string): ClassificationAt | null => lineByCode.get(code) ?? null })
 }
 
 export async function validateOrder(
@@ -313,10 +322,26 @@ export async function validateOrder(
     icmsMissingCodeForCrt(await validatePiecesOf(ruleId), ctx.emitterCrt)
   // IBS.E9.P3: a mesma conferência do faturamento, na data que ele usaria — vira pendência da lista (a tela descobre aqui)
   let ibscbsProblemOf: ReturnType<typeof ibscbsItemChecker> | null = null
+  let regularPlan: RegularPlan | null = null
   const pushIbscbsIssue = async (itemId: number, ruleId: number): Promise<void> => {
-    ibscbsProblemOf ??= ibscbsItemChecker(await invoiceEmissionDateFor(schemaName, institutionId))
-    const problem = await ibscbsProblemOf(itemId, ruleId, await validatePiecesOf(ruleId))
-    if (problem) issues.push({ scope: 'item', itemId, field: 'ibscbsClassification', message: problem.message })
+    let emissionDate: string | null = null
+    if (!ibscbsProblemOf) {
+      emissionDate = await invoiceEmissionDateFor(schemaName, institutionId)
+      ibscbsProblemOf = ibscbsItemChecker(emissionDate)
+    }
+    const pieces = await validatePiecesOf(ruleId)
+    const problem = await ibscbsProblemOf(itemId, ruleId, pieces)
+    if (problem) {
+      issues.push({ scope: 'item', itemId, field: 'ibscbsClassification', message: problem.message })
+      return
+    }
+    // IBS.E9.P4: a mesma conferência do faturamento do REGIME REGULAR (CRT 3) — modelo 55, CST aceito, redução e alíquota vigente
+    regularPlan ??= await loadRegularPlan({ crt: ctx.emitterCrt, emissionDate: emissionDate ?? await invoiceEmissionDateFor(schemaName, institutionId) })
+    const code = pieces.ibscbs?.classificationCode
+    if (regularPlan.active && code) {
+      const regular = regularProblemOf(regularPlan, itemId, ruleId, code, ibscbsProblemOf.lineOf(code))
+      if (regular) issues.push({ scope: 'item', itemId, field: 'ibscbsRegular', message: regular.message })
+    }
   }
   const missingCodeMessage = (itemId: number, ruleId: number, code: 'csosn' | 'cst') =>
     `Item ${itemId}: regra de tributação ${ruleId} sem ${code === 'csosn'
@@ -711,6 +736,9 @@ async function invoiceOrderOnce(
     institution, crt: ctx.emitterCrt, simplesRegime: ctx.emitterSimplesRegime, emissionDate: baseDate,
     establishmentActivity: ctx.emitterSimplesActivity })
   const simplesProblems: Array<{ itemId: number; message: string }> = []
+  // IBS.E9.P4 (D-IB143 a D-IB145): o regime regular (CRT 3) calcula e grava os valores por tributo já em 2026 — plano e alíquotas lidos ANTES do laço e da transação
+  const regularPlan = await loadRegularPlan({ crt: ctx.emitterCrt, emissionDate: baseDate })
+  const regularProblems: Array<{ itemId: number } & RegularProblem> = []
 
   const computed: ComputedItem[] = []
   for (let idx = 0; idx < items.length; idx++) {
@@ -812,13 +840,29 @@ async function invoiceOrderOnce(
     }
     const serviceRule = isService ? serviceRuleByItem.get(`${item.id}|${item.kind}`) ?? null : null
 
+    const taxes = calculateItemTaxes(calcInput)
+    // IBS.E9.P4: o item de mercadoria do regime regular declara a base e os valores por tributo — DEPOIS dos impostos do item (ICMS, PIS,
+    // COFINS, FCP e II saem da base, A-IB143g); recusa junta todos os itens e sai depois do laço
+    let ibscbsRegular: IbscbsRegularDeclared | null = null
+    if (regularPlan.active && link && ibscbsChecked !== null) {
+      const line = ibscbsProblemOf.lineOf(ibscbsChecked)
+      const problem = regularProblemOf(regularPlan, item.id, link.taxRuleId, ibscbsChecked, line)
+      if (problem) regularProblems.push({ itemId: item.id, ...problem })
+      else {
+        ibscbsRegular = declareRegularItem(regularPlan, item.id, line!, {
+          unitValue: item.unitValue, quantity: item.quantity, merchandiseValue,
+          freightShare: freightShares[idx], expensesShare: expensesShares[idx],
+        }, taxes)
+      }
+    }
+
     computed.push({
       item,
       link: link ?? {
         orderItemId: item.id, kind: item.kind, taxRuleId: 0,
         cfopId: null, setFinancial: 'S', origin: 'A',
       },
-      taxes: calculateItemTaxes(calcInput),
+      taxes,
       merchandiseValue,
       freightShare: freightShares[idx],
       expensesShare: expensesShares[idx],
@@ -827,6 +871,7 @@ async function invoiceOrderOnce(
       cofinsCst: pieces.pisCofins?.find(p => p.kind === 'C')?.cst ?? null,
       ibscbsClassificationCode: ibscbsChecked,
       ibscbsSimples,
+      ibscbsRegular,
       icmsExtras: {
         cst: pieces.icms?.cstNr ?? pieces.icms?.csosn ?? null,
         origin: item.origin,
@@ -853,6 +898,11 @@ async function invoiceOrderOnce(
     // um 422 só, com todos os itens; o código é o do primeiro problema (regra sem a peça × código fora de vigência)
     throw new HttpError(422, 'Mercadoria sem classificação de IBS/CBS válida — revise as regras de tributação',
       ibscbsProblems.map(p => ({ field: `item.${p.itemId}`, message: p.message })), ibscbsProblems[0].code)
+  }
+  if (regularProblems.length > 0) {
+    // um 422 só, com todos os itens (D-IB144, A-IB143f); o código é o do primeiro problema
+    throw new HttpError(422, 'IBS/CBS do regime regular não pode ser calculado — revise as regras de tributação e as alíquotas',
+      regularProblems.map(p => ({ field: `item.${p.itemId}`, message: p.message })), regularProblems[0].code)
   }
   if (simplesProblems.length > 0) {
     // um 422 só, com todos os itens (D-IB140): falta o percentual de IBS/CBS do Simples do mês da nota

@@ -7,6 +7,9 @@ import { detectLockWaitSupport } from '@shared/db/counters'
 import { assertIbscbsCatalogSchema } from '@shared/ibscbs-classification'
 import { assertIbscbsAssessmentChecks } from '@shared/ibscbs-assessment'
 import { assertIbscbsSimplesChecks } from '@shared/ibscbs-simples-rate'
+import { assertIbscbsRegularChecks } from '@shared/ibscbs-regular'
+import { ibscbsRateAlerts, loadIbscbsAliqTable } from '@shared/ibscbs-rate'
+import { todayIn, DEFAULT_TIME_ZONE } from '@shared/time-zone'
 import { assertJwtKeys } from '@shared/auth/product-token'
 import { assertPasswordResetReady, assertLoginLockReady } from '@modules/auth/auth.service'
 import { assertMailerReady, assertOpsAlertReady, nodeEnvWarning } from '@shared/mailer/mailer'
@@ -67,6 +70,12 @@ async function bootstrap() {
     logger.info(`Opção de apuração IBS/CBS (migration 077): ${await assertIbscbsAssessmentChecks()}`)
     // D-IB138 (IBS.E9.P5): as guardas do IBS/CBS do Simples (mês, faixa do percentual, atividade 01-04 — migration 084) existem em cada schema
     logger.info(`IBS/CBS do Simples no DAS (migration 084): ${await assertIbscbsSimplesChecks()}`)
+    // IBS.E9.P4: as guardas do IBS/CBS do regime regular (tributo U/M/C, faixas, efetiva <= nominal — migration 085) existem em cada schema
+    logger.info(`IBS/CBS do regime regular (migration 085): ${await assertIbscbsRegularChecks(pool)}`)
+    // IBS.E9.P4 (A-IB143f): AVISA — sem derrubar, o dado é do Valdo — quando falta alíquota vigente hoje ou a CBS some nos próximos 45 dias
+    for (const alert of ibscbsRateAlerts(await loadIbscbsAliqTable(), todayIn(DEFAULT_TIME_ZONE))) {
+      logger.warn(`[IBS.E9.P4] alíquotas do IBS/CBS (tabela central de alíquotas): ${alert}`)
+    }
     // Costura A1 (D-AU3): as views POR SCHEMA do veredito (migration 075) — faltando num cliente, o setes-api NÃO sobe
     logger.info(`Veredito de acesso (075 por schema): ${await assertAccessSchemaViews()}`)
     // D-TM29/D-TM31: as telas ESTRUTURAIS concedidas a TODO estabelecimento ativo (só a que falta — A-TM11); erro de banco = NÃO sobe

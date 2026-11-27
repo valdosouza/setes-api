@@ -101,7 +101,7 @@ src/
 │   │                        # regular por fora/por dentro, Simples no DAS, totais). Centavos inteiros e
 │   │                        # milionésimos; sem banco/relógio/import de outra peça (cerca
 │   │                        # ibscbs-calculation-fence); vetores neutros em __tests__/vectors/ibscbs.
-│   │                        # Ninguém chama ainda — a ligação no faturamento é do IBS.E9.P4 (D-IB135)
+│   │                        # Chamam: ibscbs-simples-das/-rate (Simples), ibscbs-rate e ibscbs-regular (regular)
 │   │                        # IBS.E9.P3 (D-IB133 a D-IB136): a regra de tributação traz a classificação
 │   │                        # (peça `ibscbs` em tax-rule, tb_tax_rule_ibscbs, só o cClassTrib) e o
 │   │                        # faturamento a grava por item (tb_order_item_ibscbs, migration 083) — sem
@@ -111,6 +111,12 @@ src/
 │   │                        # (cAtivSN: padrão em tb_entity_tax, exceção em tb_merchandise) e `ibscbs-simples-das` (quando vale
 │   │                        # e a declaração do item, tb_order_item_ibscbs_simples, migration 084). Piso 2027-01-01 no código
 │   │                        # (a config `billing/ibscbs_simples_start` só adia); sem o percentual do mês o faturamento RECUSA (422)
+│   │                        # IBS.E9.P4 (D-IB143 a D-IB145): o regime regular (CRT 3) calcula já em 2026, por fora — `ibscbs-rate`
+│   │                        # (alíquotas datadas, setes_central.tb_tax_ibscbs_rate, script sql/81) e `ibscbs-regular` (quando vale,
+│   │                        # o que recusa e a declaração do item: base em tb_order_item_ibscbs.base_value e uma linha por tributo
+│   │                        # U/M/C em tb_order_item_ibscbs_tax, migration 085). Recusa (422) CST fora de 000/200, sem presença no
+│   │                        # modelo 55, redução desconhecida e sem alíquota vigente (a CBS de 2027 não tem linha); a redução vem do
+│   │                        # catálogo (pRedIBS/pRedCBS); a carga do catálogo passa a gerir o modelo 55
 │   ├── errors/http-error.ts # Custom HTTP error class
 │   ├── http/controller-utils.ts # handleError + parseId (todo controller usa)
 │   ├── logger/logger.ts     # Simple console logger with timestamps
