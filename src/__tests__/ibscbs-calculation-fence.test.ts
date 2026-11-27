@@ -90,9 +90,10 @@ describe('cerca @shared/ibscbs-calculation', () => {
     for (const code of hostile) expect(specifiersOf(code).length).toBe(1)
   })
 
-  // IBS.E9.P5 (D-IB138 a D-IB142): o Simples no DAS liga o motor (base e valores) — SÓ por duas peças; o regular continua sem chamador
-  // até o IBS.E9.P4. Chamador novo fora desta lista é uma 2ª ligação: este teste falha e diz onde.
-  it('só as peças do Simples no DAS chamam o motor; a ligação do regime regular é do IBS.E9.P4', () => {
+  // IBS.E9.P5 (D-IB138 a D-IB142): o Simples no DAS liga o motor (base e valores) por duas peças; IBS.E9.P4 (D-IB143 a D-IB145): o regime
+  // regular o liga por mais duas (a das alíquotas, que dá a tabela ao motor, e a que declara o item). Chamador novo fora desta lista é uma
+  // ligação a mais: este teste falha e diz onde.
+  it('só as peças do Simples no DAS e do regime regular chamam o motor', () => {
     const src = join(__dirname, '..')
     const users: string[] = []
     const walk = (dir: string): void => {
@@ -108,6 +109,8 @@ describe('cerca @shared/ibscbs-calculation', () => {
     }
     walk(src)
     const rel = users.map(u => u.slice(src.length + 1).split('\\').join('/')).sort()
-    expect(rel).toEqual(['shared/ibscbs-simples-das/index.ts', 'shared/ibscbs-simples-rate/index.ts'])
+    expect(rel).toEqual([
+      'shared/ibscbs-rate/index.ts', 'shared/ibscbs-regular/index.ts',
+      'shared/ibscbs-simples-das/index.ts', 'shared/ibscbs-simples-rate/index.ts'])
   })
 })
