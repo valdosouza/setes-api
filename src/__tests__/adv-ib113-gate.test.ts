@@ -23,8 +23,8 @@ const failing: jest.It['failing'] = process.env.ADV_SHOW === '1' ? (it as any) :
 // ---------------------------------------------------------------------------------------------------------------------------
 
 const CLASS_HEADER = ['CST-IBS/CBS', 'Descrição CST-IBS/CBS', 'cClassTrib', 'Nome cClassTrib', 'Descrição cClassTrib', 'ind_gTribRegular',
-  'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe']
-const classRow = (cst: string, code: string) => [cst, 'x', code, 'n', 'd', 0, '2026-01-01', null, '2026-01-01', 1, 1, 1]
+  'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe', 'pRedIBS', 'pRedCBS']
+const classRow = (cst: string, code: string) => [cst, 'x', code, 'n', 'd', 0, '2026-01-01', null, '2026-01-01', 1, 1, 1, 0, 0]
 
 describe('ADV-IB113 fonte (parse.ts) — o indicador nunca vem da aba errada nem de valor torto', () => {
   it('a aba cClass ganhando uma coluna ind_gIBSCBS ANTES da aba CST: a carga é RECUSADA (CST repetido), nunca lê a aba errada calada', () => {

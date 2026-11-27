@@ -8,7 +8,7 @@ const base = (): PlanInput => ({
   it: {
     csts: [{ id: '000', description: 'Tributação integral', requiresGroup: true }],
     classifications: [{ code: '000001', cst: '000', name: 'n', description: 'd', validFrom: '2026-01-01', validUntil: null,
-      requiresRegularTaxation: false, updatedAt: '2026-01-01', models: ['SE'] }],
+      requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['SE'] }],
   },
   indopFile: 'b'.repeat(64), indopVersion: 'Anexo VII v1.03.00',
   indop: [{ code: '100301', description: 'Demais serviços — Execução — Domicílio do adquirente', models: ['SE'] }],

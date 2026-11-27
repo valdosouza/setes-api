@@ -4,6 +4,7 @@ import {
   registrationWindowEnd,
 } from '@shared/ibscbs-classification'
 import { CatalogSourceError, ClassificationRecord, ItCatalog, NbsRecord, PlaceIndicatorRecord } from './parse'
+import { regularAcceptedCodes } from './regular'
 
 /**
  * Gravação do catálogo IBS/CBS em setes_central (IB-1 — D-IB5/D-IB22/D-IB23/D-IB26).
@@ -112,6 +113,17 @@ export function shrinkLine(r: ShrinkRow): string {
   return `${SHRINK_LABEL[r.list]} [${r.list}]: ${r.deactivated} de ${r.aliveBefore}${split}${vigent}`
 }
 
+/** IBS.E9.P4 (achado do P3): regras de tributação de um cliente cujo cClassTrib o regular NÃO aceitaria no modelo 55 depois da carga
+ *  (sem presença no 55, exigindo tributação regular ou CST fora de 000/200). Só quando a carga gerencia o modelo 55. */
+export interface RuleImpactRow {
+  schema: string
+  institutionActive: boolean
+  code: string
+  rules: number
+  /** Até 50 ids das regras afetadas. */
+  ruleIds: number[]
+}
+
 /** D-IB28 (b): serviços de um cliente que usam código/NBS que perde a presença nesta carga. */
 export interface ImpactRow {
   schema: string
@@ -193,6 +205,8 @@ export interface ApplyReport {
   /** Listas que encolheram mais que o limite (D-IB28 (c)) — no ensaio, aviso; no ato sem --aceita-encolher, recusa. */
   shrink:                ShrinkRow[]
   impact:                ImpactRow[]
+  /** IBS.E9.P4: regras de tributação com classificação que o regular recusaria no modelo 55 (vazio sem o 55 em `models`). */
+  ruleImpact:            RuleImpactRow[]
   /** D-IB45/D-IB49/D-IB50: aviso PROSPECTIVO (fora do limite) — serviços cujo código, aceito na data da carga pela data do
    *  fato ou só pelo cadastro, deixa de ser aceito até o horizonte (`impactAheadUntil`), com a data e o motivo da perda; só
    *  no ensaio. A 1ª perda, a 1ª volta (D-IB51), a 1ª perda depois da volta (D-IB54) e a volta pendente de conferência
@@ -248,7 +262,7 @@ export async function applyCatalog(conn: Conn, input: ApplyInput): Promise<Apply
   const report: ApplyReport = {
     applied: false, cst: zero(), classification: zero(), validity: zero(), applicability: zero(),
     placeIndicator: zero(), placeApplicability: zero(), nbs: zero(),
-    validityEnded: [], validityRegularOn: [], cstGroupOff: [], validityVigentOnDate: 0, shrink: [], impact: [], impactAhead: [], impactAheadUntil: null, impactProblems: [],
+    validityEnded: [], validityRegularOn: [], cstGroupOff: [], validityVigentOnDate: 0, shrink: [], impact: [], ruleImpact: [], impactAhead: [], impactAheadUntil: null, impactProblems: [],
   }
   await conn.query(`SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'STRICT_ALL_TABLES')`)
   await conn.beginTransaction()
@@ -316,7 +330,7 @@ export async function applyCatalog(conn: Conn, input: ApplyInput): Promise<Apply
     // --- História (vigência) -------------------------------------------------
     const [vRows] = await conn.query<any[]>(
       `SELECT code, valid_from, valid_until, name, description, requires_regular_taxation, source_updated_at,
-              absent_since_version
+              absent_since_version, ibs_reduction_rate, cbs_reduction_rate
          FROM ${C}.tb_tax_ibscbs_classification_validity`)
     const vHave = new Map<string, any>(vRows.map(r => [`${r.code}|${isoDate(r.valid_from)}`, r]))
     // D-IB39: base do limite de encolhimento da história = linhas PRESENTES na fonte antes da carga
@@ -331,19 +345,25 @@ export async function applyCatalog(conn: Conn, input: ApplyInput): Promise<Apply
         await conn.query(
           `INSERT INTO ${C}.tb_tax_ibscbs_classification_validity
              (code, valid_from, valid_until, name, description, requires_regular_taxation,
-              source_version, source_updated_at, created_at, updated_at, deleted)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')`,
-          [c.code, c.validFrom, c.validUntil, c.name, c.description, regular, input.itVersion, c.updatedAt])
+              source_version, source_updated_at, ibs_reduction_rate, cbs_reduction_rate, created_at, updated_at, deleted)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), 'N')`,
+          [c.code, c.validFrom, c.validUntil, c.name, c.description, regular, input.itVersion, c.updatedAt,
+            c.ibsReductionPct, c.cbsReductionPct])
         report.validity.inserted++
       } else if (isoDate(row.valid_until) !== c.validUntil || row.name !== c.name || row.description !== c.description
                  || row.requires_regular_taxation !== regular || isoDate(row.source_updated_at) !== c.updatedAt
-                 || row.absent_since_version != null) {
+                 || row.absent_since_version != null
+                 // IBS.E9.P4: NULL (carga anterior) ou valor diferente — a redução é regravada
+                 || row.ibs_reduction_rate == null || Number(row.ibs_reduction_rate) !== c.ibsReductionPct
+                 || row.cbs_reduction_rate == null || Number(row.cbs_reduction_rate) !== c.cbsReductionPct) {
         await conn.query(
           `UPDATE ${C}.tb_tax_ibscbs_classification_validity
               SET valid_until = ?, name = ?, description = ?, requires_regular_taxation = ?,
-                  source_version = ?, source_updated_at = ?, absent_since_version = NULL, deleted = 'N', updated_at = NOW()
+                  source_version = ?, source_updated_at = ?, ibs_reduction_rate = ?, cbs_reduction_rate = ?,
+                  absent_since_version = NULL, deleted = 'N', updated_at = NOW()
             WHERE code = ? AND valid_from = ?`,
-          [c.validUntil, c.name, c.description, regular, input.itVersion, c.updatedAt, c.code, c.validFrom])
+          [c.validUntil, c.name, c.description, regular, input.itVersion, c.updatedAt,
+            c.ibsReductionPct, c.cbsReductionPct, c.code, c.validFrom])
         if (row.absent_since_version != null) report.validity.revived++
         else report.validity.updated++
         if (input.date && vigentOn(row, input.date)) {
@@ -467,6 +487,13 @@ export async function applyCatalog(conn: Conn, input: ApplyInput): Promise<Apply
     }
     // leitura dos clientes FORA da transação do catálogo (nenhuma trava central segura N schemas)
     if (lost) await reportImpact(conn, report, lost)
+    // IBS.E9.P4: só quando a carga gerencia o modelo 55 e tem a data do fato
+    if (input.reportImpact && !input.apply && input.date && input.models.includes('55')) {
+      const noPresence = (c: ClassificationRecord): boolean =>
+        input.unconfirmed.some(u => u.code === c.code && u.validFrom === c.validFrom)
+        || (input.blocked ?? []).some(b => b.code === c.code && b.validFrom === c.validFrom && b.model === '55')
+      await reportRuleImpact(conn, report, regularAcceptedCodes(input.it.classifications, input.date, noPresence))
+    }
     return report
   } catch (err) {
     await conn.rollback()
@@ -693,6 +720,30 @@ async function reportImpact(conn: Conn, report: ApplyReport, lost: LostCodes): P
         })
     } catch (err: any) {
       report.impactProblems.push(`${schema}: ${err?.code ?? err?.message ?? err}`)
+    }
+  }
+}
+
+/** IBS.E9.P4: regras de tributação VIVAS de cada cliente cujo cClassTrib o faturamento do regular recusaria no modelo 55 depois
+ *  da carga. Erro de leitura num schema vira problema listado — nunca derruba o ensaio. */
+async function reportRuleImpact(conn: Conn, report: ApplyReport, accepted: ReadonlySet<string>): Promise<void> {
+  const [inst] = await conn.query<any[]>(
+    `SELECT schema_name, active FROM ${C}.tb_institution WHERE deleted = 'N' ORDER BY schema_name`)
+  const codes = accepted.size ? [...accepted] : ['']
+  for (const { schema_name: schema, active } of inst) {
+    if (!SCHEMA_RE.test(String(schema))) { report.impactProblems.push(`${schema}: nome de schema fora do padrão — ignorado`); continue }
+    try {
+      const [rows] = await conn.query<any[]>(
+        `SELECT x.classification_code AS code, COUNT(*) AS n, GROUP_CONCAT(x.id ORDER BY x.id SEPARATOR ',') AS ids
+           FROM \`${schema}\`.tb_tax_rule_ibscbs x
+           JOIN \`${schema}\`.tb_tax_rule r ON r.id = x.id AND r.deleted = 'N'
+          WHERE x.deleted = 'N' AND x.classification_code NOT IN (?) GROUP BY x.classification_code`, [codes])
+      for (const r of rows) {
+        const ruleIds = String(r.ids ?? '').split(',').filter(Boolean).slice(0, IMPACT_IDS_MAX).map(Number)
+        report.ruleImpact.push({ schema, institutionActive: active === 'S', code: r.code, rules: Number(r.n), ruleIds })
+      }
+    } catch (err: any) {
+      report.impactProblems.push(`${schema} (regras): ${err?.code ?? err?.message ?? err}`)
     }
   }
 }

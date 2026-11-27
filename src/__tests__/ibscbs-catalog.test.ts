@@ -37,13 +37,16 @@ function makeXlsx(sheets: Record<string, Cell[][]>): Uint8Array {
 }
 
 const CLASS_HEADER = ['CST-IBS/CBS', 'Descrição CST-IBS/CBS', 'cClassTrib', 'Nome cClassTrib', 'Descrição cClassTrib',
-  'ind_gTribRegular', 'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe']
+  'ind_gTribRegular', 'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe', 'pRedIBS', 'pRedCBS']
 const CST_SHEET: Cell[][] = [['CST-IBS/CBS', 'Descrição CST-IBS/CBS', 'ind_gIBSCBS'], ['000', 'Tributação integral', 1], ['200', 'Alíquota reduzida', 1]]
 const D2026 = 46023 // 2026-01-01
 const D20261001 = 46296
 
+/** IBS.E9.P4: a linha de 12 células ganha `pRedIBS` e `pRedCBS` = 0 (as de 14 já trazem as suas). */
+const withReduction = (row: Cell[]): Cell[] => (row.length === 12 ? [...row, 0, 0] : row)
+
 function itXlsx(classRows: Cell[][]) {
-  return readXlsx(makeXlsx({ 'cClass 2026-09-01': [CLASS_HEADER, ...classRows], 'CST 2026-09-01': CST_SHEET }))
+  return readXlsx(makeXlsx({ 'cClass 2026-09-01': [CLASS_HEADER, ...classRows.map(withReduction)], 'CST 2026-09-01': CST_SHEET }))
 }
 
 describe('@shared/xlsx', () => {
@@ -334,5 +337,33 @@ describe('reconcileWithCalculator — atributos IT × Calculadora (D-IB28 a)', (
     expect(() => parseCalculatorPair({ validoParaSiglaDfeInformado: true, exigeGrupoTributacaoRegular: false }, '000001', D)).toThrow(/mudou de estrutura/)
     expect(() => parseCalculatorPair({ validoParaSiglaDfeInformado: true, exigeGrupoTributacaoRegular: false, exigeGrupoIbsCbs: 'true' }, '000001', D)).toThrow(/mudou de estrutura/)
     expect(() => parseCalculatorPair({ valido: true }, '000001', D)).toThrow(/mudou de estrutura/)
+  })
+})
+
+describe('parseItCatalog — redução de alíquota por classificação (IBS.E9.P4, RF-CLS-09)', () => {
+  const row = (ibs: Cell, cbs: Cell, code = '000001'): Cell[] =>
+    ['000', 'x', code, 'n', 'd', 0, D2026, null, D2026, 1, 0, 0, ibs, cbs]
+  const one = (ibs: Cell, cbs: Cell) => parseItCatalog(itXlsx([row(ibs, cbs)])).classifications[0]
+
+  it('lê pRedIBS e pRedCBS: 0, 40, 60, 100 e IBS diferente da CBS', () => {
+    const cat = parseItCatalog(itXlsx([row(0, 0, '000001'), row(40, 40, '000002'), row(60, 60, '000003'), row(100, 100, '000004'), row(60, 100, '000005')]))
+    expect(cat.classifications.map(c => [c.ibsReductionPct, c.cbsReductionPct])).toEqual([[0, 0], [40, 40], [60, 60], [100, 100], [60, 100]])
+  })
+
+  it('aceita texto com vírgula ou ponto e até 2 casas', () => {
+    expect(one('60,00', '33.33')).toMatchObject({ ibsReductionPct: 60, cbsReductionPct: 33.33 })
+  })
+
+  it('recusa 100,01, negativo, 3 casas, vazio e texto — nomeando a coluna e a linha', () => {
+    for (const bad of [100.01, -1, '12,345', null, 'abc', '1e2'] as Cell[]) {
+      expect(() => one(bad, 0)).toThrow(/cClassTrib linha 2 \(000001\): pRedIBS/)
+      expect(() => one(0, bad)).toThrow(/cClassTrib linha 2 \(000001\): pRedCBS/)
+    }
+  })
+
+  it('coluna pRedIBS ausente = estrutura oficial não reconhecida (erro alto)', () => {
+    const header = CLASS_HEADER.filter(h => h !== 'pRedIBS')
+    const sheets = readXlsx(makeXlsx({ 'cClass': [header], 'CST': CST_SHEET }))
+    expect(() => parseItCatalog(sheets)).toThrow(/estrutura oficial não reconhecida/)
   })
 })

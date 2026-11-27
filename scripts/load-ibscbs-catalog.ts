@@ -169,7 +169,7 @@ async function main() {
       it, itVersion: a['--it-version'] as string,
       placeIndicators: indop, indopVersion: a['--indop-version'] as string,
       nbs, nbsVersion: `Calculadora ${date}`,
-      unconfirmed: rec.unconfirmed, blocked: rec.blocked, models: ['SE'],
+      unconfirmed: rec.unconfirmed, blocked: rec.blocked, models: ['SE', '55'],   // IBS.E9.P4 (A-IB143h, D-IB136): o modelo 55 passa a ser carregado; o 65 é da onda do PDV
       apply: vai, allowShrink, reportImpact: true, date,
     })
     const cmd = `--vai --plano ${plan}${allowShrink ? ' --aceita-encolher' : ''}`

@@ -3,6 +3,7 @@ import logger from '@shared/logger/logger'
 import { HttpError, FieldError } from '@shared/errors/http-error'
 import { ErrorCodes } from '@shared/errors/error-codes'
 import { escapeLike } from '@shared/list'
+import { REGULAR_SUPPORTED_CSTS } from '@shared/ibscbs-catalog/regular'
 
 /**
  * Peça @shared/ibscbs-classification — RESOLUÇÃO da classificação IBS/CBS (fase IBS/CBS,
@@ -64,6 +65,9 @@ export interface ClassificationAt {
   superseded:              boolean
   /** D-IB113: o CST leva o grupo IBS/CBS (ind_gIBSCBS)? null = indicador desconhecido (CST gravado antes do script 73). */
   cstRequiresGroup:        boolean | null
+  /** IBS.E9.P4 (RF-CLS-09): redução de alíquota do código em milionésimos de fração (60% = 600000); null = desconhecida (carga anterior ao script 81). */
+  ibsReductionPpm:         number | null
+  cbsReductionPpm:         number | null
 }
 
 const dateStr = (v: any): string | null =>
@@ -72,7 +76,8 @@ const dateStr = (v: any): string | null =>
 const CLASSIFICATION_SELECT =
   `SELECT v.code, c.tb_tax_ibscbs_id AS cst, v.name, v.valid_from AS validFrom, v.valid_until AS validUntil,
           v.requires_regular_taxation AS requiresRegular, v.absent_since_version AS absentSince,
-          (a.code IS NOT NULL) AS applicable, t.requires_ibscbs_group AS requiresGroup
+          (a.code IS NOT NULL) AS applicable, t.requires_ibscbs_group AS requiresGroup,
+          CAST(v.ibs_reduction_rate AS CHAR) AS ibsReduction, CAST(v.cbs_reduction_rate AS CHAR) AS cbsReduction
      FROM setes_central.tb_tax_ibscbs_classification_validity v
      JOIN setes_central.tb_tax_ibscbs_classification c ON c.code = v.code AND c.deleted = 'N'
      JOIN setes_central.tb_tax_ibscbs t ON t.id = c.tb_tax_ibscbs_id
@@ -87,7 +92,17 @@ const toClassification = (r: any): ClassificationAt => ({
   superseded: r.absentSince != null,
   // D-IB113: só 'S'/'N' decidem; qualquer outra coisa (NULL — carga anterior ao script 73) é desconhecido → recusado
   cstRequiresGroup: r.requiresGroup === 'S' ? true : r.requiresGroup === 'N' ? false : null,
+  ibsReductionPpm: reductionPpmOf(r.ibsReduction), cbsReductionPpm: reductionPpmOf(r.cbsReduction),
 })
+
+/** Percentual do banco (texto de até 4 casas, 'CAST … AS CHAR') → milionésimos; ausente ou fora de 0 a 100 = null (desconhecida). */
+export function reductionPpmOf(text: unknown): number | null {
+  if (text == null) return null
+  const m = /^(\d{1,3})(?:\.(\d{1,4}))?$/.exec(String(text))
+  if (!m) return null
+  const ppm = Number(m[1]) * 10000 + Number((m[2] ?? '').padEnd(4, '0'))
+  return ppm <= 1000000 ? ppm : null
+}
 
 /**
  * DATA DO FATO: linha vigente do cClassTrib na data + presença para o modelo. null = inexistente/fora de vigência.
@@ -127,6 +142,29 @@ export function verdictOf(c: ClassificationAt | null): ClassificationVerdict {
   if (c.requiresRegularTaxation) return { accepted: false, reason: 'requires-regular', line: c }
   // D-IB113: por ÚLTIMO — todo veredito anterior fica idêntico; só o que era aceito pode virar recusa por este motivo
   if (c.cstRequiresGroup !== true) return { accepted: false, reason: 'cst-without-group', line: c }
+  return { accepted: true, reason: null, line: c }
+}
+
+/**
+ * IBS.E9.P4 (D-IB143 a D-IB145, A-IB143e/j): por que o faturamento do REGIME REGULAR (CRT 3) não aceita a classificação NA NF-e
+ * (modelo 55): sem linha vigente · sem presença no modelo 55 (`indNFe`, rej. 1025) · CST que o motor não cobre (só 000 e 200) ·
+ * exige o grupo de tributação regular (`gTribRegular`) · redução ainda desconhecida (carga anterior ao script 81 — falha fechada).
+ * Só vale para o CRT 3: a conferência de existência e vigência (P3) segue valendo para todo CRT.
+ */
+export type RegularRefusal = 'no-line' | 'not-allowed-in-nfe' | 'cst-unsupported' | 'requires-regular' | 'reduction-unknown'
+
+export interface RegularVerdict {
+  accepted: boolean
+  reason:   RegularRefusal | null
+  line:     ClassificationAt | null
+}
+
+export function regularVerdictOf(c: ClassificationAt | null): RegularVerdict {
+  if (!c) return { accepted: false, reason: 'no-line', line: null }
+  if (!c.applicable) return { accepted: false, reason: 'not-allowed-in-nfe', line: c }
+  if (!REGULAR_SUPPORTED_CSTS.includes(c.cst)) return { accepted: false, reason: 'cst-unsupported', line: c }
+  if (c.requiresRegularTaxation) return { accepted: false, reason: 'requires-regular', line: c }
+  if (c.ibsReductionPpm === null || c.cbsReductionPpm === null) return { accepted: false, reason: 'reduction-unknown', line: c }
   return { accepted: true, reason: null, line: c }
 }
 
@@ -326,6 +364,17 @@ export async function assertIbscbsCatalogSchema(
     'Catálogo IBS/CBS sem a coluna absent_since_version — aplique o script sql/63_ibscbs_validity_absent_since.sql em setes_central ANTES do setes-api (D-IB36)')
   await column(`SELECT requires_ibscbs_group FROM ${central}.tb_tax_ibscbs LIMIT 0`,
     'Catálogo IBS/CBS sem a coluna requires_ibscbs_group — aplique o script sql/73_ibscbs_cst_requires_group.sql em setes_central ANTES do setes-api (D-IB113)')
+  // IBS.E9.P4 (script 81): a redução do cClassTrib e a tabela de alíquotas do regime regular — o SELECT da linha vigente lê as colunas
+  await column(`SELECT ibs_reduction_rate, cbs_reduction_rate FROM ${central}.tb_tax_ibscbs_classification_validity LIMIT 0`,
+    'Catálogo IBS/CBS sem as colunas de redução (ibs_reduction_rate, cbs_reduction_rate) — aplique o script sql/81_ibscbs_reduction_and_rate_ddl.sql em setes_central ANTES do setes-api (IBS.E9.P4)')
+  try {
+    await db.query(`SELECT tax, valid_from, valid_until, rate FROM ${central}.tb_tax_ibscbs_rate LIMIT 0`)
+  } catch (err: any) {
+    if (err?.errno === 1146 || err?.errno === 1054 || err?.code === 'ER_NO_SUCH_TABLE' || err?.code === 'ER_BAD_FIELD_ERROR') {
+      throw new Error('Catálogo IBS/CBS sem a tabela de alíquotas tb_tax_ibscbs_rate — aplique o script sql/81_ibscbs_reduction_and_rate_ddl.sql em setes_central ANTES do setes-api (IBS.E9.P4)')
+    }
+    throw err
+  }
   await assertCstGroupCheckRefuses(db, central)
   // D-IB120: por CST de indicador desconhecido, se ainda há cClassTrib com linha viva (não superada) — o que a carga alcança
   const [rows] = await db.query(

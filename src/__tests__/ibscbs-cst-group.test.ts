@@ -18,9 +18,9 @@ describe('D-IB113 — leitura do ind_gIBSCBS na aba CST do IT (o que valida é o
     name: 'cClass 2026-09-01',
     rows: [
       ['CST-IBS/CBS', 'Descrição CST-IBS/CBS', 'cClassTrib', 'Nome cClassTrib', 'Descrição cClassTrib', 'ind_gTribRegular',
-        'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe'],
-      ['000', 'x', '000001', 'n', 'd', 0, '2026-01-01', null, '2026-01-01', 1, 1, 1],
-      ['410', 'x', '410014', 'n', 'd', 0, '2026-01-01', null, '2026-01-01', 1, 1, 1],
+        'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe', 'pRedIBS', 'pRedCBS'],
+      ['000', 'x', '000001', 'n', 'd', 0, '2026-01-01', null, '2026-01-01', 1, 1, 1, 0, 0],
+      ['410', 'x', '410014', 'n', 'd', 0, '2026-01-01', null, '2026-01-01', 1, 1, 1, 0, 0],
     ],
   }
   const cstSheet = (rows: unknown[][]) => ({
@@ -53,9 +53,9 @@ describe('D-IB113 — conferência IT × Calculadora do grupo (exigeGrupoIbsCbs 
     csts: [{ id: '000', description: 't', requiresGroup: true }, { id: '410', description: 'i', requiresGroup: group410 }],
     classifications: [
       { code: '000001', cst: '000', name: 'n', description: 'd', validFrom: '2026-01-01', validUntil: null,
-        requiresRegularTaxation: false, updatedAt: '2026-01-01', models: ['SE'] },
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['SE'] },
       { code: '410014', cst: '410', name: 'n', description: 'd', validFrom: '2026-01-01', validUntil: null,
-        requiresRegularTaxation: false, updatedAt: '2026-01-01', models: ['SE'] },
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['SE'] },
     ],
   })
   const entries = new Map([[D, [{ code: '000001', nfse: true }, { code: '410014', nfse: true }]]])
@@ -79,7 +79,7 @@ describe('D-IB113 — conferência IT × Calculadora do grupo (exigeGrupoIbsCbs 
 
 const line = (over: Partial<ClassificationAt> = {}): ClassificationAt => ({
   code: '000001', cst: '000', name: 'n', validFrom: '2026-01-01', validUntil: null,
-  requiresRegularTaxation: false, applicable: true, superseded: false, cstRequiresGroup: true, ...over,
+  requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0, applicable: true, superseded: false, cstRequiresGroup: true, ...over,
 })
 
 describe('D-IB113 — o VEREDITO (um só, com motivo — D-IB47)', () => {
@@ -92,7 +92,7 @@ describe('D-IB113 — o VEREDITO (um só, com motivo — D-IB47)', () => {
   it('o motivo novo vem por ÚLTIMO: todo veredito anterior fica idêntico', () => {
     expect(verdictOf(null).reason).toBe('no-line')
     expect(verdictOf(line({ applicable: false, cstRequiresGroup: false })).reason).toBe('not-applicable')
-    expect(verdictOf(line({ requiresRegularTaxation: true, cstRequiresGroup: false })).reason).toBe('requires-regular')
+    expect(verdictOf(line({ requiresRegularTaxation: true, ibsReductionPpm: 0, cbsReductionPpm: 0, cstRequiresGroup: false })).reason).toBe('requires-regular')
   })
 
   it('a frase do motivo — a MESMA no cadastro e no faturamento; o desconhecido diz o que fazer', () => {

@@ -2,7 +2,7 @@
 // IB-1 da fase IBS/CBS — gravação do catálogo (applyCatalog) e datas da fonte. Gate socrático
 // da IB-1: desativação, revive e ensaio só tinham sido provados AO VIVO; a NBS extinta nunca
 // saía; a linha de vigência não confirmada era filtrada pelo CÓDIGO inteiro.
-import { aheadHorizon, applyCatalog, isCalendarDate, ItCatalog, shrinkLine } from '@shared/ibscbs-catalog'
+import { aheadHorizon, applyCatalog, isCalendarDate, ItCatalog, regularAcceptedCodes, shrinkLine } from '@shared/ibscbs-catalog'
 
 type Row = Record<string, any>
 
@@ -59,9 +59,9 @@ const catalog = (): ItCatalog => ({
   csts: [{ id: '000', description: 'Tributação integral', requiresGroup: true }],
   classifications: [
     { code: '000001', cst: '000', name: 'n1', description: 'd1', validFrom: '2026-01-01', validUntil: null,
-      requiresRegularTaxation: false, updatedAt: '2026-01-01', models: ['SE', '55'] },
+      requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['SE', '55'] },
     { code: '000006', cst: '000', name: 'n6', description: 'd6', validFrom: '2026-01-01', validUntil: null,
-      requiresRegularTaxation: false, updatedAt: '2026-01-01', models: ['SE'] },
+      requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['SE'] },
   ],
 })
 
@@ -353,7 +353,7 @@ describe('applyCatalog — fato "ausente da fonte" na história (D-IB36)', () =>
       const it = catalog()
       it.classifications.push(...extras.slice(dropped).map(code => ({
         code, cst: '000', name: 'x', description: 'x', validFrom: '2026-01-01', validUntil: null,
-        requiresRegularTaxation: false, updatedAt: '2026-01-01', models: [] as any[] })))
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: [] as any[] })))
       return { conn: fakeConn(t), it }
     }
     const ok = build(18)
@@ -490,7 +490,7 @@ describe('applyCatalog — D-IB44 vigência encerrada antes da data da carga', (
       // 9 primeiros somem da fonte (marcados); os 'ended' seguintes vêm com dFimVig antes da data
       it.classifications.push(...extras.slice(9).map((code, i) => ({
         code, cst: '000', name: 'x', description: 'x', validFrom: '2026-01-01', validUntil: i < ended ? '2026-10-09' : null,
-        requiresRegularTaxation: false, updatedAt: '2026-01-01', models: [] as any[] })))
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: [] as any[] })))
       return { c: fakeConn(t), it }
     }
     const ok = build(9)
@@ -624,7 +624,7 @@ describe('applyCatalog — Rodada 7 (D-IB45…D-IB47)', () => {
     const t: Record<string, Row[] | ((sql: string, params: unknown[]) => Row[])> = { ...baseTables() }
     const it = catalog()
     it.classifications.push({ code: '000001', cst: '000', name: 'nova', description: 'd', validFrom: '2026-10-05', validUntil: null,
-      requiresRegularTaxation: false, updatedAt: '2026-10-05', models: ['SE'] })
+      requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-10-05', models: ['SE'] })
     t.__pieceBefore = bothAccepted()
     t.__piece = pieceOf([{ code: '000001', validFrom: '2026-01-01' }, { code: '000001', validFrom: '2026-10-05', applicable: 0 },
       { code: '000006', validFrom: '2026-01-01' }])
@@ -642,7 +642,7 @@ describe('applyCatalog — Rodada 7 (D-IB45…D-IB47)', () => {
     const withLine = (): ItCatalog => {
       const it = catalog()
       it.classifications.push({ code: '000001', cst: '000', name: 'n1', description: 'd1', validFrom: '2026-09-01', validUntil: null,
-        requiresRegularTaxation: false, updatedAt: '2026-01-01', models: ['55'] })   // sem presença na NFS-e
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['55'] })   // sem presença na NFS-e
       return it
     }
     for (const extra of [
@@ -922,7 +922,7 @@ describe('applyCatalog — Rodada 7 (D-IB45…D-IB47)', () => {
       t['setes_a.tb_service_ibscbs'] = client({ '000001': '67' })
       const it = catalog()
       it.classifications.push({ code: '000001', cst: '000', name: 'suc', description: 'd', validFrom: '2027-01-05', validUntil: null,
-        requiresRegularTaxation: false, updatedAt: '2026-10-01', models: ['SE'], ...successor })
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-10-01', models: ['SE'], ...successor })
       const r = await applyCatalog(fakeConn(t).conn, { ...base, it, unconfirmed: [{ code: '000001', validFrom: '2027-01-05' }], date: '2026-10-10' })
       return r.impactAhead.map(x => [x.lossDate, x.pendingReturnFrom])
     }
@@ -941,7 +941,7 @@ describe('applyCatalog — Rodada 7 (D-IB45…D-IB47)', () => {
       t['setes_a.tb_service_ibscbs'] = client({ '000001': '67' })
       const it = catalog()
       it.classifications.push({ code: '000001', cst: '000', name: 'suc', description: 'd', validFrom: pendingFrom, validUntil: null,
-        requiresRegularTaxation: false, updatedAt: '2026-10-01', models: ['SE'] }, ...extra)
+        requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-10-01', models: ['SE'] }, ...extra)
       const r = await applyCatalog(fakeConn(t).conn, { ...base, it, unconfirmed: [{ code: '000001', validFrom: pendingFrom }], date: '2026-10-10' })
       return r.impactAhead.map(x => [x.lossDate, x.reason, x.acceptedAgainFrom, x.pendingReturnFrom])
     }
@@ -987,7 +987,7 @@ describe('applyCatalog — Rodada 7 (D-IB45…D-IB47)', () => {
     t['setes_a.tb_service_ibscbs'] = client({ '000001': '67' })
     const it = catalog()
     it.classifications.push({ code: '000001', cst: '000', name: 'suc', description: 'd', validFrom: '2027-01-05', validUntil: null,
-      requiresRegularTaxation: false, updatedAt: '2026-10-01', models: ['SE'] })
+      requiresRegularTaxation: false, ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-10-01', models: ['SE'] })
     const r = await applyCatalog(fakeConn(t).conn, { ...base, it, blocked: [{ code: '000001', validFrom: '2027-01-05', model: 'SE' }], date: '2026-10-10' })
     expect(r.impactAhead.map(x => [x.lossDate, 'pendingReturnFrom' in x])).toEqual([['2027-01-01', false]])
   })
@@ -1100,5 +1100,131 @@ describe('applyCatalog — A-IB120 (linha de base do impacto com o indicador da 
     expect(r.cstGroupOff).toEqual([])
     expect(r.impact).toEqual([{ schema: 'setes_a', institutionActive: true, kind: 'cClassTrib', code: '000006', services: 1, serviceIds: [60],
       registrationStillAccepts: false, reason: 'not-applicable' }])
+  })
+})
+
+
+// IBS.E9.P4 (RF-CLS-09, A-IB143h, achado do P3): a redução vai para a história, o modelo 55 é carregado e o ensaio mede as regras de tributação.
+describe('applyCatalog — redução, modelo 55 e impacto nas regras de tributação (IBS.E9.P4)', () => {
+  const withReduction = (): ItCatalog => {
+    const c = catalog()
+    c.classifications[0] = { ...c.classifications[0], ibsReductionPct: 60, cbsReductionPct: 100 }
+    return c
+  }
+
+  it('a linha nova grava a redução do IBS e da CBS (INSERT) e a lida do banco como NULL é regravada (UPDATE)', async () => {
+    const t = baseTables()
+    t.tb_tax_ibscbs_classification_validity = []
+    const novo = fakeConn(t)
+    const r = await applyCatalog(novo.conn, { it: withReduction(), itVersion: 'IT t', models: ['SE'], apply: true, unconfirmed: [] })
+    expect(r.validity.inserted).toBe(2)
+    const ins = novo.writes.find(w => /INSERT INTO setes_central\.tb_tax_ibscbs_classification_validity/.test(w.sql) && w.params[0] === '000001')!
+    expect(ins.sql).toContain('ibs_reduction_rate, cbs_reduction_rate')
+    expect(ins.params).toEqual(['000001', '2026-01-01', null, 'n1', 'd1', 'N', 'IT t', '2026-01-01', 60, 100])
+
+    // carga anterior ao script 81: a coluna é NULL → vira UPDATE com a redução
+    const antigo = fakeConn(baseTables())
+    const r2 = await applyCatalog(antigo.conn, { it: withReduction(), itVersion: 'IT t', models: ['SE'], apply: true, unconfirmed: [] })
+    expect(r2.validity.updated).toBe(2)
+    const upd = antigo.writes.find(w => /UPDATE setes_central\.tb_tax_ibscbs_classification_validity/.test(w.sql) && w.params.includes('000001'))!
+    expect(upd.sql).toContain('ibs_reduction_rate = ?, cbs_reduction_rate = ?')
+    expect(upd.params.slice(6, 8)).toEqual([60, 100])
+  })
+
+  it('redução igual à gravada (texto do banco, dateStrings) não regrava a linha', async () => {
+    const t = baseTables()
+    for (const r of t.tb_tax_ibscbs_classification_validity as Row[]) { r.ibs_reduction_rate = '60.0000'; r.cbs_reduction_rate = '100.0000' }
+    const c = catalog()
+    c.classifications = c.classifications.map(x => ({ ...x, ibsReductionPct: 60, cbsReductionPct: 100 }))
+    const { conn } = fakeConn(t)
+    const r = await applyCatalog(conn, { it: c, itVersion: 'IT t', models: ['SE'], apply: false, unconfirmed: [] })
+    expect(r.validity).toMatchObject({ unchanged: 2, updated: 0, inserted: 0 })
+  })
+
+  it("models ['SE','55'] grava a presença do 55 da linha confirmada e NÃO a da linha não confirmada", async () => {
+    const naoConfirmada = fakeConn(baseTables())
+    await applyCatalog(naoConfirmada.conn, {
+      it: catalog(), itVersion: 'IT t', models: ['SE', '55'], apply: true, allowShrink: true,
+      unconfirmed: [{ code: '000001', validFrom: '2026-01-01' }],
+    })
+    const inserts = naoConfirmada.writes.filter(w => /INSERT INTO setes_central\.`tb_tax_ibscbs_classification_applicability`/.test(w.sql))
+    expect(inserts.some(w => w.params[0] === '000001')).toBe(false)
+
+    const confirmada = fakeConn(baseTables())
+    await applyCatalog(confirmada.conn, { it: catalog(), itVersion: 'IT t', models: ['SE', '55'], apply: true, unconfirmed: [] })
+    const ins = confirmada.writes.filter(w => /INSERT INTO setes_central\.`tb_tax_ibscbs_classification_applicability`/.test(w.sql)).map(w => w.params)
+    expect(ins).toContainEqual(['000001', '2026-01-01', '55'])
+    expect(ins).toContainEqual(['000006', '2026-01-01', 'SE'])
+    expect(ins.some(p => p[2] === '65')).toBe(false)
+  })
+
+  it('o ENSAIO com o modelo 55 conta as regras de tributação cujo código o regular recusaria; o ato não lê os clientes', async () => {
+    const t: Record<string, Row[] | ((sql: string, params: unknown[]) => Row[])> = { ...baseTables() }
+    t.tb_institution = [{ schema_name: 'setes_a', active: 'S' }, { schema_name: 'setes_b', active: 'N' }]
+    let params: unknown[] = []
+    t['setes_a.tb_tax_rule_ibscbs'] = (_sql, p) => { params = p; return [{ code: '000006', n: 2, ids: '4,5' }] }
+    t['setes_b.tb_tax_rule_ibscbs'] = () => { throw Object.assign(new Error('denied'), { code: 'ER_TABLEACCESS_DENIED_ERROR' }) }
+    const { conn } = fakeConn(t)
+    const r = await applyCatalog(conn, {
+      it: catalog(), itVersion: 'IT t', models: ['SE', '55'], apply: false, reportImpact: true, allowShrink: true, date: '2026-10-10',
+      unconfirmed: [],
+    })
+    // aceitos no regular no 55: só o 000001 (000006 não tem presença no 55)
+    expect(params).toEqual([['000001']])
+    expect(r.ruleImpact).toEqual([{ schema: 'setes_a', institutionActive: true, code: '000006', rules: 2, ruleIds: [4, 5] }])
+    expect(r.impactProblems).toEqual(expect.arrayContaining([expect.stringMatching(/^setes_b \(regras\): ER_TABLEACCESS_DENIED_ERROR/)]))
+
+    const ato = { ...t, tb_institution: () => { throw new Error('o ato não deveria listar clientes') } } as typeof t
+    const r2 = await applyCatalog(fakeConn(ato).conn, {
+      it: catalog(), itVersion: 'IT t', models: ['SE', '55'], apply: true, reportImpact: true, allowShrink: true, date: '2026-10-10', unconfirmed: [],
+    })
+    expect(r2.ruleImpact).toEqual([])
+  })
+
+  it('sem o 55 em models o relatório não mede as regras', async () => {
+    const t: Record<string, Row[] | ((sql: string, params: unknown[]) => Row[])> = { ...baseTables() }
+    t.tb_institution = [{ schema_name: 'setes_a', active: 'S' }]
+    const { conn } = fakeConn(t)
+    const r = await applyCatalog(conn, {
+      it: catalog(), itVersion: 'IT t', models: ['SE'], apply: false, reportImpact: true, allowShrink: true, date: '2026-10-10', unconfirmed: [],
+    })
+    expect(r.ruleImpact).toEqual([])
+  })
+})
+
+describe('regularAcceptedCodes — o que o regular aceitaria no 55, pela fonte (IBS.E9.P4)', () => {
+  const rec = (over: Partial<ItCatalog['classifications'][number]>): ItCatalog['classifications'][number] => ({
+    code: '000001', cst: '000', name: 'n', description: 'd', validFrom: '2026-01-01', validUntil: null, requiresRegularTaxation: false,
+    ibsReductionPct: 0, cbsReductionPct: 0, updatedAt: '2026-01-01', models: ['SE', '55'], ...over,
+  })
+
+  it('só CST 000 e 200 sem gTribRegular, com presença no 55 e vigentes na data (a linha mais nova)', () => {
+    const accepted = regularAcceptedCodes([
+      rec({ code: '000001' }),
+      rec({ code: '200001', cst: '200' }),
+      rec({ code: '200002', cst: '200', requiresRegularTaxation: true }),
+      rec({ code: '410001', cst: '410' }),
+      rec({ code: '000002', models: ['SE'] }),
+      rec({ code: '000003', validFrom: '2027-01-01' }),
+      rec({ code: '000004', validUntil: '2026-06-30' }),
+      rec({ code: '000005', validFrom: '2026-01-01' }),
+      rec({ code: '000005', validFrom: '2026-09-01', models: ['SE'] }),   // a mais nova não tem o 55: o código não é aceito
+    ], '2026-10-10')
+    expect([...accepted].sort()).toEqual(['000001', '200001'])
+    // paridade com a gravação da presença: linha não confirmada ou bloqueada no 55 não ganha o modelo 55
+    const lacks = (c: { code: string }) => c.code === '200001'
+    expect([...regularAcceptedCodes([rec({ code: '000001' }), rec({ code: '200001', cst: '200' })], '2026-10-10', lacks)]).toEqual(['000001'])
+  })
+
+  it('o ensaio do relatório usa a mesma paridade: código não confirmado ou bloqueado no 55 aparece no impacto das regras', async () => {
+    const t: Record<string, Row[] | ((sql: string, params: unknown[]) => Row[])> = { ...baseTables() }
+    t.tb_institution = [{ schema_name: 'setes_a', active: 'S' }]
+    let params: unknown[] = []
+    t['setes_a.tb_tax_rule_ibscbs'] = (_sql, p) => { params = p; return [] }
+    await applyCatalog(fakeConn(t).conn, {
+      it: catalog(), itVersion: 'IT t', models: ['SE', '55'], apply: false, reportImpact: true, allowShrink: true, date: '2026-10-10',
+      unconfirmed: [{ code: '000001', validFrom: '2026-01-01' }],
+    })
+    expect(params).toEqual([['']])   // nenhum código aceito: o 000001 estava não confirmado
   })
 })

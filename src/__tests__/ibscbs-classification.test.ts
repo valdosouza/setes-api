@@ -6,6 +6,7 @@ import {
   pickForRegistration, classificationAcceptedToday, classificationAcceptance, assertIbscbsCatalogSchema,
   nbsAcceptedSql, nbsExists,
   verdictOf, classificationVerdictsAt, classificationRegistrationVerdicts, classificationAcceptedAt,
+  regularVerdictOf, reductionPpmOf, ClassificationAt,
 } from '@shared/ibscbs-classification'
 
 /**
@@ -218,7 +219,7 @@ describe('@shared/ibscbs-classification — janela do cadastro (D-IB29)', () => 
 
   it('pickForRegistration: vigente com presença → futura com presença → vigente sem presença; nada na janela = null', () => {
     const r = (validFrom: string, applicable: boolean, validUntil: string | null = null) =>
-      ({ code: 'x', cst: '000', name: validFrom, validFrom, validUntil, requiresRegularTaxation: false, applicable, superseded: false, cstRequiresGroup: true })
+      ({ code: 'x', cst: '000', name: validFrom, validFrom, validUntil, requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0, applicable, superseded: false, cstRequiresGroup: true })
     expect(pickForRegistration([r('2026-01-01', true), r('2026-06-01', true)], '2026-10-10')?.validFrom).toBe('2026-06-01')
     expect(pickForRegistration([r('2026-01-01', false), r('2026-12-01', true)], '2026-10-10')?.validFrom).toBe('2026-12-01')
     expect(pickForRegistration([r('2026-01-01', false)], '2026-10-10')?.applicable).toBe(false)
@@ -252,7 +253,7 @@ describe('@shared/ibscbs-classification — linha superada (D-IB36)', () => {
 
   it('pickForRegistration nunca escolhe a superada, nem como último recurso', () => {
     const r = (validFrom: string, superseded: boolean) =>
-      ({ code: 'x', cst: '000', name: validFrom, validFrom, validUntil: null, requiresRegularTaxation: false, applicable: true, superseded, cstRequiresGroup: true })
+      ({ code: 'x', cst: '000', name: validFrom, validFrom, validUntil: null, requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0, applicable: true, superseded, cstRequiresGroup: true })
     expect(pickForRegistration([r('2026-01-01', false), r('2026-09-01', true)], '2026-10-10')?.validFrom).toBe('2026-01-01')
     expect(pickForRegistration([r('2026-09-01', true)], '2026-10-10')).toBeNull()
   })
@@ -323,6 +324,12 @@ describe('@shared/ibscbs-classification — correções do gate da Rodada 4', ()
       .rejects.toThrow(/sql\/63_ibscbs_validity_absent_since\.sql/)
     await expect(assertIbscbsCatalogSchema(bootDb({ column: unknownColumn('requires_ibscbs_group') })))
       .rejects.toThrow(/sql\/73_ibscbs_cst_requires_group\.sql.*D-IB113/)
+    // IBS.E9.P4: sem as colunas de redução ou sem a tabela de alíquotas (script 81) a API não sobe e diz qual script aplicar
+    await expect(assertIbscbsCatalogSchema(bootDb({ column: unknownColumn('ibs_reduction_rate') })))
+      .rejects.toThrow(/sql\/81_ibscbs_reduction_and_rate_ddl\.sql.*IBS\.E9\.P4/)
+    await expect(assertIbscbsCatalogSchema(bootDb({ column: (sql: string) => {
+      if (sql.includes('tb_tax_ibscbs_rate')) throw Object.assign(new Error('no table'), { errno: 1146 })
+    } }))).rejects.toThrow(/tabela de alíquotas tb_tax_ibscbs_rate.*sql\/81/)
     const denied = bootDb({ column: () => { throw Object.assign(new Error('denied'), { errno: 1142 }) } })
     await expect(assertIbscbsCatalogSchema(denied)).rejects.toMatchObject({ errno: 1142 })
   })
@@ -393,7 +400,7 @@ describe('@shared/ibscbs-classification — regra única da NBS aceita (D-IB40)'
 // Gate socrático do delta R7: "aceito" é UM veredito com motivo (R7-S3) e tem porta em LOTE (R7-S5)
 describe('@shared/ibscbs-classification — veredito e lotes (D-IB47)', () => {
   const line = (over: Record<string, unknown> = {}) => ({ code: '000001', cst: '000', name: 'n', validFrom: '2026-01-01', validUntil: null,
-    requiresRegularTaxation: false, applicable: true, superseded: false, cstRequiresGroup: true, ...over }) as any
+    requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0, applicable: true, superseded: false, cstRequiresGroup: true, ...over }) as any
   it('verdictOf: sem linha · sem presença · exige tributação regular · aceito', () => {
     expect(verdictOf(null)).toMatchObject({ accepted: false, reason: 'no-line' })
     expect(verdictOf(line({ applicable: false }))).toMatchObject({ accepted: false, reason: 'not-applicable' })
@@ -446,7 +453,7 @@ describe('@shared/ibscbs-classification — veredito e lotes (D-IB47)', () => {
 // D-IB57 (Rodada 10): o cadastro prefere a linha ACEITA (presença e sem tributação regular) antes da só aplicável
 describe('pickForRegistration — D-IB57 a linha aceita antes da só aplicável', () => {
   const l = (over: Record<string, unknown>) => ({ code: '000001', cst: '000', name: 'n', validFrom: '2026-01-01', validUntil: null,
-    requiresRegularTaxation: false, applicable: true, superseded: false, cstRequiresGroup: true, ...over }) as any
+    requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0, applicable: true, superseded: false, cstRequiresGroup: true, ...over }) as any
   it('vigente que exige tributação regular × futura aceita na janela → a futura (o cadastro aceita)', () => {
     const picked = pickForRegistration([l({ requiresRegularTaxation: true }), l({ validFrom: '2026-12-01' })], '2026-10-10')
     expect(picked?.validFrom).toBe('2026-12-01')
@@ -540,7 +547,7 @@ describe('D-IB59 — lista × salvar sob filtro e LIMIT; cadastro = data do fato
 
   it('propriedade: depois da obrigação (janela vazia) o cadastro escolhe a MESMA linha que a data do fato (a vigente mais nova)', () => {
     const l = (from: string, until: string | null, over: Record<string, unknown> = {}) => ({ code: '000001', cst: '000', name: from,
-      validFrom: from, validUntil: until, requiresRegularTaxation: false, applicable: true, superseded: false, cstRequiresGroup: true, ...over }) as any
+      validFrom: from, validUntil: until, requiresRegularTaxation: false, ibsReductionPpm: 0, cbsReductionPpm: 0, applicable: true, superseded: false, cstRequiresGroup: true, ...over }) as any
     const shapes = [{}, { applicable: false }, { requiresRegularTaxation: true }]
     for (const a of shapes) for (const b of shapes) for (const c of shapes) {
       const rows = [l('2026-01-01', null, a), l('2026-06-01', '2027-03-31', b), l('2027-02-01', null, c)]
@@ -590,3 +597,45 @@ describe('D-IB61 — limite conhecido: linha antiga que volta a valer na janela'
   })
 })
 
+
+// IBS.E9.P4 (D-IB143 a D-IB145, A-IB143e): o veredito do faturamento do REGIME REGULAR no modelo 55 e a leitura da redução do catálogo.
+describe('@shared/ibscbs-classification — regime regular no modelo 55 (IBS.E9.P4)', () => {
+  const line = (over: Partial<ClassificationAt> = {}): ClassificationAt => ({
+    code: '000001', cst: '000', name: 'n', validFrom: '2026-01-01', validUntil: null, requiresRegularTaxation: false,
+    ibsReductionPpm: 0, cbsReductionPpm: 0, applicable: true, superseded: false, cstRequiresGroup: true, ...over,
+  })
+
+  it('aceita CST 000 e CST 200 sem gTribRegular, com a redução conhecida', () => {
+    expect(regularVerdictOf(line())).toMatchObject({ accepted: true, reason: null })
+    expect(regularVerdictOf(line({ cst: '200', ibsReductionPpm: 600000, cbsReductionPpm: 1000000 }))).toMatchObject({ accepted: true })
+  })
+
+  it('recusa por motivo: sem linha, fora da NF-e, CST que o motor não cobre, gTribRegular, redução desconhecida', () => {
+    expect(regularVerdictOf(null).reason).toBe('no-line')
+    expect(regularVerdictOf(line({ applicable: false })).reason).toBe('not-allowed-in-nfe')
+    for (const cst of ['410', '510', '515', '550', '620', '830', '800', '810', '811']) {
+      expect(regularVerdictOf(line({ cst })).reason).toBe('cst-unsupported')
+    }
+    expect(regularVerdictOf(line({ cst: '200', requiresRegularTaxation: true })).reason).toBe('requires-regular')
+    expect(regularVerdictOf(line({ ibsReductionPpm: null })).reason).toBe('reduction-unknown')
+    expect(regularVerdictOf(line({ cbsReductionPpm: null })).reason).toBe('reduction-unknown')
+  })
+
+  it('reductionPpmOf: texto do banco → milionésimos; ausente ou fora de 0 a 100 = desconhecida', () => {
+    expect(reductionPpmOf('60.0000')).toBe(600000)
+    expect(reductionPpmOf('33.3300')).toBe(333300)
+    expect(reductionPpmOf('0.0000')).toBe(0)
+    expect(reductionPpmOf('100.0000')).toBe(1000000)
+    expect(reductionPpmOf(null)).toBeNull()
+    expect(reductionPpmOf(undefined)).toBeNull()
+    expect(reductionPpmOf('100.0001')).toBeNull()
+    expect(reductionPpmOf('abc')).toBeNull()
+  })
+
+  it('o SELECT da linha vigente lê a redução como texto (decimalNumbers do pool não perde casa)', async () => {
+    let seen = ''
+    await findClassificationAt({ query: async (sql: string) => { seen = sql; return [[]] } } as any, '000001', '55', '2026-11-10')
+    expect(seen).toContain('CAST(v.ibs_reduction_rate AS CHAR)')
+    expect(seen).toContain('CAST(v.cbs_reduction_rate AS CHAR)')
+  })
+})

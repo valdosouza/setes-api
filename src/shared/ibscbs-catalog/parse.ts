@@ -36,6 +36,9 @@ export interface ClassificationRecord {
   validFrom:               string        // AAAA-MM-DD
   validUntil:              string | null
   requiresRegularTaxation: boolean
+  /** IBS.E9.P4 (RF-CLS-09): `pRedIBS` e `pRedCBS` da IT, percentual de 0 a 100 com até 2 casas — redução de alíquota do código. */
+  ibsReductionPct:         number
+  cbsReductionPct:         number
   updatedAt:               string        // DataAtualização
   /** Modelos de documento do NOSSO domínio em que a classificação é aceita. */
   models:                  Array<'SE' | '55' | '65'>
@@ -103,6 +106,15 @@ function dateOf(v: CellValue): string | null {
   return out && isCalendarDate(out) ? out : 'INVALID'
 }
 
+/** IBS.E9.P4: percentual da IT ('60', 60, '60,00', '0'): 0 a 100, até 2 casas; vazio NÃO é 0 (o que valida é o que grava). null = inválido. */
+export function percentOf(v: CellValue): number | null {
+  if (v == null || typeof v === 'boolean') return null
+  const text = (typeof v === 'number' ? String(v) : str(v)).replace(',', '.')
+  if (!/^\d{1,3}(\.\d{1,2})?$/.test(text)) return null
+  const n = Number(text)
+  return n >= 0 && n <= 100 ? n : null
+}
+
 function flag01(v: CellValue): 0 | 1 | null {
   const s = str(v)
   if (s === '0') return 0
@@ -111,7 +123,7 @@ function flag01(v: CellValue): 0 | 1 | null {
 }
 
 const IT_CLASS_COLS = ['CST-IBS/CBS', 'cClassTrib', 'Nome cClassTrib', 'Descrição cClassTrib', 'ind_gTribRegular',
-  'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe'] as const
+  'dIniVig', 'dFimVig', 'DataAtualização', 'indNFe', 'indNFCe', 'indNFSe', 'pRedIBS', 'pRedCBS'] as const
 const IT_CST_COLS = ['CST-IBS/CBS', 'Descrição CST-IBS/CBS', 'ind_gIBSCBS'] as const
 
 /** Tabela oficial do cClassTrib (IT 2025.002) → CSTs + classificações validadas. */
@@ -154,6 +166,8 @@ export function parseItCatalog(sheets: XlsxSheet[]): ItCatalog {
     const validFrom = dateOf(row[c('dIniVig')])
     const validUntil = dateOf(row[c('dFimVig')])
     const updatedAt = dateOf(row[c('DataAtualização')])
+    const ibsRed = percentOf(row[c('pRedIBS')])
+    const cbsRed = percentOf(row[c('pRedCBS')])
     const inds = { SE: flag01(row[c('indNFSe')]), '55': flag01(row[c('indNFe')]), '65': flag01(row[c('indNFCe')]) }
 
     if (!/^\d{6}$/.test(code)) { problems.push(`${where}: código não tem 6 dígitos`); continue }
@@ -168,6 +182,8 @@ export function parseItCatalog(sheets: XlsxSheet[]): ItCatalog {
     if (validUntil === 'INVALID') problems.push(`${where}: dFimVig inválida`)
     if (validFrom && validFrom !== 'INVALID' && validUntil && validUntil !== 'INVALID' && validUntil < validFrom) problems.push(`${where}: dFimVig antes de dIniVig`)
     if (!updatedAt || updatedAt === 'INVALID') problems.push(`${where}: DataAtualização ausente/inválida`)
+    if (ibsRed === null) problems.push(`${where}: pRedIBS "${str(row[c('pRedIBS')])}" não é percentual de 0 a 100 com até 2 casas`)
+    if (cbsRed === null) problems.push(`${where}: pRedCBS "${str(row[c('pRedCBS')])}" não é percentual de 0 a 100 com até 2 casas`)
     for (const [m, v] of Object.entries(inds)) if (v === null) problems.push(`${where}: indicador do modelo ${m} não é 0/1`)
     const k = `${code}|${validFrom}`
     if (seen.has(k)) { problems.push(`${where}: (código, dIniVig) repetido`); continue }
@@ -177,6 +193,7 @@ export function parseItCatalog(sheets: XlsxSheet[]): ItCatalog {
       code, cst, name, description,
       validFrom: validFrom ?? '', validUntil: validUntil && validUntil !== 'INVALID' ? validUntil : null,
       requiresRegularTaxation: regular === 1,
+      ibsReductionPct: ibsRed ?? 0, cbsReductionPct: cbsRed ?? 0,
       updatedAt: updatedAt ?? '',
       // Ordem EXPLÍCITA: chave numérica ('55') vem antes de 'SE' em Object.entries.
       models: (['SE', '55', '65'] as const).filter(m => inds[m] === 1),
